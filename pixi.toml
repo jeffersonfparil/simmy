@@ -9,3 +9,4 @@ version = "0.1.0"
 
 [dependencies]
 mojo = ">=1.0.0,<2"
+max-all = ">=26.5.0,<27"
