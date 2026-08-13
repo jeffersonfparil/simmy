@@ -1,4 +1,4 @@
-struct Array[dtype: DType = DType.float64](Movable):
+struct Array[dtype: DType = DType.float64](Movable, Writable):
     """
     Array type which can be used to define vectors, matrices, and tensors, in general.
     
@@ -57,3 +57,6 @@ struct Array[dtype: DType = DType.float64](Movable):
         self.data = data.copy()
         self.shape = shape.copy()
         self.strides = strides.copy()
+
+    def write_to(self, mut write: Some[Writer]):
+        print(self)
