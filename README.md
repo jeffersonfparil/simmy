@@ -16,3 +16,12 @@ Simulate genotype, phenotype, and environmental data for quantitative and popula
     + [ ] Panmictic mating
 - [ ] Environmental data simulation module
 - [ ] Phenomic data simulation module
+
+## Testing
+
+```shell
+cd simmy/
+pixi shell
+mojo src/simmy.mojo
+mojo run -I src/ test/array/test_array.mojo
+```
