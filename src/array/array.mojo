@@ -130,13 +130,14 @@ struct Array[dtype: DType = DType.float64](Movable, Writable):
                 j_indices = List(range(p))
             else:
                 j_indices.extend(List(range(p-3, p)))
-            for d in range(len(self.shape) - 1):
+            var ds: List[Int] = [0] if len(self.shape) < 3 else List(range(len(self.shape) - 2))
+            for d in ds:
+                var z: Int = 0 if len(self.shape) < 3 else d + 1
                 writer.write("\n")
                 if len(self.shape) > 2:
-                    var x = ", ".join(["0" for _ in range(d)])
-                    var y = ", ".join(["0" for _ in range(len(self.shape)-(d+3))])
-                    var z: Int = 0 if d == 0 else d + 1
-                    writer.write("(0:" + String(self.shape[0]) + ", 0:" + String(self.shape[1]) + x + String(", ", z) + ", " + y + ")\n")
+                    var x = ", ".join(["0" for _ in range(z)])
+                    var y = ", ".join(["0" for _ in range(len(self.shape)-(z+2))])
+                    writer.write("(0:" + String(self.shape[0]) + ", 0:" + String(self.shape[1]) + x + String(", ", d) + ", " + y + ")\n")
                 for i in i_indices:
                     if i == 0:
                         writer.write("⎡ ")
@@ -148,8 +149,7 @@ struct Array[dtype: DType = DType.float64](Movable, Writable):
                         if (not all_rows and i == 3) or (not all_cols and j == 3):
                             writer.write("... ")
                         else:
-                            var z: Int = 0 if d == 0 else d + 1
-                            var k: Int = i * self.strides[0] + j * self.strides[1] + z * self.strides[z]
+                            var k: Int = i * self.strides[0] + j * self.strides[1] + z
                             writer.write(self.data[k], " ")
                     if i == 0:
                         writer.write("⎤\n")

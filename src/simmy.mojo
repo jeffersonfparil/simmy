@@ -25,7 +25,7 @@ def main() raises:
     data = [Float64(x) for x in List(range(n * p * q))]
     shape = [n, p, q]
     arr = Array[DType.float64](data, shape)
-    print("----------\n4D Tensor:")
+    print("----------\n3D Tensor:")
     print(arr)
     # Tensor (4D)
     n = 10
@@ -35,5 +35,16 @@ def main() raises:
     data = [Float64(x) for x in List(range(n * p * q * r))]
     shape = [n, p, q, r]
     arr = Array[DType.float64](data, shape)
-    print("----------\n3D Tensor:")
+    print("----------\n4D Tensor:")
+    print(arr)
+    # Tensor (5D)
+    n = 10
+    p = 27
+    q = 6
+    r = 5
+    var s = 3
+    data = [Float64(x) for x in List(range(n * p * q * r * s))]
+    shape = [n, p, q, r, s]
+    arr = Array[DType.float64](data, shape)
+    print("----------\n5D Tensor:")
     print(arr)
