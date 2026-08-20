@@ -1,6 +1,11 @@
 [package]
 name = "simmy"
 version = "0.1.0"
+authors = ["Jeff Paril <https://github.com/jeffersonfparil>"]
 edition = "2024"
 
 [dependencies]
+anyhow = "1.0"
+wgpu = "30.0"
+pollster = "0.3"
+bytemuck = "1.25.2"
