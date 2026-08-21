@@ -1,4 +1,4 @@
-use crate::linalg::operations::MatrixOps;
+use crate::linalg::operations::{MatrixOps, TensorOps};
 use crate::linalg::tensor::GpuTensor;
 use bytemuck::{Pod, Zeroable};
 use wgpu::util::{BufferInitDescriptor, DeviceExt};
@@ -36,7 +36,7 @@ struct MatMulParams {
 }
 
 impl MatrixOps<'_> {
-    pub fn matmul(
+    pub fn multiply(
         &self,
         a: &GpuTensor,
         b: &GpuTensor,
@@ -157,6 +157,25 @@ impl MatrixOps<'_> {
     }
 }
 
+
+// TODO: implement...
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+struct TensorMulParams {
+}
+
+impl TensorOps<'_> {
+    pub fn multiply(
+        &self,
+        a: &GpuTensor,
+        b: &GpuTensor,
+    ) -> Result<GpuTensor> {
+        todo!("Implement for tensors of arbitrary ranks (as long as they are compatible) and along whichever dimension to sum over!")
+    }
+}
+
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -186,7 +205,7 @@ mod tests {
             ],
         )?;
         let ops = MatrixOps { ctx: &ctx };
-        let c = ops.matmul(&a, &b)
+        let c = ops.multiply(&a, &b)
             .expect("Matrix multiplication failed");
         assert_eq!(c.shape, vec![2, 2]);
         Ok(())
@@ -205,7 +224,7 @@ mod tests {
             &[1.0; 6],
         )?;
         let ops = MatrixOps { ctx: &ctx };
-        assert!(ops.matmul(&a, &b).is_err());
+        assert!(ops.multiply(&a, &b).is_err());
         Ok(())
     }
     #[test]
@@ -222,7 +241,7 @@ mod tests {
             &[1.0; 6],
         )?;
         let ops = MatrixOps { ctx: &ctx };
-        assert!(ops.matmul(&a, &b).is_err());
+        assert!(ops.multiply(&a, &b).is_err());
         Ok(())
     }
     #[test]
@@ -239,7 +258,7 @@ mod tests {
             &[1.0; 8],
         )?;
         let ops = MatrixOps { ctx: &ctx };
-        let result = ops.matmul(&a, &b);
+        let result = ops.multiply(&a, &b);
         assert!(result.is_err());
         Ok(())
     }
@@ -257,7 +276,7 @@ mod tests {
             &[1.0; 16],
         )?;
         let ops = MatrixOps { ctx: &ctx };
-        let c = ops.matmul(&a, &b)
+        let c = ops.multiply(&a, &b)
             .expect("Matrix multiplication failed");
         assert_eq!(c.shape, vec![4, 4]);
         Ok(())
@@ -276,7 +295,7 @@ mod tests {
             &[1.0; 21],
         )?;
         let ops = MatrixOps { ctx: &ctx };
-        let c = ops.matmul(&a, &b)
+        let c = ops.multiply(&a, &b)
             .expect("Matrix multiplication failed");
         assert_eq!(c.shape, vec![5, 7]);
         Ok(())
