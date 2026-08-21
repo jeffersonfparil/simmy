@@ -21,7 +21,7 @@ Simulate genotype, phenotype, and environmental data for quantitative and popula
 
 ```shell
 cd simmy/
-pixi shell
-mojo src/simmy.mojo
-mojo run -I src/ test/array/test_array.mojo
+time cargo test
+# time cargo test -- --show-output
+# time cargo run
 ```
