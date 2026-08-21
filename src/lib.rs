@@ -6,6 +6,7 @@ use linalg::tensor::GpuTensor;
 use linalg::kernel::GpuKernel;
 use linalg::operations::MatrixOps;
 
+// TODO: this were CLI arguments parsing will live...
 
 pub async fn run() -> Result<()> {
     // let gpu = GpuContext::new().await?;
@@ -23,7 +24,7 @@ pub async fn run() -> Result<()> {
     )?;
     println!("b: {}", &b);
     let ops = MatrixOps { ctx: &ctx };
-    let c = ops.matmul(&a, &b)?;
+    let c = ops.multiply(&a, &b)?;
     println!("c: {}", &c);
     Ok(())
 }
