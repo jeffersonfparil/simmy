@@ -4,12 +4,6 @@ version = "0.1.0"
 authors = ["Jeff Paril <https://github.com/jeffersonfparil>"]
 edition = "2024"
 
-[source.crates-io]
-replace-with = "vendor-sources"
-
-[source.vendor-sources]
-directory = "vendor"
-
 [dependencies]
 anyhow = "1.0"
 wgpu = "30.0"
