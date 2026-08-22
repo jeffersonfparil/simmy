@@ -2,9 +2,9 @@ pub mod linalg;
 
 use anyhow::Result;
 use linalg::context::GpuContext;
-use linalg::tensor::GpuTensor;
 use linalg::kernel::GpuKernel;
 use linalg::operations::MatrixOps;
+use linalg::tensor::GpuTensor;
 
 // TODO: this were CLI arguments parsing will live...
 
@@ -13,7 +13,7 @@ pub async fn run() -> Result<()> {
     println!("ctx: {}", ctx);
     let a = GpuTensor::from_f32(
         &ctx,
-        vec![2,3],
+        vec![2, 3],
         &(0..6).map(|x| x as f32).collect::<Vec<f32>>(),
     )?;
     println!("a: {}", &a);
