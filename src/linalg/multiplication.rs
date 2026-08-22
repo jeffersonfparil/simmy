@@ -152,7 +152,7 @@ impl MatrixOps<'_> {
 struct TensorMulParams {}
 
 impl TensorOps<'_> {
-    pub fn multiply(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
+    pub fn multiply(&self, _a: &GpuTensor, _b: &GpuTensor) -> Result<GpuTensor> {
         todo!(
             "Implement for tensors of arbitrary ranks (as long as they are compatible) and along whichever dimension to sum over!"
         )

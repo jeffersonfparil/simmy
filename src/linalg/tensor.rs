@@ -73,7 +73,7 @@ mod tests {
     #[test]
     fn creates_1d_tensor() -> Result<()> {
         let ctx = context();
-        let tensor = GpuTensor::from_f32(&ctx, vec![4], &vec![1.0f32, 2.0, 3.0, 4.0])?;
+        let tensor = GpuTensor::from_f32(&ctx, vec![4], &[1.0f32, 2.0, 3.0, 4.0])?;
         println!("tensor: {}", tensor);
         assert_eq!(tensor.shape, vec![4]);
         assert_eq!(
@@ -85,7 +85,7 @@ mod tests {
     #[test]
     fn creates_2d_tensor() -> Result<()> {
         let ctx = context();
-        let tensor = GpuTensor::from_f32(&ctx, vec![2, 3], &vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0])?;
+        let tensor = GpuTensor::from_f32(&ctx, vec![2, 3], &[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0])?;
         assert_eq!(tensor.shape, vec![2, 3]);
         assert_eq!(
             tensor.buffer.size(),
@@ -96,7 +96,7 @@ mod tests {
     #[test]
     fn creates_3d_tensor() -> Result<()> {
         let ctx = context();
-        let tensor = GpuTensor::from_f32(&ctx, vec![2, 3, 4], &vec![0.0f32; 24])?;
+        let tensor = GpuTensor::from_f32(&ctx, vec![2, 3, 4], &[0.0f32; 24])?;
         assert_eq!(tensor.shape, vec![2, 3, 4]);
         assert_eq!(
             tensor.buffer.size(),

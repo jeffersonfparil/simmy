@@ -1,5 +1,7 @@
 use crate::linalg::context::GpuContext;
 
+#[derive(Debug)]
+#[expect(dead_code)]
 pub struct GpuKernel {
     pipeline: wgpu::ComputePipeline,
 }
