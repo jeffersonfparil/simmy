@@ -9,8 +9,8 @@ use linalg::operations::MatrixOps;
 // TODO: this were CLI arguments parsing will live...
 
 pub async fn run() -> Result<()> {
-    // let gpu = GpuContext::new().await?;
     let ctx = pollster::block_on(GpuContext::new()).expect("Failed to create GPU context");
+    println!("ctx: {}", ctx);
     let a = GpuTensor::from_f32(
         &ctx,
         vec![2,3],

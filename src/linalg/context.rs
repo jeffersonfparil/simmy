@@ -1,5 +1,7 @@
 use anyhow::{Context, Result};
+use std::fmt;
 
+#[derive(Debug)]
 pub struct GpuContext {
     pub instance: wgpu::Instance,
     pub adapter: wgpu::Adapter,
@@ -7,13 +9,33 @@ pub struct GpuContext {
     pub queue: wgpu::Queue,
 }
 
+impl fmt::Display for GpuContext {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let info = self.adapter.get_info();
+        writeln!(f, "GPU Hardware Information:")?;
+        writeln!(f, "  Name:    {}", info.name)?;
+        writeln!(f, "  Type:    {:?}", info.device_type)?;
+        writeln!(f, "  Backend: {:?}", info.backend)?;
+        writeln!(f, "  Vendor:  {}", info.vendor)?;
+        write!(f,   "  Driver:  {} ({})", info.driver, info.driver_info)
+    }
+}
+
 impl GpuContext {
     pub async fn new() -> Result<Self> {
         let instance = wgpu::Instance::new(
             wgpu::InstanceDescriptor::new_without_display_handle()
         );
+        // let adapter = instance
+        //     .request_adapter(&Default::default())
+        //     .await
+        //     .context("No adapter")?;
+        // Update the adapter request to ask for high performance
         let adapter = instance
-            .request_adapter(&Default::default())
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                ..Default::default() // use the defaulkts for the other fields
+            })
             .await
             .context("No adapter")?;
         let (device, queue) = adapter
@@ -38,6 +60,7 @@ mod tests {
     #[test]
     fn creates_gpu_context() {
         let ctx = context();
+        println!("ctx: {}", ctx);
         let info = ctx.adapter.get_info();
         assert!(
             !info.name.is_empty(),
