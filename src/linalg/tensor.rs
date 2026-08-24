@@ -5,6 +5,32 @@ use std::fmt;
 use std::sync::mpsc::channel;
 use wgpu::{Buffer, util::{BufferInitDescriptor, DeviceExt}};
 
+/// GPU Tensor
+///
+/// * `shape` contains the size of each tensor dimension.
+/// * `strides` contains the storage stride of each dimension.
+/// * `offset` is the starting element within the underlying storage.
+/// * `buffer` contains the backing tensor data in GPU memory.
+///
+/// Tensors use a strided storage model, allowing multiple tensor views
+/// to reference the same underlying buffer without copying data.
+/// Operations such as slicing, transposition, reshaping, and tensor
+/// contraction can therefore be implemented by modifying tensor
+/// metadata rather than reallocating storage.
+///
+/// For example:
+///
+/// ```text
+/// shape   = [2, 3, 4]
+/// strides = [12, 4, 1]
+/// offset  = 0
+/// ```
+///
+/// describes a contiguous row-major tensor.
+///
+/// Note that the backing buffer may contain more data than is directly
+/// accessible through this tensor. This enables tensor views and
+/// sub-tensors to share storage with other tensors.
 #[derive(Debug)]
 pub struct GpuTensor {
     pub shape: Vec<u32>,
@@ -13,6 +39,39 @@ pub struct GpuTensor {
     pub buffer: wgpu::Buffer,
 }
 
+/// Parse and validate tensor layout parameters.
+///
+/// * `n` is the number of elements available in the backing storage.
+/// * `shape` defines the tensor dimensions.
+/// * `strides` defines the storage stride of each dimension.
+/// * `offset` is the starting element within the backing storage.
+///
+/// If `strides` is not supplied, contiguous row-major strides are
+/// generated automatically.
+/// 
+/// If `offset` is not supplied, an offset of `0` is used.
+///
+/// For example:
+/// ```text
+/// shape   = [2, 3, 4]
+/// strides = [12, 4, 1]
+/// ```
+///
+/// The function validates:
+/// * The tensor rank matches the stride rank.
+/// * The backing storage is large enough for the requested tensor view.
+/// * The offset lies within the backing storage.
+///
+/// Empty tensors (those containing a dimension of size zero) are
+/// permitted and require no storage.
+///
+/// # Returns
+/// Returns the normalized `(shape, strides, offset)` tuple.
+///
+/// # Errors
+/// Returns an error if:
+/// * `shape.len() != strides.len()`.
+/// * The backing storage is too small for the specified layout
 fn parse_tensor_params(n: u32, shape: Vec<u32>, strides: Option<Vec<u32>>, offset: Option<u32>) -> Result<(Vec<u32>, Vec<u32>, u32)> {
     let n: u32 = n.max(1);
     let strides: Vec<u32> = strides.unwrap_or_else(|| {
@@ -54,6 +113,24 @@ fn parse_tensor_params(n: u32, shape: Vec<u32>, strides: Option<Vec<u32>>, offse
 }
 
 impl GpuTensor {
+    /// Construct a tensor from host memory.
+    ///
+    /// * `ctx` provides access to the GPU device.
+    /// * `data` is the backing tensor storage to upload.
+    /// * `shape` defines the tensor dimensions.
+    /// * `strides` defines the storage stride of each dimension.
+    /// * `offset` is the starting element within the backing storage.
+    ///
+    /// If `strides` is not provided, contiguous row-major strides are
+    /// generated automatically.
+    ///
+    /// If `offset` is not provided, an offset of `0` is used.
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// * The shape and strides have different ranks.
+    /// * The backing storage is too small for the specified layout.
+    /// * The offset falls outside the backing storage.
     pub fn from_f32(ctx: &GpuContext, data: &[f32], shape: Vec<u32>, strides: Option<Vec<u32>>, offset: Option<u32>) -> Result<Self> {
         let (shape, strides, offset) = parse_tensor_params(data.len() as u32, shape, strides, offset)?;
         let buffer: Buffer = ctx.device.create_buffer_init(&BufferInitDescriptor {
@@ -66,12 +143,46 @@ impl GpuTensor {
         Ok(Self { shape, strides, offset, buffer })
     }
 
+    /// Construct a tensor view from an existing GPU buffer.
+    ///
+    /// * `buffer` is the backing GPU storage.
+    /// * `shape` defines the tensor dimensions.
+    /// * `strides` defines the storage stride of each dimension.
+    /// * `offset` is the starting element within the backing storage.
+    ///
+    /// If `strides` is not provided, contiguous row-major strides are
+    /// generated automatically.
+    ///
+    /// If `offset` is not provided, an offset of `0` is used.
+    ///
+    /// The buffer is assumed to contain `f32` elements.
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// * The shape and strides have different ranks.
+    /// * The buffer is too small for the specified layout.
+    /// * The offset falls outside the buffer.
     pub fn from_buffer(buffer: Buffer, shape: Vec<u32>, strides: Option<Vec<u32>>, offset: Option<u32>) -> Result<Self> {
         let n: u32 = ((buffer.size() as usize) / std::mem::size_of::<f32>()) as u32;
         let (shape, strides, offset) = parse_tensor_params(n, shape, strides, offset)?;
         Ok(Self { shape, strides, offset, buffer })
     }
 
+    /// Copy tensor data from GPU memory into a host vector.
+    ///
+    ///
+    /// * `self` is the tensor whose backing storage will be read.
+    /// * `ctx` provides access to the GPU device and queue.
+    ///
+    /// # Returns
+    /// Returns the contents of the backing GPU buffer as a vector of `f32`
+    /// values.
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// * The temporary readback buffer cannot be mapped.
+    /// * GPU execution fails during readback.
+    /// * The mapped data cannot be interpreted as `f32` values.
     pub fn to_vec_f32(&self, ctx: &GpuContext) -> Result<Vec<f32>> {
         let size = self.buffer.size();
         let temp_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
@@ -101,7 +212,11 @@ impl GpuTensor {
     }
 }
 
-// TODO: implement printing
+/// Displays the tensor metadata, i.e.:
+/// * `Shape` - the dimensions of the tensor.
+/// * `Strides` - the storage stride of each dimension.
+/// * `Offset` - the starting element within the backing storage.
+/// * `Buffer Size` - the size of the underlying GPU buffer in bytes.
 impl fmt::Display for GpuTensor {
     fn fmt(
         &self,
