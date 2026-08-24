@@ -2,6 +2,7 @@ use crate::linalg::operations::{MatrixOps, TensorOps};
 use crate::linalg::tensor::GpuTensor;
 use anyhow::{Result, ensure};
 use bytemuck::{Pod, Zeroable};
+use wgpu::Buffer;
 use wgpu::util::{BufferInitDescriptor, DeviceExt};
 
 #[repr(C)]
@@ -77,7 +78,7 @@ impl MatrixOps<'_> {
             usage: wgpu::BufferUsages::UNIFORM,
         });
         let c_elements = n * k;
-        let c_buffer = self.ctx.device.create_buffer(&wgpu::BufferDescriptor {
+        let c_buffer: Buffer = self.ctx.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("matmul-output"),
             size: (c_elements as u64) * (std::mem::size_of::<f32>() as u64),
             usage: wgpu::BufferUsages::STORAGE
@@ -141,6 +142,8 @@ impl MatrixOps<'_> {
         self.ctx.queue.submit(std::iter::once(encoder.finish()));
         Ok(GpuTensor {
             shape: vec![n, k],
+            strides: None,
+            ofset: None,
             buffer: c_buffer,
         })
     }

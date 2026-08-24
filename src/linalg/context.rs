@@ -1,6 +1,17 @@
 use anyhow::{Context, Result};
 use std::fmt;
 
+/// GPU Context
+/// 
+/// Owns the GPU runtime state required in building and manipulating tensors including kernel operations.
+/// This is intended to be created once and then shared by tensors, kernels, and other ternsor operations.
+/// 
+/// * `instance` discovers the GPU backend and adapters.
+/// * `adapter` represents the selected physical GPU.
+/// * `device` is the logical connection used to create GPU resources.
+/// * `queue` is used to submit work to the GPU.
+/// 
+/// Note that this can represent a CPU, if a dedicate physical GPU hardware does not exist, i.e. CPU-backed Vulkan implementation is used.
 #[derive(Debug)]
 pub struct GpuContext {
     pub instance: wgpu::Instance,
@@ -9,6 +20,15 @@ pub struct GpuContext {
     pub queue: wgpu::Queue,
 }
 
+/// Print GPU context information
+///
+/// * `Name` is the adapter name reported by the backend.
+/// * `Type` indicates whether the adapter is a CPU, integrated GPU,
+/// discrete GPU, virtual GPU, or other device.
+/// * `Backend` identifies the WGPU backend in use (e.g. Vulkan,
+/// Metal, DirectX, or OpenGL).
+/// * `Vendor` is the hardware vendor identifier.
+/// * `Driver` contains the driver name and additional driver details.
 impl fmt::Display for GpuContext {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let info = self.adapter.get_info();
@@ -22,17 +42,35 @@ impl fmt::Display for GpuContext {
 }
 
 impl GpuContext {
+    /// Initialize a GPU context.
+    ///
+    /// Discovers the available compute backends, selects an adapter,
+    /// creates a logical device, and obtains a command queue for
+    /// submitting work.
+    ///
+    /// The adapter request is configured to prefer high-performance
+    /// hardware when available. Depending on the system configuration,
+    /// the selected adapter may still be:
+    /// * A discrete GPU
+    /// * An integrated GPU
+    /// * A virtual GPU
+    /// * A CPU-backed implementation such as Vulkan Lavapipe
+    ///
+    /// The resulting context owns all WGPU state required to allocate
+    /// tensors, compile kernels, and execute tensor operations.
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// * No suitable adapter can be found.
+    /// * A logical device cannot be created from the selected adapter.
+    /// * The underlying graphics or compute backend fails to initialize.
     pub async fn new() -> Result<Self> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-        // let adapter = instance
-        //     .request_adapter(&Default::default())
-        //     .await
-        //     .context("No adapter")?;
-        // Update the adapter request to ask for high performance
+        // Request for the high performance adapter which should detect a dedicated GPU if they exist
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
-                ..Default::default() // use the defaulkts for the other fields
+                ..Default::default() // use the defaults for the other fields
             })
             .await
             .context("No adapter")?;
