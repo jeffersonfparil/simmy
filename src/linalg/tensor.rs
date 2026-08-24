@@ -1,4 +1,5 @@
 use crate::linalg::context::GpuContext;
+use std::sync::Arc;
 use anyhow::{Result, ensure};
 use bytemuck::cast_slice;
 use std::fmt;
@@ -13,30 +14,34 @@ use wgpu::{Buffer, util::{BufferInitDescriptor, DeviceExt}};
 /// * `buffer` contains the backing tensor data in GPU memory.
 ///
 /// Tensors use a strided storage model, allowing multiple tensor views
-/// to reference the same underlying buffer without copying data.
+/// to reference the same underlying storage without copying data.
 /// Operations such as slicing, transposition, reshaping, and tensor
 /// contraction can therefore be implemented by modifying tensor
 /// metadata rather than reallocating storage.
 ///
-/// For example:
+/// The backing buffer is reference counted via `Arc`, allowing multiple
+/// tensors and tensor views to safely share ownership of the same GPU
+/// allocation. Creating a tensor view therefore creates a new
+/// `GpuTensor` instance with its own shape, strides, and offset while
+/// reusing the existing GPU storage.
 ///
+/// For example:
 /// ```text
 /// shape   = [2, 3, 4]
 /// strides = [12, 4, 1]
 /// offset  = 0
 /// ```
-///
 /// describes a contiguous row-major tensor.
 ///
 /// Note that the backing buffer may contain more data than is directly
 /// accessible through this tensor. This enables tensor views and
-/// sub-tensors to share storage with other tensors.
+/// sub-tensors to share storage with one another while avoiding
 #[derive(Debug)]
 pub struct GpuTensor {
     pub shape: Vec<u32>,
     pub strides: Vec<u32>,
     pub offset: u32,
-    pub buffer: wgpu::Buffer,
+    pub buffer: Arc<wgpu::Buffer>,
 }
 
 /// Parse and validate tensor layout parameters.
@@ -133,13 +138,14 @@ impl GpuTensor {
     /// * The offset falls outside the backing storage.
     pub fn from_f32(ctx: &GpuContext, data: &[f32], shape: Vec<u32>, strides: Option<Vec<u32>>, offset: Option<u32>) -> Result<Self> {
         let (shape, strides, offset) = parse_tensor_params(data.len() as u32, shape, strides, offset)?;
-        let buffer: Buffer = ctx.device.create_buffer_init(&BufferInitDescriptor {
-            label: None,
-            contents: cast_slice(data),
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
-        });
+        let buffer: Arc<Buffer> = Arc::new(
+            ctx.device.create_buffer_init(&BufferInitDescriptor {
+                label: None,
+                contents: cast_slice(data),
+                usage: wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_SRC
+                    | wgpu::BufferUsages::COPY_DST,
+        }));
         Ok(Self { shape, strides, offset, buffer })
     }
 
@@ -162,7 +168,7 @@ impl GpuTensor {
     /// * The shape and strides have different ranks.
     /// * The buffer is too small for the specified layout.
     /// * The offset falls outside the buffer.
-    pub fn from_buffer(buffer: Buffer, shape: Vec<u32>, strides: Option<Vec<u32>>, offset: Option<u32>) -> Result<Self> {
+    pub fn from_buffer(buffer: Arc<Buffer>, shape: Vec<u32>, strides: Option<Vec<u32>>, offset: Option<u32>) -> Result<Self> {
         let n: u32 = ((buffer.size() as usize) / std::mem::size_of::<f32>()) as u32;
         let (shape, strides, offset) = parse_tensor_params(n, shape, strides, offset)?;
         Ok(Self { shape, strides, offset, buffer })
