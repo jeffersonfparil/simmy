@@ -1,4 +1,4 @@
-use crate::linalg::operations::{MatrixOps, Params, TensorOps};
+use crate::linalg::operations::{MatrixOps, MatrixParams, TensorOps};
 use crate::linalg::tensor::GpuTensor;
 use anyhow::{Result, ensure};
 use bytemuck::{Pod, Zeroable};
@@ -43,7 +43,7 @@ use wgpu::util::{BufferInitDescriptor, DeviceExt};
 /// interpreted by WGSL shaders.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
-pub struct MatMulParams {
+pub struct MatrixMulParams {
     pub n: u32,
     pub p: u32,
     pub k: u32,
@@ -106,7 +106,7 @@ impl MatrixOps<'_> {
         let n = a.shape[0];
         let p = a.shape[1];
         let k = b.shape[1];
-        let params = MatMulParams {
+        let params = MatrixMulParams {
             n,
             p,
             k,
@@ -122,7 +122,7 @@ impl MatrixOps<'_> {
         };
         let kernel_source: &str = include_str!("wgsl/matmul.wgsl");
         let c_buffer =
-            self.execute_binary_kernel(Params::Multiplication(params), kernel_source, a, b)?;
+            self.execute_binary_kernel(MatrixParams::Multiplication(params), kernel_source, a, b)?;
         GpuTensor::from_buffer(Arc::new(c_buffer), vec![n, k], None, None)
     }
 }
