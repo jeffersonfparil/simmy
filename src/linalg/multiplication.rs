@@ -1,4 +1,4 @@
-use crate::linalg::operations::{MatrixOps, MatrixParams, TensorOps};
+use crate::linalg::operations::{MatrixOps, MatrixParams, TensorOps, TensorParams};
 use crate::linalg::tensor::GpuTensor;
 use anyhow::{Result, ensure};
 use bytemuck::{Pod, Zeroable};
@@ -59,6 +59,33 @@ pub struct MatrixMulParams {
     pub c_offset: u32,
     pub c_row_stride: u32,
     pub c_col_stride: u32,
+}
+
+const MAX_RANK: usize = 8;
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct TensorMulParams {
+    pub a_rank: u32,
+    pub b_rank: u32,
+    pub c_rank: u32,
+
+    pub contraction_rank: u32,
+
+    pub c_elements: u32,
+
+    pub a_shape: [u32; MAX_RANK],
+    pub b_shape: [u32; MAX_RANK],
+    pub c_shape: [u32; MAX_RANK],
+
+    pub a_offset: u32,
+    pub a_strides: [u32; MAX_RANK],
+
+    pub b_offset: u32,
+    pub b_strides: [u32; MAX_RANK],
+
+    pub c_offset: u32,
+    pub c_strides: [u32; MAX_RANK],
 }
 
 impl MatrixOps<'_> {
@@ -127,16 +154,9 @@ impl MatrixOps<'_> {
     }
 }
 
-// TODO: implement...
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Pod, Zeroable)]
-struct TensorMulParams {}
-
 impl TensorOps<'_> {
-    pub fn multiply(&self, _a: &GpuTensor, _b: &GpuTensor) -> Result<GpuTensor> {
-        todo!(
-            "Implement for tensors of arbitrary ranks (as long as they are compatible) and along whichever dimension to sum over!"
-        )
+    pub fn multiply(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
+        todo!("Implement after operations.rs and addition.rs!")
     }
 }
 

@@ -1,6 +1,6 @@
 use crate::linalg::addition::{MatrixAddParams, TensorAddParams};
 use crate::linalg::context::GpuContext;
-use crate::linalg::multiplication::MatrixMulParams;
+use crate::linalg::multiplication::{MatrixMulParams, TensorMulParams};
 use crate::linalg::tensor::GpuTensor;
 use anyhow::Result;
 use wgpu::Buffer;
@@ -50,9 +50,19 @@ pub enum MatrixParams {
     Multiplication(MatrixMulParams),
 }
 
+/// Tensor Kernel Parameter Payload
+///
+/// Each variant contains the shape, stride, offset, and execution
+/// metadata required by a specific tensor operation and is intended
+/// to be transferred directly to GPU memory before kernel dispatch.
+///
+/// * `Addition` contains parameters for elementwise tensor addition:
+/// * `Multiplication` contains parameters for tensor multiplication
+///   or contraction operations:
+/// * ... more to come ...
 pub enum TensorParams {
     Addition(TensorAddParams),
-    // Multiplication(TensorMulParams),
+    Multiplication(TensorMulParams),
 }
 
 impl MatrixOps<'_> {
@@ -181,6 +191,29 @@ impl MatrixOps<'_> {
 }
 
 impl TensorOps<'_> {
+    /// Execute a binary tensor operation on the GPU.
+    ///
+    /// * `params` contains operation-specific tensor metadata.
+    /// * `kernel_source` is the WGSL source code implementing the kernel.
+    /// * `a` is the left-hand input tensor.
+    /// * `b` is the right-hand input tensor.
+    ///
+    /// # Returns
+    /// Returns the GPU buffer containing the result tensor data.
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// * The parameter buffer cannot be created.
+    /// * The WGSL kernel fails compilation or validation.
+    /// * GPU resources cannot be allocated.
+    /// * The compute pipeline or bind group cannot be created.
+    /// * Work submission to the compute device fails.
+    ///
+    /// # Details
+    /// A more general implementation than `MatrixOps`, supporting
+    /// arbitrary-rank tensors rather than only rank-2 matrices.
+    /// This flexibility may introduce additional indexing overhead and
+    /// can be slower than specialized matrix kernels.
     pub fn execute_binary_kernel(
         &self,
         params: TensorParams,
@@ -196,6 +229,14 @@ impl TensorOps<'_> {
                     usage: wgpu::BufferUsages::STORAGE,
                 }),
                 par.n_elements,
+            ),
+            TensorParams::Multiplication(par) => (
+                self.ctx.device.create_buffer_init(&BufferInitDescriptor {
+                    label: Some("params"),
+                    contents: bytemuck::bytes_of(&par),
+                    usage: wgpu::BufferUsages::STORAGE,
+                }),
+                par.c_elements,
             ),
         };
         let c_elements = n;
