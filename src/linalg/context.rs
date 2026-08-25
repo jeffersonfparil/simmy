@@ -2,15 +2,15 @@ use anyhow::{Context, Result};
 use std::fmt;
 
 /// GPU Context
-/// 
+///
 /// Owns the GPU runtime state required in building and manipulating tensors including kernel operations.
 /// This is intended to be created once and then shared by tensors, kernels, and other ternsor operations.
-/// 
+///
 /// * `instance` discovers the GPU backend and adapters.
 /// * `adapter` represents the selected physical GPU.
 /// * `device` is the logical connection used to create GPU resources.
 /// * `queue` is used to submit work to the GPU.
-/// 
+///
 /// Note that this can represent a CPU, if a dedicate physical GPU hardware does not exist, i.e. CPU-backed Vulkan implementation is used.
 #[derive(Debug)]
 pub struct GpuContext {
