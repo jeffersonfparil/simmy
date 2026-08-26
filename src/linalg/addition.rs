@@ -1,4 +1,3 @@
-use crate::linalg::kernel;
 use crate::linalg::operations::{MatrixOps, MatrixParams, TensorOps, TensorParams};
 use crate::linalg::tensor::GpuTensor;
 use anyhow::{Result, ensure};
@@ -167,12 +166,12 @@ impl TensorOps<'_> {
     ///
     /// The operation is executed using a WGSL compute kernel that indexes
     /// tensor elements using shape, stride, and offset metadata. As a
-    /// result, the input tensors may represent:
+    /// result, the input tensors may represent without requiring specialized
+    /// kernels for each layout:
     /// * Contiguous tensors.
     /// * Tensor views.
     /// * Tensor slices.
     /// * Tensor transposes.
-    /// without requiring specialized kernels for each layout.
     pub fn add(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
         ensure!(
             a.shape == b.shape,
@@ -189,11 +188,9 @@ impl TensorOps<'_> {
         let mut a_strides = [0u32; MAX_RANK];
         let mut b_strides = [0u32; MAX_RANK];
         let mut c_strides = [0u32; MAX_RANK];
-        for i in 0..a.shape.len() {
-            shape[i] = a.shape[i];
-            a_strides[i] = a.strides[i];
-            b_strides[i] = b.strides[i];
-        }
+        shape[..a.shape.len()].copy_from_slice(&a.shape[..]);
+        a_strides[..a.shape.len()].copy_from_slice(&a.strides[..]);
+        b_strides[..a.shape.len()].copy_from_slice(&b.strides[..]);
         let mut stride = 1u32;
         for i in (0..a.shape.len()).rev() {
             c_strides[i] = stride;

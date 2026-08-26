@@ -1,4 +1,4 @@
-use simmy::linalg::addition::{MatrixAddParams, TensorAddParams};
+use simmy::linalg::addition::TensorAddParams;
 use simmy::linalg::multiplication::MatrixMulParams;
 use simmy::run;
 

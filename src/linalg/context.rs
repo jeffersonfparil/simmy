@@ -24,9 +24,9 @@ pub struct GpuContext {
 ///
 /// * `Name` is the adapter name reported by the backend.
 /// * `Type` indicates whether the adapter is a CPU, integrated GPU,
-/// discrete GPU, virtual GPU, or other device.
+///   discrete GPU, virtual GPU, or other device.
 /// * `Backend` identifies the WGPU backend in use (e.g. Vulkan,
-/// Metal, DirectX, or OpenGL).
+///   Metal, DirectX, or OpenGL).
 /// * `Vendor` is the hardware vendor identifier.
 /// * `Driver` contains the driver name and additional driver details.
 impl fmt::Display for GpuContext {

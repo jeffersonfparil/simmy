@@ -104,30 +104,23 @@ struct TensorMulParams {
     a_rank: u32,
     b_rank: u32,
     c_rank: u32,
-
     // Number of contracted axis pairs.
     contraction_rank: u32,
-
     // Total logical elements in C.
     c_elements: u32,
-
     // Logical tensor shapes.
     a_shape: array<u32, 8>,
     b_shape: array<u32, 8>,
     c_shape: array<u32, 8>,
-
     // Storage layout of A.
     a_offset: u32,
     a_strides: array<u32, 8>,
-
     // Storage layout of B.
     b_offset: u32,
     b_strides: array<u32, 8>,
-
     // Storage layout of C.
     c_offset: u32,
     c_strides: array<u32, 8>,
-
     // Contracted axes.
     a_contract_axes: array<u32, 8>,
     b_contract_axes: array<u32, 8>,
@@ -154,20 +147,15 @@ fn tensor_coords(
     rank: u32,
     shape: array<u32, 8>,
 ) -> array<u32, 8> {
-
     var coords: array<u32, 8>;
-
     var idx = linear_idx;
-
     // Recover coordinates from fastest-moving axis to
     // slowest-moving axis.
     for (var axis = i32(rank) - 1; axis >= 0; axis--) {
         let i = u32(axis);
-
         coords[i] = idx % shape[i];
         idx = idx / shape[i];
     }
-
     return coords;
 }
 
@@ -197,13 +185,10 @@ fn storage_index(
     offset: u32,
     strides: array<u32, 8>,
 ) -> u32 {
-
     var idx = offset;
-
     for (var axis = 0u; axis < rank; axis++) {
         idx += coords[axis] * strides[axis];
     }
-
     return idx;
 }
 
@@ -227,11 +212,9 @@ fn main(
 ) {
     // One thread computes one logical element of C.
     let c_linear_idx = gid.x;
-
     if (c_linear_idx >= params.c_elements) {
         return;
     }
-
     ///////////////////////////////////////////////////////////////////////
     // Step 1.
     //
@@ -251,7 +234,6 @@ fn main(
         params.c_rank,
         params.c_shape,
     );
-
     ///////////////////////////////////////////////////////////////////////
     // Step 2.
     //
@@ -260,7 +242,6 @@ fn main(
     ///////////////////////////////////////////////////////////////////////
     var a_coords: array<u32, 8>;
     var b_coords: array<u32, 8>;
-
     ///////////////////////////////////////////////////////////////////////
     // Step 3.
     //
@@ -273,47 +254,36 @@ fn main(
     // C's coordinates can be distributed back into A and B.
     ///////////////////////////////////////////////////////////////////////
     var c_axis = 0u;
-
     for (var a_axis = 0u; a_axis < params.a_rank; a_axis++) {
-
         var contracted = false;
-
         for (var i = 0u;
              i < params.contraction_rank;
              i++) {
-
             if (a_axis == params.a_contract_axes[i]) {
                 contracted = true;
                 break;
             }
         }
-
         if (!contracted) {
             a_coords[a_axis] = c_coords[c_axis];
             c_axis += 1u;
         }
     }
-
     for (var b_axis = 0u; b_axis < params.b_rank; b_axis++) {
-
         var contracted = false;
-
         for (var i = 0u;
              i < params.contraction_rank;
              i++) {
-
             if (b_axis == params.b_contract_axes[i]) {
                 contracted = true;
                 break;
             }
         }
-
         if (!contracted) {
             b_coords[b_axis] = c_coords[c_axis];
             c_axis += 1u;
         }
     }
-
     ///////////////////////////////////////////////////////////////////////
     // Step 4.
     //
@@ -329,18 +299,14 @@ fn main(
     //
     ///////////////////////////////////////////////////////////////////////
     var contract_elements = 1u;
-
     for (var i = 0u;
          i < params.contraction_rank;
          i++) {
-
         let a_axis =
             params.a_contract_axes[i];
-
         contract_elements *=
             params.a_shape[a_axis];
     }
-
     ///////////////////////////////////////////////////////////////////////
     // Step 5.
     //
@@ -350,44 +316,32 @@ fn main(
     //
     ///////////////////////////////////////////////////////////////////////
     var sum = 0.0;
-
     for (var contract_linear = 0u;
          contract_linear < contract_elements;
          contract_linear++) {
-
         ///////////////////////////////////////////////////////////////////
         // Decode one point in the contraction subspace.
         ///////////////////////////////////////////////////////////////////
         var tmp = contract_linear;
-
         for (var i = i32(params.contraction_rank) - 1;
              i >= 0;
              i--) {
-
             let contract_axis = u32(i);
-
             let a_axis =
                 params.a_contract_axes[contract_axis];
-
             let b_axis =
                 params.b_contract_axes[contract_axis];
-
             let extent =
                 params.a_shape[a_axis];
-
             let coord =
                 tmp % extent;
-
             tmp =
                 tmp / extent;
-
             a_coords[a_axis] =
                 coord;
-
             b_coords[b_axis] =
                 coord;
         }
-
         ///////////////////////////////////////////////////////////////////
         // Convert tensor coordinates into backing-buffer locations.
         ///////////////////////////////////////////////////////////////////
@@ -397,20 +351,17 @@ fn main(
             params.a_offset,
             params.a_strides,
         );
-
         let b_idx = storage_index(
             b_coords,
             params.b_rank,
             params.b_offset,
             params.b_strides,
         );
-
         ///////////////////////////////////////////////////////////////////
         // Accumulate contribution from this contraction coordinate.
         ///////////////////////////////////////////////////////////////////
         sum += A[a_idx] * B[b_idx];
     }
-
     ///////////////////////////////////////////////////////////////////////
     // Step 6.
     //
@@ -422,6 +373,5 @@ fn main(
         params.c_offset,
         params.c_strides,
     );
-
     C[c_idx] = sum;
 }

@@ -3,8 +3,6 @@ use crate::linalg::tensor::GpuTensor;
 use anyhow::{Result, ensure};
 use bytemuck::{Pod, Zeroable};
 use std::sync::Arc;
-use wgpu::Buffer;
-use wgpu::util::{BufferInitDescriptor, DeviceExt};
 
 /// Matrix Multiplication Parameters
 ///
@@ -97,71 +95,28 @@ pub const MAX_RANK: usize = 8;
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub struct TensorMulParams {
-    /// Rank of A.
     pub a_rank: u32,
-
-    /// Rank of B.
     pub b_rank: u32,
-
-    /// Rank of C.
     pub c_rank: u32,
 
-    /// Number of contracted axis pairs.
-    ///
-    /// Example:
-    ///
-    /// ```text
-    /// A[a,b,c,d]
-    /// B[c,d,e,f]
-    ///
-    /// contraction_rank = 2
-    /// ```
     pub contraction_rank: u32,
 
-    /// Total logical elements in C.
     pub c_elements: u32,
 
-    /// Logical shape of A.
     pub a_shape: [u32; MAX_RANK],
-
-    /// Logical shape of B.
     pub b_shape: [u32; MAX_RANK],
-
-    /// Logical shape of C.
     pub c_shape: [u32; MAX_RANK],
 
-    /// Storage layout of A.
     pub a_offset: u32,
     pub a_strides: [u32; MAX_RANK],
 
-    /// Storage layout of B.
     pub b_offset: u32,
     pub b_strides: [u32; MAX_RANK],
 
-    /// Storage layout of C.
     pub c_offset: u32,
     pub c_strides: [u32; MAX_RANK],
 
-    /// Axes of A participating in the contraction.
-    ///
-    /// Example:
-    ///
-    /// ```text
-    /// A[a,b,c,d]
-    ///        ^ ^
-    ///        2 3
-    /// ```
     pub a_contract_axes: [u32; MAX_RANK],
-
-    /// Axes of B participating in the contraction.
-    ///
-    /// Example:
-    ///
-    /// ```text
-    /// B[c,d,e,f]
-    ///   ^ ^
-    ///   0 1
-    /// ```
     pub b_contract_axes: [u32; MAX_RANK],
 }
 
@@ -243,20 +198,12 @@ impl TensorOps<'_> {
             a_contract_axes.len() == b_contract_axes.len(),
             "Contraction axis count mismatch"
         );
-
         let contraction_rank = a_contract_axes.len();
-
         ensure!(a.shape.len() <= MAX_RANK, "A rank exceeds MAX_RANK");
-
         ensure!(b.shape.len() <= MAX_RANK, "B rank exceeds MAX_RANK");
-
-        //
-        // Validate contracted dimensions.
-        //
         for i in 0..contraction_rank {
             let a_axis = a_contract_axes[i];
             let b_axis = b_contract_axes[i];
-
             ensure!(
                 a.shape[a_axis] == b.shape[b_axis],
                 "Contracted dimensions must match: \
@@ -267,118 +214,71 @@ impl TensorOps<'_> {
                 b.shape[b_axis],
             );
         }
-
-        //
         // Build output shape:
-        //
         // C = A free axes + B free axes
-        //
         let mut c_shape = Vec::new();
-
         for axis in 0..a.shape.len() {
             if !a_contract_axes.contains(&axis) {
                 c_shape.push(a.shape[axis]);
             }
         }
-
         for axis in 0..b.shape.len() {
             if !b_contract_axes.contains(&axis) {
                 c_shape.push(b.shape[axis]);
             }
         }
-
         ensure!(c_shape.len() <= MAX_RANK, "Result rank exceeds MAX_RANK");
-
-        //
-        // Convert shapes.
-        //
+        // Convert shapes
         let mut a_shape = [0u32; MAX_RANK];
         let mut b_shape = [0u32; MAX_RANK];
         let mut c_shape_arr = [0u32; MAX_RANK];
-
-        for i in 0..a.shape.len() {
-            a_shape[i] = a.shape[i];
-        }
-
-        for i in 0..b.shape.len() {
-            b_shape[i] = b.shape[i];
-        }
-
-        for i in 0..c_shape.len() {
-            c_shape_arr[i] = c_shape[i];
-        }
-
-        //
-        // Convert strides.
-        //
+        a_shape[..a.shape.len()].copy_from_slice(&a.shape[..]);
+        b_shape[..b.shape.len()].copy_from_slice(&b.shape[..]);
+        c_shape_arr[..c_shape.len()].copy_from_slice(&c_shape[..]);
+        // Convert strides
         let mut a_strides = [0u32; MAX_RANK];
         let mut b_strides = [0u32; MAX_RANK];
         let mut c_strides = [0u32; MAX_RANK];
-
-        for i in 0..a.strides.len() {
-            a_strides[i] = a.strides[i];
-        }
-
-        for i in 0..b.strides.len() {
-            b_strides[i] = b.strides[i];
-        }
-
-        //
-        // Create contiguous output strides.
-        //
+        a_strides[..a.strides.len()].copy_from_slice(&a.strides[..]);
+        b_strides[..b.strides.len()].copy_from_slice(&b.strides[..]);
+        // Create contiguous output strides
         let mut stride = 1u32;
-
         for i in (0..c_shape.len()).rev() {
             c_strides[i] = stride;
             stride *= c_shape[i];
         }
-
-        //
-        // Contract axes.
-        //
+        // Contract axes
         let mut a_contract = [0u32; MAX_RANK];
         let mut b_contract = [0u32; MAX_RANK];
-
         for i in 0..contraction_rank {
             a_contract[i] = a_contract_axes[i] as u32;
             b_contract[i] = b_contract_axes[i] as u32;
         }
-
         let c_elements = c_shape.iter().copied().product::<u32>();
-
         let params = TensorMulParams {
             a_rank: a.shape.len() as u32,
             b_rank: b.shape.len() as u32,
             c_rank: c_shape.len() as u32,
-
             contraction_rank: contraction_rank as u32,
-
             c_elements,
-
             a_shape,
             b_shape,
             c_shape: c_shape_arr,
-
             a_offset: a.offset,
             a_strides,
-
             b_offset: b.offset,
             b_strides,
-
             c_offset: 0,
             c_strides,
-
             a_contract_axes: a_contract,
             b_contract_axes: b_contract,
         };
-
         let buffer = self.execute_binary_kernel(
             TensorParams::Multiplication(params),
             include_str!("wgsl/tenmul.wgsl"),
             a,
             b,
         )?;
-
         GpuTensor::from_buffer(Arc::new(buffer), c_shape, None, None)
     }
 }

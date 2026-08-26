@@ -101,7 +101,7 @@ fn parse_tensor_params(
         shape.len() == strides.len(),
         "The shape and strides are incompatible!"
     );
-    let required_len = if shape.iter().any(|&x| x == 0) {
+    let required_len = if shape.contains(&0) {
         0
     } else {
         shape
