@@ -1,106 +1,210 @@
+///////////////////////////////////////////////////////////////////////////////
+// Generic Tensor Contraction Kernel
+//
+// ELI5
+// ----
+// Matrix multiplication computes:
+//
+//     C[i,j] = Σk A[i,k] * B[k,j]
+//
+// For every output element C[i,j], we:
+//
+// 1. Pick a row from A.
+// 2. Pick a column from B.
+// 3. Multiply matching values.
+// 4. Add (sum) the results.
+//
+// The shared dimension k disappears because it is summed over.
+//
+// Tensor contraction is exactly the same idea, but generalized from
+// matrices (rank-2 tensors) to tensors of arbitrary rank.
+//
+// Example matrix multiplication:
+//
+//     A[m,k]
+//     B[k,n]
+//
+//     C[m,n]
+//
+// We contract:
+//
+//     A axis 1
+//     B axis 0
+//
+// Example tensor contraction:
+//
+//     A[a,b,c,d]
+//     B[c,d,e,f]
+//
+//     C[a,b,e,f]
+//
+// We contract:
+//
+//     A axes [2,3]
+//     B axes [0,1]
+//
+// The contracted dimensions (c,d) disappear from the result because
+// we sum over them, just like k disappears during matrix multiplication.
+//
+// Core Principle
+// --------------
+// Every output element of C is computed independently:
+//
+//     C[free_axes]
+//
+// We:
+//
+// 1. Decode which logical element of C this thread owns.
+// 2. Recover the corresponding coordinates in A and B for all
+//    non-contracted ("free") axes.
+// 3. Enumerate every coordinate in the contraction subspace.
+// 4. Read matching elements from A and B.
+// 5. Accumulate:
+//
+//        sum += A[...] * B[...]
+//
+// 6. Write the final sum into C.
+//
+// Unlike matrix multiplication, this kernel:
+//
+// * Supports arbitrary tensor rank.
+// * Supports arbitrary contraction axes.
+// * Supports tensor views.
+// * Supports tensor slices.
+// * Supports tensor transposes.
+//
+// because all indexing is performed through shape, stride, and offset
+// metadata rather than assuming contiguous matrix storage.
+//
+// Output Axis Ordering
+// --------------------
+// The output tensor C is defined as:
+//
+//     C = [A free axes] + [B free axes]
+//
+// Example:
+//
+//     A[a,b,c]
+//     B[c,d,e]
+//
+// Contract:
+//
+//     c
+//
+// Result:
+//
+//     C[a,b,d,e]
+//
+// The first dimensions of C come from the non-contracted axes of A,
+// followed by the non-contracted axes of B.
+///////////////////////////////////////////////////////////////////////////////
+
 struct TensorMulParams {
+    // Tensor ranks.
     a_rank: u32,
     b_rank: u32,
     c_rank: u32,
 
+    // Number of contracted axis pairs.
     contraction_rank: u32,
 
+    // Total logical elements in C.
     c_elements: u32,
 
+    // Logical tensor shapes.
     a_shape: array<u32, 8>,
     b_shape: array<u32, 8>,
     c_shape: array<u32, 8>,
 
+    // Storage layout of A.
     a_offset: u32,
     a_strides: array<u32, 8>,
 
+    // Storage layout of B.
     b_offset: u32,
     b_strides: array<u32, 8>,
 
+    // Storage layout of C.
     c_offset: u32,
     c_strides: array<u32, 8>,
+
+    // Contracted axes.
+    a_contract_axes: array<u32, 8>,
+    b_contract_axes: array<u32, 8>,
 };
 
-// Convert a logical tensor element index into an index within the
-// underlying storage buffer.
+///////////////////////////////////////////////////////////////////////////////
+// Decode a linear tensor element index into tensor coordinates.
 //
-// Tensor operations dispatch one thread per logical tensor element.
-// For example, a tensor with shape:
-//     [2, 3, 4]
-// contains:
-//     2 × 3 × 4 = 24
-// logical elements, numbered:
-//     0, 1, 2, ..., 23
+// Example:
 //
-// The GPU kernel therefore receives a flat (linear) index:
-//     linear_idx
-// but the tensor storage may be strided, transposed, or represent a
-// view into another tensor. We therefore cannot use `linear_idx`
-// directly to access the backing buffer.
+//     shape = [2,3,4]
 //
-// The algorithm proceeds in two steps:
-// 1. Convert the linear index into tensor coordinates.
-//    For shape [2, 3, 4]:
-//        linear_idx = 17
-//    corresponds to:
-//        (1, 1, 1)
-//    The coordinates are recovered from the last axis toward the first
-//    using repeated modulus and integer division:
-//        coord = idx % dimension_size
-//        idx   = idx / dimension_size
-//    This is analogous to extracting digits from a number in a mixed
-//    radix system whose bases are given by the tensor shape.
+//     linear_idx = 17
 //
-// 2. Convert tensor coordinates into a storage index.
-//    Given coordinates:
-//        (i₀, i₁, ..., iₙ)
-//    and strides:
-//        (s₀, s₁, ..., sₙ)
-//    the storage position is:
-//        offset +
-//        i₀·s₀ +
-//        i₁·s₁ +
-//        ...
-//        iₙ·sₙ
+// becomes:
 //
-//    This formulation supports:
-//    * Contiguous tensors.
-//    * Tensor views.
-//    * Tensor slices.
-//    * Tensor transposes.
-//    without changing the kernel implementation. Only the shape,
-//    strides, and offset metadata need to differ.
-fn tensor_index(
+//     coords = [1,1,1]
+//
+// Conceptually this performs a mixed-radix base conversion where each
+// shape dimension acts as the base for that axis.
+///////////////////////////////////////////////////////////////////////////////
+fn tensor_coords(
     linear_idx: u32,
-    offset: u32,
-    shape: array<u32, 8>,
-    strides: array<u32, 8>,
     rank: u32,
-) -> u32 {
-    // Working copy of the logical element index.
+    shape: array<u32, 8>,
+) -> array<u32, 8> {
+
+    var coords: array<u32, 8>;
+
     var idx = linear_idx;
-    // Initialize the storage position to the tensor's starting offset
-    // within the backing buffer.
-    var storage_idx = offset;
-    // Recover tensor coordinates from the fastest-varying axis to the
-    // slowest-varying axis.
-    // For shape [2, 3, 4] and linear_idx = 17:
-    //     axis = 2  -> coord = 1
-    //     axis = 1  -> coord = 1
-    //     axis = 0  -> coord = 1
-    // yielding coordinates (1, 1, 1).
+
+    // Recover coordinates from fastest-moving axis to
+    // slowest-moving axis.
     for (var axis = i32(rank) - 1; axis >= 0; axis--) {
         let i = u32(axis);
-        // Coordinate of the current tensor dimension.
-        let coord = idx % shape[i];
-        // Remove the coordinate just extracted, preparing the index
-        // for the next (slower-varying) dimension.
+
+        coords[i] = idx % shape[i];
         idx = idx / shape[i];
-        // Accumulate the corresponding contribution to the storage
-        // index using the tensor stride for this dimension.
-        storage_idx += coord * strides[i];
     }
-    return storage_idx;
+
+    return coords;
+}
+
+///////////////////////////////////////////////////////////////////////////////
+// Convert tensor coordinates into an index within a backing storage buffer.
+//
+// Given:
+//
+//     coords  = [i₀,i₁,...]
+//
+// and:
+//
+//     strides = [s₀,s₁,...]
+//
+// computes:
+//
+//     offset +
+//     i₀*s₀ +
+//     i₁*s₁ +
+//     ...
+//
+// This enables arbitrary tensor views, slices, and transposes.
+///////////////////////////////////////////////////////////////////////////////
+fn storage_index(
+    coords: array<u32, 8>,
+    rank: u32,
+    offset: u32,
+    strides: array<u32, 8>,
+) -> u32 {
+
+    var idx = offset;
+
+    for (var axis = 0u; axis < rank; axis++) {
+        idx += coords[axis] * strides[axis];
+    }
+
+    return idx;
 }
 
 @group(0) @binding(0)
@@ -121,46 +225,203 @@ fn main(
     @builtin(global_invocation_id)
     gid: vec3<u32>,
 ) {
+    // One thread computes one logical element of C.
     let c_linear_idx = gid.x;
 
     if (c_linear_idx >= params.c_elements) {
         return;
     }
 
-    var rem = c_linear_idx;
+    ///////////////////////////////////////////////////////////////////////
+    // Step 1.
+    //
+    // Determine which logical output element this thread owns.
+    //
+    // Convert:
+    //
+    //     c_linear_idx
+    //
+    // into:
+    //
+    //     c_coords
+    //
+    ///////////////////////////////////////////////////////////////////////
+    var c_coords = tensor_coords(
+        c_linear_idx,
+        params.c_rank,
+        params.c_shape,
+    );
 
-    let col =
-        rem % params.c_shape[1];
+    ///////////////////////////////////////////////////////////////////////
+    // Step 2.
+    //
+    // Build coordinate vectors for A and B. Contracted coordinates will
+    // be filled later while iterating through the contraction space.
+    ///////////////////////////////////////////////////////////////////////
+    var a_coords: array<u32, 8>;
+    var b_coords: array<u32, 8>;
 
-    rem =
-        rem / params.c_shape[1];
+    ///////////////////////////////////////////////////////////////////////
+    // Step 3.
+    //
+    // Copy free (non-contracted) coordinates from C into A and B.
+    //
+    // Since:
+    //
+    //     C = [A free axes] + [B free axes]
+    //
+    // C's coordinates can be distributed back into A and B.
+    ///////////////////////////////////////////////////////////////////////
+    var c_axis = 0u;
 
-    let row =
-        rem % params.c_shape[0];
+    for (var a_axis = 0u; a_axis < params.a_rank; a_axis++) {
 
+        var contracted = false;
+
+        for (var i = 0u;
+             i < params.contraction_rank;
+             i++) {
+
+            if (a_axis == params.a_contract_axes[i]) {
+                contracted = true;
+                break;
+            }
+        }
+
+        if (!contracted) {
+            a_coords[a_axis] = c_coords[c_axis];
+            c_axis += 1u;
+        }
+    }
+
+    for (var b_axis = 0u; b_axis < params.b_rank; b_axis++) {
+
+        var contracted = false;
+
+        for (var i = 0u;
+             i < params.contraction_rank;
+             i++) {
+
+            if (b_axis == params.b_contract_axes[i]) {
+                contracted = true;
+                break;
+            }
+        }
+
+        if (!contracted) {
+            b_coords[b_axis] = c_coords[c_axis];
+            c_axis += 1u;
+        }
+    }
+
+    ///////////////////////////////////////////////////////////////////////
+    // Step 4.
+    //
+    // Compute the total number of coordinates in the contraction space.
+    //
+    // Example:
+    //
+    //     contract axes sizes = [4, 5]
+    //
+    // then:
+    //
+    //     contract_elements = 20
+    //
+    ///////////////////////////////////////////////////////////////////////
+    var contract_elements = 1u;
+
+    for (var i = 0u;
+         i < params.contraction_rank;
+         i++) {
+
+        let a_axis =
+            params.a_contract_axes[i];
+
+        contract_elements *=
+            params.a_shape[a_axis];
+    }
+
+    ///////////////////////////////////////////////////////////////////////
+    // Step 5.
+    //
+    // Enumerate every coordinate in the contraction subspace and compute:
+    //
+    //     Σ A[...] * B[...]
+    //
+    ///////////////////////////////////////////////////////////////////////
     var sum = 0.0;
 
-    let k_dim = params.a_shape[1];
+    for (var contract_linear = 0u;
+         contract_linear < contract_elements;
+         contract_linear++) {
 
-    for (var k = 0u; k < k_dim; k++) {
+        ///////////////////////////////////////////////////////////////////
+        // Decode one point in the contraction subspace.
+        ///////////////////////////////////////////////////////////////////
+        var tmp = contract_linear;
 
-        let a_idx =
-            params.a_offset +
-            row * params.a_strides[0] +
-            k   * params.a_strides[1];
+        for (var i = i32(params.contraction_rank) - 1;
+             i >= 0;
+             i--) {
 
-        let b_idx =
-            params.b_offset +
-            k   * params.b_strides[0] +
-            col * params.b_strides[1];
+            let contract_axis = u32(i);
 
+            let a_axis =
+                params.a_contract_axes[contract_axis];
+
+            let b_axis =
+                params.b_contract_axes[contract_axis];
+
+            let extent =
+                params.a_shape[a_axis];
+
+            let coord =
+                tmp % extent;
+
+            tmp =
+                tmp / extent;
+
+            a_coords[a_axis] =
+                coord;
+
+            b_coords[b_axis] =
+                coord;
+        }
+
+        ///////////////////////////////////////////////////////////////////
+        // Convert tensor coordinates into backing-buffer locations.
+        ///////////////////////////////////////////////////////////////////
+        let a_idx = storage_index(
+            a_coords,
+            params.a_rank,
+            params.a_offset,
+            params.a_strides,
+        );
+
+        let b_idx = storage_index(
+            b_coords,
+            params.b_rank,
+            params.b_offset,
+            params.b_strides,
+        );
+
+        ///////////////////////////////////////////////////////////////////
+        // Accumulate contribution from this contraction coordinate.
+        ///////////////////////////////////////////////////////////////////
         sum += A[a_idx] * B[b_idx];
     }
 
-    let c_idx =
-        params.c_offset +
-        row * params.c_strides[0] +
-        col * params.c_strides[1];
+    ///////////////////////////////////////////////////////////////////////
+    // Step 6.
+    //
+    // Store the final result.
+    ///////////////////////////////////////////////////////////////////////
+    let c_idx = storage_index(
+        c_coords,
+        params.c_rank,
+        params.c_offset,
+        params.c_strides,
+    );
 
     C[c_idx] = sum;
 }
