@@ -21,7 +21,10 @@ Simulate genotype, phenotype, and environmental data for quantitative and popula
 
 ```shell
 cd simmy/
+time cargo fmt
 time cargo test
 # time cargo test -- --show-output
 # time cargo run
+# time cargo build --release
+# cargo doc --open
 ```

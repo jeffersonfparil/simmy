@@ -1,5 +1,13 @@
 use crate::linalg::context::GpuContext;
 
+/// GPU Kernel
+///
+/// A kernel owns a compiled compute pipeline, encapsulating the shader
+/// code and execution configuration required to dispatch work to the
+/// GPU, i.e. tensor operations e.g. tensor contraction, matrix multiplication,
+/// element-wise arithmetic,  reductions, and other linear algebra operations.
+///
+/// * `pipeline` is the compiled WGPU compute pipeline used to execute the kernel.
 #[derive(Debug)]
 #[expect(dead_code)]
 pub struct GpuKernel {
@@ -7,6 +15,20 @@ pub struct GpuKernel {
 }
 
 impl GpuKernel {
+    /// Compile a WGSL compute kernel.
+    ///
+    /// Creates a shader module from the supplied WGSL source code and
+    /// compiles it into a WGPU compute pipeline.
+    ///
+    /// * `ctx` provides access to the GPU device used for compilation.
+    /// * `wgsl` contains the WGSL source code implementing the kernel.
+    ///
+    /// The resulting kernel can be reused across multiple tensor
+    /// operations without recompiling the underlying shader.
+    ///
+    /// # Panics
+    /// WGPU validation may panic if the supplied WGSL source is invalid
+    /// or incompatible with the target device.
     pub fn new(ctx: &GpuContext, wgsl: &str) -> Self {
         let module = ctx
             .device
