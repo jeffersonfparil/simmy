@@ -98,7 +98,6 @@
 // The first dimensions of C come from the non-contracted axes of A,
 // followed by the non-contracted axes of B.
 ///////////////////////////////////////////////////////////////////////////////
-
 struct TensorMulParams {
     // Tensor ranks.
     a_rank: u32,

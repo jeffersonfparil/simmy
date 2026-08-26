@@ -290,6 +290,9 @@ mod tests {
     fn context() -> GpuContext {
         pollster::block_on(GpuContext::new()).expect("Failed to create GPU context")
     }
+    ///////////////////////////////////////////
+    // Matrices (i.e. tensors of rank=2)
+    ///////////////////////////////////////////
     #[test]
     fn matmul_returns_expected_output_shape() -> Result<()> {
         let ctx = context();
@@ -360,36 +363,24 @@ mod tests {
         assert_eq!(c.shape, vec![5, 7]);
         Ok(())
     }
-
     ///////////////////////////////////////////
-    // Tensor Contraction
+    // Tensors of arbitraty ranks
     ///////////////////////////////////////////
-
     #[test]
     fn contract_matrix_multiplication_2x2() -> Result<()> {
         let ctx = context();
-
         let ops = TensorOps { ctx: &ctx };
-
         let a = GpuTensor::from_f32(&ctx, &[1.0, 2.0, 3.0, 4.0], vec![2, 2], None, None)?;
-
         let b = GpuTensor::from_f32(&ctx, &[5.0, 6.0, 7.0, 8.0], vec![2, 2], None, None)?;
-
         let c = ops.contract(&a, &b, &[1], &[0])?;
-
         assert_eq!(c.shape, vec![2, 2]);
-
         assert_eq!(c.to_vec_f32(&ctx)?, vec![19.0, 22.0, 43.0, 50.0,]);
-
         Ok(())
     }
-
     #[test]
     fn contract_matrix_multiplication_rectangular() -> Result<()> {
         let ctx = context();
-
         let ops = TensorOps { ctx: &ctx };
-
         let a = GpuTensor::from_f32(
             &ctx,
             &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
@@ -397,7 +388,6 @@ mod tests {
             None,
             None,
         )?;
-
         let b = GpuTensor::from_f32(
             &ctx,
             &[7.0, 8.0, 9.0, 10.0, 11.0, 12.0],
@@ -405,79 +395,47 @@ mod tests {
             None,
             None,
         )?;
-
         let c = ops.contract(&a, &b, &[1], &[0])?;
-
         assert_eq!(c.shape, vec![2, 2]);
-
         assert_eq!(c.to_vec_f32(&ctx)?, vec![58.0, 64.0, 139.0, 154.0,]);
-
         Ok(())
     }
-
     #[test]
     fn contract_rejects_axis_count_mismatch() {
         let ctx = context();
-
         let ops = TensorOps { ctx: &ctx };
-
         let a = GpuTensor::from_f32(&ctx, &[1.0; 24], vec![2, 3, 4], None, None).unwrap();
-
         let b = GpuTensor::from_f32(&ctx, &[1.0; 24], vec![3, 4, 2], None, None).unwrap();
-
         assert!(ops.contract(&a, &b, &[1, 2], &[0],).is_err());
     }
-
     #[test]
     fn contract_rejects_incompatible_contract_dimensions() {
         let ctx = context();
-
         let ops = TensorOps { ctx: &ctx };
-
         let a = GpuTensor::from_f32(&ctx, &[1.0; 24], vec![2, 3, 4], None, None).unwrap();
-
         let b = GpuTensor::from_f32(&ctx, &[1.0; 40], vec![5, 4, 2], None, None).unwrap();
-
         assert!(ops.contract(&a, &b, &[1], &[0],).is_err());
     }
-
     #[test]
     fn contract_returns_correct_output_shape() -> Result<()> {
         let ctx = context();
-
         let ops = TensorOps { ctx: &ctx };
-
         let a = GpuTensor::from_f32(&ctx, &[1.0; 24], vec![2, 3, 4], None, None)?;
-
         let b = GpuTensor::from_f32(&ctx, &[1.0; 20], vec![4, 5], None, None)?;
-
         let c = ops.contract(&a, &b, &[2], &[0])?;
-
-        //
-        // A free axes: [2,3]
-        // B free axes: [5]
-        //
         assert_eq!(c.shape, vec![2, 3, 5]);
-
         Ok(())
     }
-
     #[test]
     fn contract_preserves_contiguous_output_layout() -> Result<()> {
         let ctx = context();
-
         let ops = TensorOps { ctx: &ctx };
-
         let a = GpuTensor::from_f32(&ctx, &[1.0; 24], vec![2, 3, 4], None, None)?;
-
         let b = GpuTensor::from_f32(&ctx, &[1.0; 20], vec![4, 5], None, None)?;
-
         let c = ops.contract(&a, &b, &[2], &[0])?;
-
         assert_eq!(c.shape, vec![2, 3, 5]);
         assert_eq!(c.strides, vec![15, 5, 1]);
         assert_eq!(c.offset, 0);
-
         Ok(())
     }
 }
