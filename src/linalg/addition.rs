@@ -82,7 +82,7 @@ pub struct TensorAddParams {
 
 impl MatrixOps<'_> {
     /// Perform GPU-accelerated matrix addition.
-    /// 
+    ///
     /// * `a` is the left-hand matrix.
     /// * `b` is the right-hand matrix.
     ///
@@ -98,7 +98,7 @@ impl MatrixOps<'_> {
     /// * `a` is not rank 2.
     /// * `b` is not rank 2.
     /// * The matrices have different shapes.
-    /// 
+    ///
     /// # Details
     /// Both input tensors must be rank-2 matrices with identical shapes.
     ///
@@ -159,7 +159,7 @@ impl TensorOps<'_> {
     /// * The tensor rank exceeds `MAX_RANK`.
     /// * GPU resource allocation fails.
     /// * The compute kernel cannot be compiled or dispatched.
-    /// 
+    ///
     /// # Details
     /// Unlike matrix-specific addition, this operation is rank-generic and
     /// supports tensors ranging from vectors (rank 1) to higher-dimensional
