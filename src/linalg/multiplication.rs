@@ -61,31 +61,108 @@ pub struct MatrixMulParams {
     pub c_col_stride: u32,
 }
 
-const MAX_RANK: usize = 8;
+pub const MAX_RANK: usize = 8;
 
+/// Tensor Contraction Parameters
+///
+/// Describes an arbitrary-rank tensor contraction:
+///
+/// ```text
+/// C = contract(A, B)
+/// ```
+///
+/// where one or more axes of `A` are summed against corresponding
+/// axes of `B`.
+///
+/// Matrix multiplication is a special case:
+///
+/// ```text
+/// A[m, k]
+/// B[k, n]
+///
+/// C[m, n]
+///
+/// a_contract_axes = [1]
+/// b_contract_axes = [0]
+/// ```
+///
+/// The result tensor is assumed to be laid out as:
+///
+/// ```text
+/// C = [A free axes] + [B free axes]
+/// ```
+///
+/// where "free axes" are axes that do not participate in the
+/// contraction.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub struct TensorMulParams {
+    /// Rank of A.
     pub a_rank: u32,
+
+    /// Rank of B.
     pub b_rank: u32,
+
+    /// Rank of C.
     pub c_rank: u32,
 
+    /// Number of contracted axis pairs.
+    ///
+    /// Example:
+    ///
+    /// ```text
+    /// A[a,b,c,d]
+    /// B[c,d,e,f]
+    ///
+    /// contraction_rank = 2
+    /// ```
     pub contraction_rank: u32,
 
+    /// Total logical elements in C.
     pub c_elements: u32,
 
+    /// Logical shape of A.
     pub a_shape: [u32; MAX_RANK],
+
+    /// Logical shape of B.
     pub b_shape: [u32; MAX_RANK],
+
+    /// Logical shape of C.
     pub c_shape: [u32; MAX_RANK],
 
+    /// Storage layout of A.
     pub a_offset: u32,
     pub a_strides: [u32; MAX_RANK],
 
+    /// Storage layout of B.
     pub b_offset: u32,
     pub b_strides: [u32; MAX_RANK],
 
+    /// Storage layout of C.
     pub c_offset: u32,
     pub c_strides: [u32; MAX_RANK],
+
+    /// Axes of A participating in the contraction.
+    ///
+    /// Example:
+    ///
+    /// ```text
+    /// A[a,b,c,d]
+    ///        ^ ^
+    ///        2 3
+    /// ```
+    pub a_contract_axes: [u32; MAX_RANK],
+
+    /// Axes of B participating in the contraction.
+    ///
+    /// Example:
+    ///
+    /// ```text
+    /// B[c,d,e,f]
+    ///   ^ ^
+    ///   0 1
+    /// ```
+    pub b_contract_axes: [u32; MAX_RANK],
 }
 
 impl MatrixOps<'_> {
@@ -155,8 +232,154 @@ impl MatrixOps<'_> {
 }
 
 impl TensorOps<'_> {
-    pub fn multiply(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
-        todo!("Implement after operations.rs and addition.rs!")
+    pub fn contract(
+        &self,
+        a: &GpuTensor,
+        b: &GpuTensor,
+        a_contract_axes: &[usize],
+        b_contract_axes: &[usize],
+    ) -> Result<GpuTensor> {
+        ensure!(
+            a_contract_axes.len() == b_contract_axes.len(),
+            "Contraction axis count mismatch"
+        );
+
+        let contraction_rank = a_contract_axes.len();
+
+        ensure!(a.shape.len() <= MAX_RANK, "A rank exceeds MAX_RANK");
+
+        ensure!(b.shape.len() <= MAX_RANK, "B rank exceeds MAX_RANK");
+
+        //
+        // Validate contracted dimensions.
+        //
+        for i in 0..contraction_rank {
+            let a_axis = a_contract_axes[i];
+            let b_axis = b_contract_axes[i];
+
+            ensure!(
+                a.shape[a_axis] == b.shape[b_axis],
+                "Contracted dimensions must match: \
+                A axis {} ({}) != B axis {} ({})",
+                a_axis,
+                a.shape[a_axis],
+                b_axis,
+                b.shape[b_axis],
+            );
+        }
+
+        //
+        // Build output shape:
+        //
+        // C = A free axes + B free axes
+        //
+        let mut c_shape = Vec::new();
+
+        for axis in 0..a.shape.len() {
+            if !a_contract_axes.contains(&axis) {
+                c_shape.push(a.shape[axis]);
+            }
+        }
+
+        for axis in 0..b.shape.len() {
+            if !b_contract_axes.contains(&axis) {
+                c_shape.push(b.shape[axis]);
+            }
+        }
+
+        ensure!(c_shape.len() <= MAX_RANK, "Result rank exceeds MAX_RANK");
+
+        //
+        // Convert shapes.
+        //
+        let mut a_shape = [0u32; MAX_RANK];
+        let mut b_shape = [0u32; MAX_RANK];
+        let mut c_shape_arr = [0u32; MAX_RANK];
+
+        for i in 0..a.shape.len() {
+            a_shape[i] = a.shape[i];
+        }
+
+        for i in 0..b.shape.len() {
+            b_shape[i] = b.shape[i];
+        }
+
+        for i in 0..c_shape.len() {
+            c_shape_arr[i] = c_shape[i];
+        }
+
+        //
+        // Convert strides.
+        //
+        let mut a_strides = [0u32; MAX_RANK];
+        let mut b_strides = [0u32; MAX_RANK];
+        let mut c_strides = [0u32; MAX_RANK];
+
+        for i in 0..a.strides.len() {
+            a_strides[i] = a.strides[i];
+        }
+
+        for i in 0..b.strides.len() {
+            b_strides[i] = b.strides[i];
+        }
+
+        //
+        // Create contiguous output strides.
+        //
+        let mut stride = 1u32;
+
+        for i in (0..c_shape.len()).rev() {
+            c_strides[i] = stride;
+            stride *= c_shape[i];
+        }
+
+        //
+        // Contract axes.
+        //
+        let mut a_contract = [0u32; MAX_RANK];
+        let mut b_contract = [0u32; MAX_RANK];
+
+        for i in 0..contraction_rank {
+            a_contract[i] = a_contract_axes[i] as u32;
+            b_contract[i] = b_contract_axes[i] as u32;
+        }
+
+        let c_elements = c_shape.iter().copied().product::<u32>();
+
+        let params = TensorMulParams {
+            a_rank: a.shape.len() as u32,
+            b_rank: b.shape.len() as u32,
+            c_rank: c_shape.len() as u32,
+
+            contraction_rank: contraction_rank as u32,
+
+            c_elements,
+
+            a_shape,
+            b_shape,
+            c_shape: c_shape_arr,
+
+            a_offset: a.offset,
+            a_strides,
+
+            b_offset: b.offset,
+            b_strides,
+
+            c_offset: 0,
+            c_strides,
+
+            a_contract_axes: a_contract,
+            b_contract_axes: b_contract,
+        };
+
+        let buffer = self.execute_binary_kernel(
+            TensorParams::Multiplication(params),
+            include_str!("wgsl/tenmul.wgsl"),
+            a,
+            b,
+        )?;
+
+        GpuTensor::from_buffer(Arc::new(buffer), c_shape, None, None)
     }
 }
 
@@ -235,6 +458,126 @@ mod tests {
         let ops = MatrixOps { ctx: &ctx };
         let c = ops.multiply(&a, &b).expect("Matrix multiplication failed");
         assert_eq!(c.shape, vec![5, 7]);
+        Ok(())
+    }
+
+    ///////////////////////////////////////////
+    // Tensor Contraction
+    ///////////////////////////////////////////
+
+    #[test]
+    fn contract_matrix_multiplication_2x2() -> Result<()> {
+        let ctx = context();
+
+        let ops = TensorOps { ctx: &ctx };
+
+        let a = GpuTensor::from_f32(&ctx, &[1.0, 2.0, 3.0, 4.0], vec![2, 2], None, None)?;
+
+        let b = GpuTensor::from_f32(&ctx, &[5.0, 6.0, 7.0, 8.0], vec![2, 2], None, None)?;
+
+        let c = ops.contract(&a, &b, &[1], &[0])?;
+
+        assert_eq!(c.shape, vec![2, 2]);
+
+        assert_eq!(c.to_vec_f32(&ctx)?, vec![19.0, 22.0, 43.0, 50.0,]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn contract_matrix_multiplication_rectangular() -> Result<()> {
+        let ctx = context();
+
+        let ops = TensorOps { ctx: &ctx };
+
+        let a = GpuTensor::from_f32(
+            &ctx,
+            &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            vec![2, 3],
+            None,
+            None,
+        )?;
+
+        let b = GpuTensor::from_f32(
+            &ctx,
+            &[7.0, 8.0, 9.0, 10.0, 11.0, 12.0],
+            vec![3, 2],
+            None,
+            None,
+        )?;
+
+        let c = ops.contract(&a, &b, &[1], &[0])?;
+
+        assert_eq!(c.shape, vec![2, 2]);
+
+        assert_eq!(c.to_vec_f32(&ctx)?, vec![58.0, 64.0, 139.0, 154.0,]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn contract_rejects_axis_count_mismatch() {
+        let ctx = context();
+
+        let ops = TensorOps { ctx: &ctx };
+
+        let a = GpuTensor::from_f32(&ctx, &[1.0; 24], vec![2, 3, 4], None, None).unwrap();
+
+        let b = GpuTensor::from_f32(&ctx, &[1.0; 24], vec![3, 4, 2], None, None).unwrap();
+
+        assert!(ops.contract(&a, &b, &[1, 2], &[0],).is_err());
+    }
+
+    #[test]
+    fn contract_rejects_incompatible_contract_dimensions() {
+        let ctx = context();
+
+        let ops = TensorOps { ctx: &ctx };
+
+        let a = GpuTensor::from_f32(&ctx, &[1.0; 24], vec![2, 3, 4], None, None).unwrap();
+
+        let b = GpuTensor::from_f32(&ctx, &[1.0; 40], vec![5, 4, 2], None, None).unwrap();
+
+        assert!(ops.contract(&a, &b, &[1], &[0],).is_err());
+    }
+
+    #[test]
+    fn contract_returns_correct_output_shape() -> Result<()> {
+        let ctx = context();
+
+        let ops = TensorOps { ctx: &ctx };
+
+        let a = GpuTensor::from_f32(&ctx, &[1.0; 24], vec![2, 3, 4], None, None)?;
+
+        let b = GpuTensor::from_f32(&ctx, &[1.0; 20], vec![4, 5], None, None)?;
+
+        let c = ops.contract(&a, &b, &[2], &[0])?;
+
+        //
+        // A free axes: [2,3]
+        // B free axes: [5]
+        //
+        assert_eq!(c.shape, vec![2, 3, 5]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn contract_preserves_contiguous_output_layout() -> Result<()> {
+        let ctx = context();
+
+        let ops = TensorOps { ctx: &ctx };
+
+        let a = GpuTensor::from_f32(&ctx, &[1.0; 24], vec![2, 3, 4], None, None)?;
+
+        let b = GpuTensor::from_f32(&ctx, &[1.0; 20], vec![4, 5], None, None)?;
+
+        let c = ops.contract(&a, &b, &[2], &[0])?;
+
+        assert_eq!(c.shape, vec![2, 3, 5]);
+        assert_eq!(c.strides, vec![15, 5, 1]);
+        assert_eq!(c.offset, 0);
+
         Ok(())
     }
 }
