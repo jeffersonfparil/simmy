@@ -196,6 +196,7 @@ impl GpuKernel<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::f64::consts::PI;
     use crate::linalg::context::GpuContext;
     use crate::linalg::params::{BinaryMatrixParams, ContractMatrixParams, UnaryMatrixParams};
     use crate::linalg::tensor::GpuTensor;
@@ -205,6 +206,10 @@ mod tests {
     const OP_ABS: u32 = 0;
     const OP_NEG: u32 = 1;
     const OP_SQRT: u32 = 2;
+    const OP_EXP: u32 = 3;
+    const OP_LOG: u32 = 4;
+    const OP_SIN: u32 = 5;
+    const OP_COS: u32 = 6;
 
     // Binary operations
     const OP_ADD: u32 = 0;
@@ -213,9 +218,15 @@ mod tests {
     const OP_DIV: u32 = 3;
     const OP_MIN: u32 = 4;
     const OP_MAX: u32 = 5;
+    const OP_POW: u32 = 6;
+    const OP_ATAN2: u32 = 7;
     const OP_EQ: u32 = 8;
+    const OP_NE: u32 = 9;
+    const OP_LT: u32 = 10;
+    const OP_LE: u32 = 11;
+    const OP_GT: u32 = 12;
+    const OP_GE: u32 = 13;
 
-    // Contract pairwise operations
     const OP_PAIR_ADD: u32 = 0;
     const OP_PAIR_SUB: u32 = 1;
     const OP_PAIR_MUL: u32 = 2;
@@ -223,7 +234,6 @@ mod tests {
     const OP_PAIR_MIN: u32 = 4;
     const OP_PAIR_MAX: u32 = 5;
 
-    // Contract reductions
     const OP_REDUCE_ADD: u32 = 0;
     const OP_REDUCE_MUL: u32 = 1;
     const OP_REDUCE_MIN: u32 = 2;
@@ -447,7 +457,6 @@ mod tests {
         assert_eq!(c.to_vec_f32(&ctx)?, vec![5.0, 6.0, 7.0, 8.0]);
         Ok(())
     }
-
     #[test]
     fn binary_eq() -> Result<()> {
         let ctx = context();
@@ -456,6 +465,17 @@ mod tests {
         let b = GpuTensor::from_f32(&ctx, &[1.0, 0.0, 3.0, 9.0], vec![2, 2], None, None)?;
         let c = ops.execute_kernel(binary_matrix_params(OP_EQ), &a, Some(&b))?;
         assert_eq!(c.to_vec_f32(&ctx)?, vec![1.0, 0.0, 1.0, 0.0]);
+        Ok(())
+    }
+    #[test]
+    fn binary_atan2() -> Result<()> {
+        let ctx = context();
+        let ops = ops(&ctx);
+        let pi = PI as f32;
+        let a = GpuTensor::from_f32(&ctx, &[1.0, 0.0, 0.0, 1.0], vec![2, 2], None, None)?;
+        let b = GpuTensor::from_f32(&ctx, &[0.0, 1.0, 1.0, 0.0], vec![2, 2], None, None)?;
+        let c = ops.execute_kernel(binary_matrix_params(OP_ATAN2), &a, Some(&b))?;
+        assert_eq!(c.to_vec_f32(&ctx)?, vec![pi/2.0, 0.0, 0.0, pi/2.0]);
         Ok(())
     }
     #[test]
