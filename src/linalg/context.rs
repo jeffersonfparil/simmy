@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use std::fmt;
+use wgpu::ComputePipeline;
 
 /// GPU Context
 ///
@@ -18,6 +19,14 @@ pub struct GpuContext {
     pub adapter: wgpu::Adapter,
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
+
+    pub unary_matrix_pipeline: wgpu::ComputePipeline,
+    pub binary_matrix_pipeline: wgpu::ComputePipeline,
+    pub contract_matrix_pipeline: wgpu::ComputePipeline,
+
+    pub unary_tensor_pipeline: wgpu::ComputePipeline,
+    pub binary_tensor_pipeline: wgpu::ComputePipeline,
+    pub contract_tensor_pipeline: wgpu::ComputePipeline,
 }
 
 /// Print GPU context information
@@ -42,28 +51,127 @@ impl fmt::Display for GpuContext {
 }
 
 impl GpuContext {
-    /// Initialize a GPU context.
+    /// Initialize a GPU compute context.
     ///
-    /// Discovers the available compute backends, selects an adapter,
-    /// creates a logical device, and obtains a command queue for
-    /// submitting work.
+    /// Creates and configures all GPU state required by the tensor engine.
     ///
-    /// The adapter request is configured to prefer high-performance
-    /// hardware when available. Depending on the system configuration,
-    /// the selected adapter may still be:
-    /// * A discrete GPU
-    /// * An integrated GPU
-    /// * A virtual GPU
-    /// * A CPU-backed implementation such as Vulkan Lavapipe
+    /// Initialization proceeds in several stages:
     ///
-    /// The resulting context owns all WGPU state required to allocate
-    /// tensors, compile kernels, and execute tensor operations.
+    /// 1. Create a WGPU instance.
+    ///
+    ///    The instance is responsible for discovering and managing available
+    ///    graphics and compute backends (such as Vulkan, Metal, DirectX, or
+    ///    OpenGL-compatible implementations).
+    ///
+    /// 2. Select a compute adapter.
+    ///
+    ///    The adapter request prefers high-performance hardware:
+    ///
+    ///    ```text
+    ///    PowerPreference::HighPerformance
+    ///    ```
+    ///
+    ///    Depending on the host platform, the selected adapter may be:
+    ///
+    ///    * A discrete GPU.
+    ///    * An integrated GPU.
+    ///    * A virtual GPU.
+    ///    * A software implementation such as Vulkan Lavapipe.
+    ///
+    ///    The exact adapter selected is determined by WGPU and the available
+    ///    system hardware.
+    ///
+    /// 3. Create a logical device and command queue.
+    ///
+    ///    The device is responsible for:
+    ///
+    ///    * Buffer allocation.
+    ///    * Shader execution.
+    ///    * Pipeline creation.
+    ///    * Resource binding.
+    ///
+    ///    The queue is used to submit command buffers for execution.
+    ///
+    /// 4. Compile all built-in WGSL compute kernels.
+    ///
+    ///    The following kernels are embedded directly into the binary using
+    ///    `include_str!` and compiled during initialization:
+    ///
+    ///    Matrix kernels:
+    ///
+    ///    * `unary_matrix.wgsl`
+    ///      Element-wise unary matrix operations.
+    ///
+    ///    * `binary_matrix.wgsl`
+    ///      Element-wise binary matrix operations.
+    ///
+    ///    * `contract_matrix.wgsl`
+    ///      Matrix contraction operations, including matrix multiplication.
+    ///
+    ///    Tensor kernels:
+    ///
+    ///    * `unary_tensor.wgsl`
+    ///      Element-wise unary tensor operations on arbitrary-rank tensors.
+    ///
+    ///    * `binary_tensor.wgsl`
+    ///      Element-wise binary tensor operations on arbitrary-rank tensors.
+    ///
+    ///    * `contract_tensor.wgsl`
+    ///      General tensor contractions supporting:
+    ///      - Arbitrary tensor rank.
+    ///      - Arbitrary contraction axes.
+    ///      - Tensor views.
+    ///      - Tensor slices.
+    ///      - Tensor transposes.
+    ///      - Custom pairwise and reduction operators.
+    ///
+    /// 5. Create compute pipelines.
+    ///
+    ///    Each shader module is converted into a compute pipeline and stored
+    ///    inside the context for reuse. Pipelines are created once during
+    ///    initialization to avoid repeated shader compilation during tensor
+    ///    execution.
+    ///
+    /// The resulting context owns:
+    ///
+    /// * The WGPU instance.
+    /// * The selected adapter.
+    /// * The logical device.
+    /// * The command queue.
+    /// * All built-in compute pipelines.
+    ///
+    /// These resources are subsequently used to:
+    ///
+    /// * Allocate GPU-backed tensors.
+    /// * Upload and download tensor data.
+    /// * Execute matrix operations.
+    /// * Execute tensor operations.
+    /// * Dispatch compute workloads.
+    /// * Manage GPU resources throughout the lifetime of the application.
+    ///
+    /// # Performance
+    ///
+    /// Shader compilation and pipeline creation occur during context
+    /// initialization rather than during the first operation dispatch. This
+    /// front-loads startup cost while minimizing runtime latency during tensor
+    /// execution.
     ///
     /// # Errors
+    ///
     /// Returns an error if:
-    /// * No suitable adapter can be found.
-    /// * A logical device cannot be created from the selected adapter.
+    ///
+    /// * No suitable compute adapter can be found.
+    /// * The selected adapter cannot create a logical device.
+    /// * The command queue cannot be created.
+    /// * Any embedded WGSL shader fails validation or compilation.
+    /// * Any compute pipeline fails to be created.
     /// * The underlying graphics or compute backend fails to initialize.
+    ///
+    /// # Notes
+    ///
+    /// The context is intended to be created once and reused for the lifetime
+    /// of a workload. Creating multiple contexts may incur additional shader
+    /// compilation, pipeline creation, and device initialization overhead.
     pub async fn new() -> Result<Self> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         // Request for the high performance adapter which should detect a dedicated GPU if they exist
@@ -75,11 +183,47 @@ impl GpuContext {
             .await
             .context("No adapter")?;
         let (device, queue) = adapter.request_device(&Default::default()).await?;
+        let kernel_sources: Vec<&str> = vec![
+            include_str!("wgsl/unary_matrix.wgsl"),
+            include_str!("wgsl/binary_matrix.wgsl"),
+            include_str!("wgsl/contract_matrix.wgsl"),
+            include_str!("wgsl/unary_tensor.wgsl"),
+            include_str!("wgsl/binary_tensor.wgsl"),
+            include_str!("wgsl/contract_tensor.wgsl"),
+        ];
+        let mut pipelines: Vec<ComputePipeline> = Vec::with_capacity(kernel_sources.len());
+        for kernel_source in kernel_sources {
+            let kernel_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("kernel"),
+                source: wgpu::ShaderSource::Wgsl(kernel_source.into()),
+            });
+            let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("pipeline"),
+                layout: None,
+                module: &kernel_module,
+                entry_point: None,
+                compilation_options: Default::default(),
+                cache: None,
+            });
+            pipelines.push(pipeline);
+        }
+        let unary_matrix_pipeline = pipelines.remove(0);
+        let binary_matrix_pipeline = pipelines.remove(0);
+        let contract_matrix_pipeline = pipelines.remove(0);
+        let unary_tensor_pipeline = pipelines.remove(0);
+        let binary_tensor_pipeline = pipelines.remove(0);
+        let contract_tensor_pipeline = pipelines.remove(0);
         Ok(Self {
             instance,
             adapter,
             device,
             queue,
+            unary_matrix_pipeline,
+            binary_matrix_pipeline,
+            contract_matrix_pipeline,
+            unary_tensor_pipeline,
+            binary_tensor_pipeline,
+            contract_tensor_pipeline,
         })
     }
 }

@@ -4,6 +4,8 @@ use anyhow::{Result, ensure};
 use bytemuck::{Pod, Zeroable};
 use std::sync::Arc;
 
+const MAX_RANK: usize = 8;
+
 /// Matrix Addition Parameters
 ///
 /// The kernel computes:
@@ -16,49 +18,75 @@ use std::sync::Arc;
 /// C: n × p
 /// ```
 ///
-/// In addition to the matrix dimensions, this structure contains the
-/// storage layout of each tensor, allowing the kernel to operate on
-/// arbitrary matrix views rather than requiring contiguous storage.
-///
-/// * `n` is the number of rows in `A`, `B`, and `C`.
-/// * `p` is the number of columns in `A`, `B`, and `C`.
-///
-/// * `a_offset` is the starting element of `A` within its backing storage.
-/// * `a_row_stride` is the storage stride between rows of `A`.
-/// * `a_col_stride` is the storage stride between columns of `A`.
-///
-/// * `b_offset` is the starting element of `B` within its backing storage.
-/// * `b_row_stride` is the storage stride between rows of `B`.
-/// * `b_col_stride` is the storage stride between columns of `B`.
-///
-/// * `c_offset` is the starting element of `C` within its backing storage.
-/// * `c_row_stride` is the storage stride between rows of `C`.
-/// * `c_col_stride` is the storage stride between columns of `C`.
-///
 /// The struct is marked `#[repr(C)]` and derives `Pod` and `Zeroable`
 /// so that it can be safely transferred directly to GPU memory and
 /// interpreted by WGSL shaders.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub struct MatrixAddParams {
+    /// Number of rows in `A`, `B`, and `C`.
     pub n: u32,
+    /// Number of columns in `A`, `B`, and `C`.
     pub p: u32,
-
+    /// Starting element of `A` within its backing storage.
     pub a_offset: u32,
+    /// Storage stride between rows of `A`.
     pub a_row_stride: u32,
+    /// Storage stride between columns of `A`.
     pub a_col_stride: u32,
-
+    /// Starting element of `B` within its backing storage.
     pub b_offset: u32,
+    /// Storage stride between rows of `B`.
     pub b_row_stride: u32,
+    /// Storage stride between columns of `B`.
     pub b_col_stride: u32,
-
+    /// Starting element of `C` within its backing storage.
     pub c_offset: u32,
+    /// Storage stride between rows of `C`.
     pub c_row_stride: u32,
+    /// Storage stride between columns of `C`.
     pub c_col_stride: u32,
 }
 
-const MAX_RANK: usize = 8;
-
+/// Tensor Addition Parameters
+///
+/// The kernel computes:
+///
+/// ```text
+/// A + B = C
+/// ```
+///
+/// for two tensors of identical shape and arbitrary rank.
+///
+/// Unlike matrix addition, which operates on rank-2 tensors using
+/// explicit row and column dimensions, tensor addition is rank-generic.
+/// The tensor shape is represented as a fixed-size array together with
+/// the active rank.
+///
+/// Example:
+///
+/// ```text
+/// shape = [2, 3, 4]
+///
+/// A: 2 × 3 × 4
+/// B: 2 × 3 × 4
+/// C: 2 × 3 × 4
+/// ```
+///
+/// The kernel dispatches one thread per logical tensor element. Each
+/// thread converts its logical tensor position into a storage position
+/// using the shape, strides, and offsets stored in this parameter block.
+///
+/// This representation supports:
+/// * Contiguous tensors.
+/// * Tensor views.
+/// * Tensor slices.
+/// * Tensor transposes.
+/// * Arbitrary tensor ranks up to `MAX_RANK`.
+///
+/// The struct is marked `#[repr(C)]` and derives `Pod` and `Zeroable`
+/// so that it can be safely transferred directly to GPU memory and
+/// interpreted by WGSL shaders.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub struct TensorAddParams {
@@ -68,14 +96,17 @@ pub struct TensorAddParams {
     pub n_elements: u32,
     /// Shape of the logical tensor.
     pub shape: [u32; MAX_RANK],
-    /// Storage layout of A.
+    /// Starting element of `A` within its backing storage.
     pub a_offset: u32,
+    /// Storage strides of `A` per dimension.
     pub a_strides: [u32; MAX_RANK],
-    /// Storage layout of B.
+    /// Starting element of `B` within its backing storage.
     pub b_offset: u32,
+    /// Storage strides of `B` per dimension.
     pub b_strides: [u32; MAX_RANK],
-    /// Storage layout of C.
+    /// Starting element of `C` within its backing storage.
     pub c_offset: u32,
+    /// Storage strides of `C` per dimension.
     pub c_strides: [u32; MAX_RANK],
 }
 

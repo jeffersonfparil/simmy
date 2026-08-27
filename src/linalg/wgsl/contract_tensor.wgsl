@@ -64,7 +64,7 @@
 // The first dimensions of C come from the non-contracted axes of A,
 // followed by the non-contracted axes of B.
 ///////////////////////////////////////////////////////////////////////////////
-struct TensorMulParams {
+struct ContractTensorParams {
     // Tensor ranks.
     a_rank: u32,
     b_rank: u32,
@@ -89,7 +89,22 @@ struct TensorMulParams {
     // Contracted axes.
     a_contract_axes: array<u32, 8>,
     b_contract_axes: array<u32, 8>,
+    // Operations
+    op_pairwise: u32,
+    op_reduction: u32,
 };
+
+const OP_PAIR_ADD : u32 = 0u;
+const OP_PAIR_SUB : u32 = 1u;
+const OP_PAIR_MUL : u32 = 2u;
+const OP_PAIR_DIV : u32 = 3u;
+const OP_PAIR_MIN : u32 = 4u;
+const OP_PAIR_MAX : u32 = 5u;
+
+const OP_REDUCE_ADD : u32 = 0u;
+const OP_REDUCE_MUL : u32 = 1u;
+const OP_REDUCE_MIN : u32 = 2u;
+const OP_REDUCE_MAX : u32 = 3u;
 
 ///////////////////////////////////////////////////////////////////////////////
 // Decode a linear tensor element index into tensor coordinates.
@@ -107,6 +122,9 @@ fn tensor_coords(
     shape: array<u32, 8>,
 ) -> array<u32, 8> {
     var coords: array<u32, 8>;
+    if (rank == 0u) {
+        return coords;
+    }
     var idx = linear_idx;
     // Recover coordinates from fastest-moving axis to
     // slowest-moving axis.
@@ -154,7 +172,7 @@ var<storage, read> B: array<f32>;
 var<storage, read_write> C: array<f32>;
 
 @group(0) @binding(3)
-var<storage, read> params: TensorMulParams;
+var<storage, read> params: ContractTensorParams;
 
 @compute
 @workgroup_size(256)
@@ -180,7 +198,7 @@ fn main(
         params.c_rank,
         params.c_shape,
     );
-    ///////////////////////////////////////////////////////////////////////
+    //////////////////////////////////
     // Step 2.
     // Build coordinate vectors for A and B. Contracted coordinates will
     // be filled later while iterating through the contraction space.
@@ -241,7 +259,24 @@ fn main(
     // Enumerate every coordinate in the contraction subspace and compute:
     //     Σ A[...] * B[...]
     ///////////////////////////////////////////////////////////////////////
-    var sum = 0.0;
+    var reduced = 0.0;
+    switch(params.op_reduction) {
+        case OP_REDUCE_ADD: {
+            reduced = 0.0;
+        }
+        case OP_REDUCE_MUL: {
+            reduced = 1.0;
+        }
+        case OP_REDUCE_MIN: {
+            reduced = 3.4028235e+38;
+        }
+        case OP_REDUCE_MAX: {
+            reduced = -3.4028235e+38;
+        }
+        default: {
+            return;
+        }
+    }
     for (var contract_linear = 0u; contract_linear < contract_elements; contract_linear++) {
         ///////////////////////////////////////////////////////////////////
         // Decode one point in the contraction subspace.
@@ -275,7 +310,49 @@ fn main(
         ///////////////////////////////////////////////////////////////////
         // Accumulate contribution from this contraction coordinate.
         ///////////////////////////////////////////////////////////////////
-        sum += A[a_idx] * B[b_idx];
+        let a = A[a_idx];
+        let b = B[b_idx];
+        var paired = a;
+        switch(params.op_pairwise) {
+            case OP_PAIR_ADD: {
+                paired = a + b;
+            }
+            case OP_PAIR_SUB: {
+                paired = a - b;
+            }
+            case OP_PAIR_MUL: {
+                paired = a * b;
+            }
+            case OP_PAIR_DIV: {
+                paired = a / b;
+            }
+            case OP_PAIR_MIN: {
+                paired = min(a, b);
+            }
+            case OP_PAIR_MAX: {
+                paired = max(a, b);
+            }
+            default: {
+                return;
+            }
+        }
+        switch(params.op_reduction) {
+            case OP_REDUCE_ADD: {
+                reduced += paired;
+            }
+            case OP_REDUCE_MUL: {
+                reduced *= paired;
+            }
+            case OP_REDUCE_MIN: {
+                reduced = min(reduced, paired);
+            }
+            case OP_REDUCE_MAX: {
+                reduced = max(reduced, paired);
+            }
+            default: {
+                return;
+            }
+        }
     }
     ///////////////////////////////////////////////////////////////////////
     // Step 6.
@@ -287,5 +364,5 @@ fn main(
         params.c_offset,
         params.c_strides,
     );
-    C[c_idx] = sum;
+    C[c_idx] = reduced;
 }

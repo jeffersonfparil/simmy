@@ -363,6 +363,55 @@ mod tests {
         assert_eq!(c.shape, vec![5, 7]);
         Ok(())
     }
+    #[test]
+    fn matmul_supports_transposed_left_operand() -> Result<()> {
+        let ctx = context();
+        let ops = MatrixOps { ctx: &ctx };
+        let a = GpuTensor::from_f32(
+            &ctx,
+            &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            vec![3, 2],
+            None,
+            None,
+        )?;
+        let b = GpuTensor::from_f32(
+            &ctx,
+            &[10.0, 20.0, 30.0, 40.0, 50.0, 60.0],
+            vec![3, 2],
+            None,
+            None,
+        )?;
+        let c = ops.multiply(&a.transpose(None)?, &b)?;
+        assert_eq!(c.shape, vec![2, 2]);
+        assert_eq!(c.to_vec_f32(&ctx)?, vec![350.0, 440.0, 440.0, 560.0,]);
+        Ok(())
+    }
+    #[test]
+    fn matmul_supports_transposed_right_operand() -> Result<()> {
+        let ctx = context();
+        let ops = MatrixOps { ctx: &ctx };
+        let a = GpuTensor::from_f32(
+            &ctx,
+            &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            vec![3, 2],
+            None,
+            None,
+        )?;
+        let b = GpuTensor::from_f32(
+            &ctx,
+            &[10.0, 20.0, 30.0, 40.0, 50.0, 60.0],
+            vec![3, 2],
+            None,
+            None,
+        )?;
+        let c = ops.multiply(&a, &b.transpose(None)?)?;
+        assert_eq!(c.shape, vec![3, 3]);
+        assert_eq!(
+            c.to_vec_f32(&ctx)?,
+            vec![50.0, 110.0, 170.0, 110.0, 250.0, 390.0, 170.0, 390.0, 610.0]
+        );
+        Ok(())
+    }
     ///////////////////////////////////////////
     // Tensors of arbitraty ranks
     ///////////////////////////////////////////
@@ -436,6 +485,42 @@ mod tests {
         assert_eq!(c.shape, vec![2, 3, 5]);
         assert_eq!(c.strides, vec![15, 5, 1]);
         assert_eq!(c.offset, 0);
+        Ok(())
+    }
+    #[test]
+    fn contract_supports_transposed_matrix_views() -> Result<()> {
+        let ctx = context();
+        let ops = TensorOps { ctx: &ctx };
+        let a = GpuTensor::from_f32(
+            &ctx,
+            &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            vec![3, 2],
+            None,
+            None,
+        )?;
+        let b = GpuTensor::from_f32(
+            &ctx,
+            &[10.0, 20.0, 30.0, 40.0, 50.0, 60.0],
+            vec![3, 2],
+            None,
+            None,
+        )?;
+        let at = a.transpose(None)?;
+        let c = ops.contract(&at, &b, &[1], &[0])?;
+        assert_eq!(c.shape, vec![2, 2]);
+        assert_eq!(c.to_vec_f32(&ctx)?, vec![350.0, 440.0, 440.0, 560.0,]);
+        Ok(())
+    }
+    #[test]
+    fn contract_supports_transposed_rank_3_tensor() -> Result<()> {
+        let ctx = context();
+        let ops = TensorOps { ctx: &ctx };
+        let a = GpuTensor::from_f32(&ctx, &[1.0; 24], vec![2, 3, 4], None, None)?;
+        let b = GpuTensor::from_f32(&ctx, &[2.0; 8], vec![2, 4], None, None)?;
+        let c = ops.contract(&a.transpose(None)?, &b, &[2], &[0])?;
+        assert_eq!(c.shape, vec![4, 3, 4]);
+        let values = c.to_vec_f32(&ctx)?;
+        assert!(values.iter().all(|v| *v == 4.0));
         Ok(())
     }
 }
