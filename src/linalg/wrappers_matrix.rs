@@ -297,4 +297,9 @@ impl GpuKernel<'_> {
             Some(b),
         )
     }
+    // TODO: Haddamard sum (ADD --> ADD)
+    // TODO: Min-Plus Algebra (ADD --> MIN)
+    // TODO: Max-Plus Algebra (ADD --> MAX)
+    // TODO: Max-Mul (MUL --> MAX)
+    //
 }
