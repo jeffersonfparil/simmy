@@ -14,14 +14,6 @@ struct UnaryMatrixParams {
     op: u32,
 };
 
-const OP_ABS  : u32 = 0u;
-const OP_NEG  : u32 = 1u;
-const OP_SQRT : u32 = 2u;
-const OP_EXP  : u32 = 3u;
-const OP_LOG  : u32 = 4u;
-const OP_SIN  : u32 = 5u;
-const OP_COS  : u32 = 6u;
-
 fn matrix_index(
     row: u32,
     col: u32,

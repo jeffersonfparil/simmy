@@ -196,11 +196,11 @@ impl GpuKernel<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::f64::consts::PI;
     use crate::linalg::context::GpuContext;
     use crate::linalg::params::{BinaryMatrixParams, ContractMatrixParams, UnaryMatrixParams};
     use crate::linalg::tensor::GpuTensor;
     use anyhow::Result;
+    use std::f64::consts::PI;
 
     // Unary operations
     const OP_ABS: u32 = 0;
@@ -475,7 +475,7 @@ mod tests {
         let a = GpuTensor::from_f32(&ctx, &[1.0, 0.0, 0.0, 1.0], vec![2, 2], None, None)?;
         let b = GpuTensor::from_f32(&ctx, &[0.0, 1.0, 1.0, 0.0], vec![2, 2], None, None)?;
         let c = ops.execute_kernel(binary_matrix_params(OP_ATAN2), &a, Some(&b))?;
-        assert_eq!(c.to_vec_f32(&ctx)?, vec![pi/2.0, 0.0, 0.0, pi/2.0]);
+        assert_eq!(c.to_vec_f32(&ctx)?, vec![pi / 2.0, 0.0, 0.0, pi / 2.0]);
         Ok(())
     }
     #[test]

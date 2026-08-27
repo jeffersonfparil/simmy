@@ -289,17 +289,40 @@ impl GpuKernel<'_> {
         self.execute_kernel(a.params_binary_matrix(b, Operations::GE)?, a, Some(b))
     }
 
-    // Contract
+    // Matrix multiplication
     pub fn matmul(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
-        self.execute_kernel(
-            a.params_contract_matrix(b, Operations::MUL, Operations::ADD)?,
-            a,
-            Some(b),
-        )
+        let params = a.params_contract_matrix(b, Operations::MUL, Operations::ADD)?;
+        self.execute_kernel(params, a, Some(b))
     }
-    // TODO: Haddamard sum (ADD --> ADD)
-    // TODO: Min-Plus Algebra (ADD --> MIN)
-    // TODO: Max-Plus Algebra (ADD --> MAX)
-    // TODO: Max-Mul (MUL --> MAX)
+    // // Boolean matrix multiplication
+    // pub fn matmul_bool(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
+    //     let params = a.params_contract_matrix(b, Operations::AND, Operations::OR)?;
+    //     self.execute_kernel(params, a, Some(b))
+    // }
+    // Hadamard sum (ADD --> ADD)
+    pub fn hadamard_sum(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
+        let params = a.params_contract_matrix(b, Operations::ADD, Operations::ADD)?;
+        self.execute_kernel(params, a, Some(b))
+    }
+    // Min-Plus Algebra (ADD --> MIN)
+    pub fn min_plus(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
+        let params = a.params_contract_matrix(b, Operations::ADD, Operations::MIN)?;
+        self.execute_kernel(params, a, Some(b))
+    }
+    // Max-Plus Algebra (ADD --> MAX)
+    pub fn max_plus(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
+        let params = a.params_contract_matrix(b, Operations::ADD, Operations::MAX)?;
+        self.execute_kernel(params, a, Some(b))
+    }
+    // Min-Mul (MUL --> MIN)
+    pub fn min_mul(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
+        let params = a.params_contract_matrix(b, Operations::MUL, Operations::MIN)?;
+        self.execute_kernel(params, a, Some(b))
+    }
+    // Max-Mul (MUL --> MAX)
+    pub fn max_mul(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
+        let params = a.params_contract_matrix(b, Operations::MUL, Operations::MAX)?;
+        self.execute_kernel(params, a, Some(b))
+    }
     //
 }

@@ -94,18 +94,6 @@ struct ContractTensorParams {
     op_reduction: u32,
 };
 
-const OP_PAIR_ADD : u32 = 0u;
-const OP_PAIR_SUB : u32 = 1u;
-const OP_PAIR_MUL : u32 = 2u;
-const OP_PAIR_DIV : u32 = 3u;
-const OP_PAIR_MIN : u32 = 4u;
-const OP_PAIR_MAX : u32 = 5u;
-
-const OP_REDUCE_ADD : u32 = 0u;
-const OP_REDUCE_MUL : u32 = 1u;
-const OP_REDUCE_MIN : u32 = 2u;
-const OP_REDUCE_MAX : u32 = 3u;
-
 ///////////////////////////////////////////////////////////////////////////////
 // Decode a linear tensor element index into tensor coordinates.
 // Example:

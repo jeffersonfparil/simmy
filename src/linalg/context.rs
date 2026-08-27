@@ -183,6 +183,7 @@ impl GpuContext {
             .await
             .context("No adapter")?;
         let (device, queue) = adapter.request_device(&Default::default()).await?;
+        let opcode_source: &str = include_str!("wgsl/opcodes.wgsl");
         let kernel_sources: Vec<&str> = vec![
             include_str!("wgsl/unary_matrix.wgsl"),
             include_str!("wgsl/binary_matrix.wgsl"),
@@ -193,9 +194,10 @@ impl GpuContext {
         ];
         let mut pipelines: Vec<ComputePipeline> = Vec::with_capacity(kernel_sources.len());
         for kernel_source in kernel_sources {
+            let source = format!("{}\n{}", opcode_source, kernel_source);
             let kernel_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("kernel"),
-                source: wgpu::ShaderSource::Wgsl(kernel_source.into()),
+                source: wgpu::ShaderSource::Wgsl(source.into()),
             });
             let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some("pipeline"),
