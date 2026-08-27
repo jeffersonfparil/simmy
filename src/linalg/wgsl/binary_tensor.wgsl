@@ -190,6 +190,15 @@ fn main(
         case OP_GE: {
             result = select(0.0, 1.0, a >= b);
         }
+        case OP_AND: {
+            result = select(0.0, 1.0, (a != 0.0) && (b != 0.0));
+        }
+        case OP_OR: {
+            result = select(0.0, 1.0, (a != 0.0) || (b != 0.0));
+        }
+        case OP_XOR: {
+            result = select(0.0, 1.0, (a != 0.0) != (b != 0.0));
+        }
         default: {
             return;
         }

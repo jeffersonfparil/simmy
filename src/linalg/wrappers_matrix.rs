@@ -1,90 +1,11 @@
 use crate::linalg::kernel::{GpuKernel, Params};
 use crate::linalg::params::{BinaryMatrixParams, ContractMatrixParams, UnaryMatrixParams};
 use crate::linalg::tensor::GpuTensor;
-use anyhow::{Result, bail, ensure};
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Operations {
-    ABS,
-    NEG,
-    SQRT,
-    EXP,
-    LOG,
-    SIN,
-    COS,
-
-    ADD,
-    SUB,
-    MUL,
-    DIV,
-    MIN,
-    MAX,
-    POW,
-    ATAN2,
-    EQ,
-    NE,
-    LT,
-    LE,
-    GT,
-    GE,
-}
-
-impl Operations {
-    fn unary_opcode(self) -> Result<u32> {
-        match self {
-            Self::ABS => Ok(0),
-            Self::NEG => Ok(1),
-            Self::SQRT => Ok(2),
-            Self::EXP => Ok(3),
-            Self::LOG => Ok(4),
-            Self::SIN => Ok(5),
-            Self::COS => Ok(6),
-            _ => bail!("Invalid unary matrix operation!"),
-        }
-    }
-    fn binary_opcode(self) -> Result<u32> {
-        match self {
-            Self::ADD => Ok(0),
-            Self::SUB => Ok(1),
-            Self::MUL => Ok(2),
-            Self::DIV => Ok(3),
-            Self::MIN => Ok(4),
-            Self::MAX => Ok(5),
-            Self::POW => Ok(6),
-            Self::ATAN2 => Ok(7),
-            Self::EQ => Ok(8),
-            Self::NE => Ok(9),
-            Self::LT => Ok(10),
-            Self::LE => Ok(11),
-            Self::GT => Ok(12),
-            Self::GE => Ok(13),
-            _ => bail!("Invalid binary matrix operation!"),
-        }
-    }
-    fn contract_pairwise_opcode(self) -> Result<u32> {
-        match self {
-            Self::ADD => Ok(0),
-            Self::SUB => Ok(1),
-            Self::MUL => Ok(2),
-            Self::DIV => Ok(3),
-            Self::MIN => Ok(4),
-            Self::MAX => Ok(5),
-            _ => bail!("Invalid contract matrix pairwise operation!"),
-        }
-    }
-    fn contract_reduction_opcode(self) -> Result<u32> {
-        match self {
-            Self::ADD => Ok(0),
-            Self::MUL => Ok(1),
-            Self::MIN => Ok(2),
-            Self::MAX => Ok(3),
-            _ => bail!("Invalid contract matrix reduction operation!"),
-        }
-    }
-}
+use crate::linalg::operations::Operation;
+use anyhow::{Result, ensure};
 
 impl GpuTensor {
-    pub fn params_unary_matrix(&self, op: Operations) -> Result<Params> {
+    pub fn params_unary_matrix(&self, op: Operation) -> Result<Params> {
         ensure!(self.shape.len() == 2, "A must be rank 2!");
         let params = UnaryMatrixParams {
             // Number of rows in `A`, and `C`.
@@ -104,19 +25,19 @@ impl GpuTensor {
             // Storage stride between columns of `C`.
             c_col_stride: 1,
             // Mathematical operation: op(A) -> C.
-            //     - OP_ABS = 0
-            //     - OP_NEG = 1
-            //     - OP_SQRT = 2
-            //     - OP_EXP = 3
-            //     - OP_LOG = 4
-            //     - OP_SIN = 5
-            //     - OP_COS = 6
+            //     - ABS = 0
+            //     - NEG = 1
+            //     - SQRT = 2
+            //     - EXP = 3
+            //     - LOG = 4
+            //     - SIN = 5
+            //     - COS = 6
             op: op.unary_opcode()?,
         };
         Ok(Params::UnaryMatrix(params))
     }
 
-    pub fn params_binary_matrix(&self, b: &Self, op: Operations) -> Result<Params> {
+    pub fn params_binary_matrix(&self, b: &Self, op: Operation) -> Result<Params> {
         ensure!(self.shape.len() == 2, "A must be rank 2!");
         ensure!(b.shape.len() == 2, "B must be rank 2!");
         ensure!(self.shape == b.shape, "A and B mush have the same shape!");
@@ -144,16 +65,16 @@ impl GpuTensor {
             // Storage stride between columns of `C`.
             c_col_stride: 1,
             // Mathematical operation: op(A, B) -> C.
-            //     - OP_ADD = 0;
-            //     - OP_SUB = 1;
-            //     - OP_MUL = 2;
-            //     - OP_DIV = 3;
-            //     - OP_MIN = 4;
-            //     - OP_MAX = 5;
-            //     - OP_POW = 6;
-            //     - OP_ATAN2 = 7;
-            //     - OP_EQ = 8;
-            //     - OP_NE = 9;
+            //     - ADD = 0;
+            //     - SUB = 1;
+            //     - MUL = 2;
+            //     - DIV = 3;
+            //     - MIN = 4;
+            //     - MAX = 5;
+            //     - POW = 6;
+            //     - ATAN2 = 7;
+            //     - EQ = 8;
+            //     - NE = 9;
             //     - OP_LT = 10;
             //     - OP_LE = 11;
             //     - OP_GT = 12;
@@ -166,8 +87,8 @@ impl GpuTensor {
     pub fn params_contract_matrix(
         &self,
         b: &Self,
-        op_pairwise: Operations,
-        op_reduction: Operations,
+        op_pairwise: Operation,
+        op_reduction: Operation,
     ) -> Result<Params> {
         ensure!(self.shape.len() == 2, "A must be rank 2!");
         ensure!(b.shape.len() == 2, "B must be rank 2!");
@@ -224,105 +145,109 @@ impl GpuTensor {
 impl GpuKernel<'_> {
     // Unary
     pub fn abs_matrix(&self, a: &GpuTensor) -> Result<GpuTensor> {
-        self.execute_kernel(a.params_unary_matrix(Operations::ABS)?, a, None)
+        self.execute_kernel(a.params_unary_matrix(Operation::ABS)?, a, None)
     }
     pub fn neg_matrix(&self, a: &GpuTensor) -> Result<GpuTensor> {
-        self.execute_kernel(a.params_unary_matrix(Operations::NEG)?, a, None)
+        self.execute_kernel(a.params_unary_matrix(Operation::NEG)?, a, None)
     }
     pub fn sqrt_matrix(&self, a: &GpuTensor) -> Result<GpuTensor> {
-        self.execute_kernel(a.params_unary_matrix(Operations::SQRT)?, a, None)
+        self.execute_kernel(a.params_unary_matrix(Operation::SQRT)?, a, None)
     }
     pub fn exp_matrix(&self, a: &GpuTensor) -> Result<GpuTensor> {
-        self.execute_kernel(a.params_unary_matrix(Operations::EXP)?, a, None)
+        self.execute_kernel(a.params_unary_matrix(Operation::EXP)?, a, None)
     }
     pub fn log_matrix(&self, a: &GpuTensor) -> Result<GpuTensor> {
-        self.execute_kernel(a.params_unary_matrix(Operations::LOG)?, a, None)
+        self.execute_kernel(a.params_unary_matrix(Operation::LOG)?, a, None)
     }
     pub fn sin_matrix(&self, a: &GpuTensor) -> Result<GpuTensor> {
-        self.execute_kernel(a.params_unary_matrix(Operations::SIN)?, a, None)
+        self.execute_kernel(a.params_unary_matrix(Operation::SIN)?, a, None)
     }
     pub fn cos_matrix(&self, a: &GpuTensor) -> Result<GpuTensor> {
-        self.execute_kernel(a.params_unary_matrix(Operations::COS)?, a, None)
+        self.execute_kernel(a.params_unary_matrix(Operation::COS)?, a, None)
     }
 
     // Binary
     pub fn add_matrix(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
-        self.execute_kernel(a.params_binary_matrix(b, Operations::ADD)?, a, Some(b))
+        self.execute_kernel(a.params_binary_matrix(b, Operation::ADD)?, a, Some(b))
     }
     pub fn sub_matrix(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
-        self.execute_kernel(a.params_binary_matrix(b, Operations::SUB)?, a, Some(b))
+        self.execute_kernel(a.params_binary_matrix(b, Operation::SUB)?, a, Some(b))
     }
     pub fn mul_matrix(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
-        self.execute_kernel(a.params_binary_matrix(b, Operations::MUL)?, a, Some(b))
+        self.execute_kernel(a.params_binary_matrix(b, Operation::MUL)?, a, Some(b))
     }
     pub fn div_matrix(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
-        self.execute_kernel(a.params_binary_matrix(b, Operations::DIV)?, a, Some(b))
+        self.execute_kernel(a.params_binary_matrix(b, Operation::DIV)?, a, Some(b))
     }
     pub fn min_matrix(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
-        self.execute_kernel(a.params_binary_matrix(b, Operations::MIN)?, a, Some(b))
+        self.execute_kernel(a.params_binary_matrix(b, Operation::MIN)?, a, Some(b))
     }
     pub fn max_matrix(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
-        self.execute_kernel(a.params_binary_matrix(b, Operations::MAX)?, a, Some(b))
+        self.execute_kernel(a.params_binary_matrix(b, Operation::MAX)?, a, Some(b))
     }
     pub fn pow_matrix(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
-        self.execute_kernel(a.params_binary_matrix(b, Operations::POW)?, a, Some(b))
+        self.execute_kernel(a.params_binary_matrix(b, Operation::POW)?, a, Some(b))
     }
     pub fn atan2_matrix(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
-        self.execute_kernel(a.params_binary_matrix(b, Operations::ATAN2)?, a, Some(b))
+        self.execute_kernel(a.params_binary_matrix(b, Operation::ATAN2)?, a, Some(b))
     }
     pub fn eq_matrix(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
-        self.execute_kernel(a.params_binary_matrix(b, Operations::EQ)?, a, Some(b))
+        self.execute_kernel(a.params_binary_matrix(b, Operation::EQ)?, a, Some(b))
     }
     pub fn ne_matrix(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
-        self.execute_kernel(a.params_binary_matrix(b, Operations::NE)?, a, Some(b))
+        self.execute_kernel(a.params_binary_matrix(b, Operation::NE)?, a, Some(b))
     }
     pub fn lt_matrix(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
-        self.execute_kernel(a.params_binary_matrix(b, Operations::LT)?, a, Some(b))
+        self.execute_kernel(a.params_binary_matrix(b, Operation::LT)?, a, Some(b))
     }
     pub fn le_matrix(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
-        self.execute_kernel(a.params_binary_matrix(b, Operations::LE)?, a, Some(b))
+        self.execute_kernel(a.params_binary_matrix(b, Operation::LE)?, a, Some(b))
     }
     pub fn gt_matrix(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
-        self.execute_kernel(a.params_binary_matrix(b, Operations::GT)?, a, Some(b))
+        self.execute_kernel(a.params_binary_matrix(b, Operation::GT)?, a, Some(b))
     }
     pub fn ge_matrix(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
-        self.execute_kernel(a.params_binary_matrix(b, Operations::GE)?, a, Some(b))
+        self.execute_kernel(a.params_binary_matrix(b, Operation::GE)?, a, Some(b))
     }
 
-    // Matrix multiplication
+    // Matrix multiplication (MUL --> ADD)
     pub fn matmul(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
-        let params = a.params_contract_matrix(b, Operations::MUL, Operations::ADD)?;
+        let params = a.params_contract_matrix(b, Operation::MUL, Operation::ADD)?;
         self.execute_kernel(params, a, Some(b))
     }
-    // // Boolean matrix multiplication
-    // pub fn matmul_bool(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
-    //     let params = a.params_contract_matrix(b, Operations::AND, Operations::OR)?;
-    //     self.execute_kernel(params, a, Some(b))
-    // }
     // Hadamard sum (ADD --> ADD)
     pub fn hadamard_sum(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
-        let params = a.params_contract_matrix(b, Operations::ADD, Operations::ADD)?;
+        let params = a.params_contract_matrix(b, Operation::ADD, Operation::ADD)?;
         self.execute_kernel(params, a, Some(b))
     }
     // Min-Plus Algebra (ADD --> MIN)
     pub fn min_plus(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
-        let params = a.params_contract_matrix(b, Operations::ADD, Operations::MIN)?;
+        let params = a.params_contract_matrix(b, Operation::ADD, Operation::MIN)?;
         self.execute_kernel(params, a, Some(b))
     }
     // Max-Plus Algebra (ADD --> MAX)
     pub fn max_plus(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
-        let params = a.params_contract_matrix(b, Operations::ADD, Operations::MAX)?;
+        let params = a.params_contract_matrix(b, Operation::ADD, Operation::MAX)?;
         self.execute_kernel(params, a, Some(b))
     }
     // Min-Mul (MUL --> MIN)
     pub fn min_mul(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
-        let params = a.params_contract_matrix(b, Operations::MUL, Operations::MIN)?;
+        let params = a.params_contract_matrix(b, Operation::MUL, Operation::MIN)?;
         self.execute_kernel(params, a, Some(b))
     }
     // Max-Mul (MUL --> MAX)
     pub fn max_mul(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
-        let params = a.params_contract_matrix(b, Operations::MUL, Operations::MAX)?;
+        let params = a.params_contract_matrix(b, Operation::MUL, Operation::MAX)?;
         self.execute_kernel(params, a, Some(b))
     }
-    //
+    // Boolean matrix multiplication (AND --> OR)
+    pub fn matmul_bool(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
+        let params = a.params_contract_matrix(b, Operation::AND, Operation::OR)?;
+        self.execute_kernel(params, a, Some(b))
+    }
+    // Equality Counting (EQ --> ADD)
+    pub fn eqcount(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
+        let params = a.params_contract_matrix(b, Operation::EQ, Operation::ADD)?;
+        self.execute_kernel(params, a, Some(b))
+    }
 }

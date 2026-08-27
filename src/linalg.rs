@@ -1,5 +1,6 @@
 pub mod context;
 pub mod kernel;
+pub mod operations;
 pub mod params;
 pub mod tensor;
 pub mod transpose;

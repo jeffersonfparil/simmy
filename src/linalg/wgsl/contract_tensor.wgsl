@@ -261,6 +261,15 @@ fn main(
         case OP_REDUCE_MAX: {
             reduced = -3.4028235e+38;
         }
+        case OP_REDUCE_AND: {
+            reduced = 1.0;
+        }
+        case OP_REDUCE_OR: {
+            reduced = 0.0;
+        }
+        case OP_REDUCE_XOR: {
+            reduced = 0.0;
+        }
         default: {
             return;
         }
@@ -320,6 +329,18 @@ fn main(
             case OP_PAIR_MAX: {
                 paired = max(a, b);
             }
+            case OP_PAIR_EQ: {
+                paired = select(0.0, 1.0, a == b);
+            }
+            case OP_PAIR_AND: {
+                paired = select(0.0, 1.0, (a != 0.0) && (b != 0.0));
+            }
+            case OP_PAIR_OR: {
+                paired = select(0.0, 1.0, (a != 0.0) || (b != 0.0));
+            }
+            case OP_PAIR_XOR: {
+                paired = select(0.0, 1.0, (a != 0.0) != (b != 0.0));
+            }
             default: {
                 return;
             }
@@ -336,6 +357,15 @@ fn main(
             }
             case OP_REDUCE_MAX: {
                 reduced = max(reduced, paired);
+            }
+            case OP_REDUCE_AND: {
+                reduced = select(0.0, 1.0, (reduced != 0.0) && (paired != 0.0));
+            }
+            case OP_REDUCE_OR: {
+                reduced = select(0.0, 1.0, (reduced != 0.0) || (paired != 0.0));
+            }
+            case OP_REDUCE_XOR: {
+                reduced = select(0.0, 1.0, (reduced != 0.0) != (paired != 0.0));
             }
             default: {
                 return;

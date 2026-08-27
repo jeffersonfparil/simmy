@@ -155,6 +155,9 @@ fn main(
         case OP_COS: {
             result = cos(a);
         }
+        case OP_NOT: {
+            result = select(0.0, 1.0, a == 0.0);
+        }
         default: {
             return;
         }
