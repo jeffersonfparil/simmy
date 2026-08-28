@@ -5,5 +5,4 @@ pub mod params;
 pub mod tensor;
 pub mod transpose;
 pub mod wrappers_matrix;
-// pub mod addition;
-// pub mod multiplication;
+pub mod wrappers_tensor;

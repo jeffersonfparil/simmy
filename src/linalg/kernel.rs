@@ -33,6 +33,10 @@ pub enum Params {
 }
 
 impl GpuKernel<'_> {
+    pub fn new<'a>(ctx: &'a GpuContext) -> GpuKernel<'a> {
+        GpuKernel { ctx }
+    }
+
     pub fn execute_kernel(
         &self,
         params: Params,
