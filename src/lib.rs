@@ -1,5 +1,5 @@
-pub mod linalg;
 pub mod io;
+pub mod linalg;
 
 use anyhow::Result;
 use linalg::context::GpuContext;

@@ -1,0 +1,5651 @@
+
+
+-------------------------------
+src/
+
+
+-------------------------------
+src/main.rs
+use simmy::run;
+
+fn main() -> anyhow::Result<()> {
+    println!("Hello, world!");
+    pollster::block_on(run())?;
+    Ok(())
+}
+
+
+-------------------------------
+src/linalg.rs
+pub mod context;
+pub mod kernel;
+pub mod operations;
+pub mod params;
+pub mod slice;
+pub mod tensor;
+pub mod transpose;
+pub mod wrappers_matrix;
+pub mod wrappers_tensor;
+
+
+-------------------------------
+src/io.rs
+//! # Genomic and Phenotypic Data Structures for Breeding Simulations
+//!
+//! This module defines the CPU-side relational metadata and structural foundations
+//! of the simulation engine. The primary design goal is to cleanly decouple heavy,
+//! text-based biological metadata (which resides on the CPU) from raw, highly
+//! optimized numerical arrays (which reside on the GPU as [`GpuTensor`] instances) [1, 2].
+//!
+//! ### Why This Architecture is Optimized for Breeding Simulations:
+//! 1. **GPU/CPU Modularity:** Simulating cohorts over generations involves complex CPU-bound
+//!    recombination, crossover logic, and pedigree tracing. Meanwhile, calculating genomic
+//!    breeding values (GEBVs), selection indices, and linkage disequilibrium (LD) matrices
+//!    is delegated to massive parallel matrix algebra on the GPU [2].
+//! 2. **Support for Multi-Allelic Loci:** Real-world breeding pools contain highly variable
+//!    multi-allelic states (e.g., microsatellites, structural variants, or multiple founder
+//!    haplotypes). By flattening these states into a relational mapping table ([`LocusAllele`]),
+//!    this design supports arbitrary allelic counts per site on a unified GPU matrix coordinate system.
+//! 3. **Struct-of-Arrays (SoA) Layout:** Storing metadata attributes in parallel vectors
+//!    allows rapid CPU-side scanning, demographic filtering, and generation masking without
+//!    the memory overhead of unpacking deeply nested structures.
+//!
+use crate::linalg::context::GpuContext;
+use crate::linalg::kernel::GpuKernel;
+use crate::linalg::tensor::GpuTensor;
+
+/// Represents physical genomic chromosomes, scaffolds, or contigs.
+///
+/// ### Breeding Simulation Context:
+/// Essential for simulating physical linkage, chromosomal crossover events during
+/// meiosis, and modeling genetic recombination maps. The sequence coordinates mapped
+/// against physical chromosomal lengths enable calculation of centimorgan (cM) distances
+/// and crossover probabilities during simulated mating cycles.
+#[derive(Debug, Clone)]
+pub struct Chromosomes {
+    /// Unique names/identifiers for each chromosome, scaffold, or contig.
+    pub chromosomes: Vec<String>,
+    /// Physical sizes (lengths in base pairs) corresponding to each chromosome.
+    /// Used for validating recombination crossover boundaries.
+    pub lengths: Vec<usize>,
+}
+
+/// A global dictionary of unique allelic variant sequences or sequence states.
+///
+/// ### Breeding Simulation Context:
+/// This acts as a centralized registry for any physical allele represented in the pool—ranging
+/// from single-nucleotide polymorphisms (SNPs) to complex insertions, deletions (DEL),
+/// and large structural variants. It decouples descriptive string-based sequence data
+/// from the active, high-speed numeric matrices running on the GPU.
+#[derive(Debug, Clone)]
+pub struct Alleles {
+    /// String representations of the allele sequences (e.g., "A", "T", "DEL", "GATGCGC").
+    pub names: Vec<String>,
+}
+
+/// Defines a physical genomic feature or coordinate region (locus) and its valid alleles.
+///
+/// ### Breeding Simulation Context:
+/// Represents individual markers (SNPs) or quantitative trait loci (QTL). By holding
+/// a list of valid `allele_ids` local to this locus, it naturally supports **monoallelic** (fixed),
+/// **biallelic** (standard SNPs), and **multi-allelic** loci within the same genome.
+#[derive(Debug, Clone)]
+pub struct Locus {
+    /// ID of the chromosome where this locus resides (indexes into [`Chromosomes`]).
+    pub chromosome_id: usize,
+    /// Start physical coordinate in base pairs (0-indexed, inclusive).
+    pub start: usize,
+    /// End physical coordinate in base pairs (exclusive).
+    pub end: usize,
+    /// Valid allele identifiers observable at this locus (indexes into [`Alleles`]).
+    pub allele_ids: Vec<usize>,
+}
+
+/// A key relational mapping that bridges a physical locus to a specific sequence variant.
+///
+/// ### Why We Chose This Structure:
+/// In population simulations, alleles are variable per locus. A standard matrix representation
+/// assuming only biallelic SNPs fails under multi-allelic states.
+///
+/// This structure solves the problem by providing a flat relational lookup table.
+/// Every entry represents a unique **locus-allele combination**, which directly maps to a column
+/// index in the GPU genotype tensor. This enables the GPU compute kernels to perform rapid
+/// linear algebra on variable-allele genomes by representing them as flattened dosage columns.
+#[derive(Debug, Clone)]
+pub struct LocusAllele {
+    /// The physical location of the marker (indexes into [`Genome::loci`]).
+    pub locus_id: usize,
+    /// The specific sequence variant associated with this locus (indexes into [`Alleles`]).
+    pub allele_id: usize,
+}
+
+/// The global blueprint of the simulation's genomic architecture.
+///
+/// ### Breeding Simulation Context:
+/// Acts as the central validation authority on the CPU. It ensures that any imported,
+/// generated, or simulated genomic structure is internally consistent, verifying that
+/// chromosomal boundaries, loci, and locus-allele combinations are valid before initiating
+/// a simulation run.
+#[derive(Debug, Clone)]
+pub struct Genome {
+    /// The chromosome configurations defining physical linkage groups.
+    pub chromosomes: Chromosomes,
+    /// The global lookup dictionary of physical sequence variations.
+    pub alleles: Alleles,
+    /// The list of genomic loci/markers (such as QTL or SNPs) being tracked.
+    pub loci: Vec<Locus>,
+    /// The relational map of all locus-allele combinations (used to decode GPU tensor column indices).
+    pub loci_alleles: Vec<LocusAllele>,
+}
+
+/// High-level demographic metadata representing individual animals, plants, or lines.
+///
+/// ### Breeding Simulation Context:
+/// Manages population structures, cohort generations, and pedigrees on the CPU. By separating
+/// this qualitative tracking from the dense numerical genotype tensors, you can query, slice,
+/// and filter breeding cohorts (e.g., separating founders, generation F1, or target breeding lines)
+/// cleanly on the CPU to dynamically assemble indexing vectors for GPU acceleration.
+#[derive(Debug, Clone)]
+pub struct Entries {
+    /// Names or unique identifiers of each individual or line in the dataset.
+    pub names: Vec<String>,
+    /// Taxonomic classification (e.g., species or subspecies) for multi-species scenarios.
+    pub species: Vec<String>,
+    /// Breeding cohort or origin group identifier (e.g., "Founder_A", "Cycle_5").
+    pub population: Vec<String>,
+    /// User-defined categorization, breeding tiers, or selection groups.
+    pub classification: Vec<String>,
+    /// Arbitrary historical logs, pedigree descriptions, or metadata notes.
+    pub notes: Vec<String>,
+}
+
+/// Metadata describing quantitative traits under selection.
+///
+/// ### Breeding Simulation Context:
+/// Defines targets for breeding programs (e.g., disease resistance, yield, stature).
+/// It enables multi-trait selection schemes, economic weights configuration, and tracking
+/// how genetic architectures map to multiple target phenotypes.
+#[derive(Debug, Clone)]
+pub struct Traits {
+    /// Names of the tracked quantitative traits.
+    pub names: Vec<String>,
+    /// Descriptions of genetic parameters, heritabilities, or breeding objectives.
+    pub notes: Vec<String>,
+}
+
+/// The primary GPU-backed genotype representation for high-throughput computing.
+///
+/// ### Why We Chose This Structure:
+/// In quantitative genetics and breeding, the genotype matrix is the bottleneck of calculations.
+/// Storing this as a [`GpuTensor`] on the GPU enables extremely fast, massively parallel operations:
+/// - Calculating genomic relationship matrices (GRM).
+/// - Matrix multiplication of marker effect sizes for genomic prediction ($X \beta$).
+/// - Slicing and selecting specific subgroups using zero-copy stride manipulations [2, 3].
+#[derive(Debug)]
+pub struct GenotypeData {
+    /// Rows of the genotype matrix: indices pointing to the evaluated individuals in [`Entries`].
+    pub entry_ids: Vec<usize>,
+    /// Columns of the genotype matrix: indices mapping to physical alleles via [`LocusAllele`].
+    pub locus_allele_ids: Vec<usize>,
+    /// Dense GPU matrix of shape `[entry_ids.len(), locus_allele_ids.len()]` [2].
+    /// Represents allelic dosages (e.g., count, probability, or state of the allele).
+    pub data: GpuTensor,
+}
+
+/// The observed phenotype metrics backed by high-performance GPU storage.
+///
+/// ### Breeding Simulation Context:
+/// This holds the quantitative performance values of each individual across multiple traits.
+/// Storing these on the GPU allows the simulation engine to perform real-time selection-index
+/// calculations, variance-covariance estimations, and evaluation sweeps directly in GPU memory,
+/// feeding selection decisions straight back into the next simulated mating cycle.
+#[derive(Debug)]
+pub struct PhenotypeData {
+    /// Rows of the phenotype matrix: indices pointing to the evaluated individuals in [`Entries`].
+    pub entry_ids: Vec<usize>,
+    /// Columns of the phenotype matrix: indices pointing to quantitative traits in [`Traits`].
+    pub trait_ids: Vec<usize>,
+    /// Dense GPU matrix of shape `[entry_ids.len(), trait_ids.len()]` [2].
+    /// Stores the phenotypic value floats (e.g., breeding estimates, observed values).
+    pub data: GpuTensor,
+}
+
+
+-------------------------------
+src/lib.rs
+pub mod io;
+pub mod linalg;
+
+use anyhow::Result;
+use linalg::context::GpuContext;
+use linalg::tensor::GpuTensor;
+// use linalg::operations::MatrixOps;
+// use linalg::kernel::GpuKernel;
+
+// TODO: this were CLI arguments parsing will live...
+
+pub async fn run() -> Result<()> {
+    let ctx = pollster::block_on(GpuContext::new()).expect("Failed to create GPU context");
+    println!("ctx: {}", ctx);
+    let a = GpuTensor::from_f32(
+        &ctx,
+        &(0..6).map(|x| x as f32).collect::<Vec<f32>>(),
+        vec![2, 3],
+        None,
+        None,
+    )?;
+    println!("a: {}", a);
+    let b = GpuTensor::from_f32(
+        &ctx,
+        &(0..12).map(|x| x as f32).collect::<Vec<f32>>(),
+        vec![3, 4],
+        None,
+        None,
+    )?;
+    println!("b: {}", b);
+    // let ops = MatrixOps { ctx: &ctx };
+    // let c = ops.multiply(&a, &b)?;
+    // println!("c: {}", c);
+    Ok(())
+}
+
+
+-------------------------------
+src/linalg
+
+
+-------------------------------
+src/linalg/context.rs
+use anyhow::{Context, Result};
+use std::fmt;
+use wgpu::ComputePipeline;
+
+/// GPU Context
+///
+/// Owns the GPU runtime state required in building and manipulating tensors including kernel operations.
+/// This is intended to be created once and then shared by tensors, kernels, and other ternsor operations.
+///
+/// * `instance` discovers the GPU backend and adapters.
+/// * `adapter` represents the selected physical GPU.
+/// * `device` is the logical connection used to create GPU resources.
+/// * `queue` is used to submit work to the GPU.
+///
+/// Note that this can represent a CPU, if a dedicate physical GPU hardware does not exist, i.e. CPU-backed Vulkan implementation is used.
+#[derive(Debug)]
+pub struct GpuContext {
+    pub instance: wgpu::Instance,
+    pub adapter: wgpu::Adapter,
+    pub device: wgpu::Device,
+    pub queue: wgpu::Queue,
+
+    pub unary_matrix_pipeline: wgpu::ComputePipeline,
+    pub binary_matrix_pipeline: wgpu::ComputePipeline,
+    pub contract_matrix_pipeline: wgpu::ComputePipeline,
+
+    pub unary_tensor_pipeline: wgpu::ComputePipeline,
+    pub binary_tensor_pipeline: wgpu::ComputePipeline,
+    pub contract_tensor_pipeline: wgpu::ComputePipeline,
+}
+
+/// Print GPU context information
+///
+/// * `Name` is the adapter name reported by the backend.
+/// * `Type` indicates whether the adapter is a CPU, integrated GPU,
+///   discrete GPU, virtual GPU, or other device.
+/// * `Backend` identifies the WGPU backend in use (e.g. Vulkan,
+///   Metal, DirectX, or OpenGL).
+/// * `Vendor` is the hardware vendor identifier.
+/// * `Driver` contains the driver name and additional driver details.
+impl fmt::Display for GpuContext {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let info = self.adapter.get_info();
+        writeln!(f, "GPU Hardware Information:")?;
+        writeln!(f, "  Name:    {}", info.name)?;
+        writeln!(f, "  Type:    {:?}", info.device_type)?;
+        writeln!(f, "  Backend: {:?}", info.backend)?;
+        writeln!(f, "  Vendor:  {}", info.vendor)?;
+        write!(f, "  Driver:  {} ({})", info.driver, info.driver_info)
+    }
+}
+
+impl GpuContext {
+    /// Initialize a GPU compute context.
+    ///
+    /// Creates and configures all GPU state required by the tensor engine.
+    ///
+    /// Initialization proceeds in several stages:
+    ///
+    /// 1. Create a WGPU instance.
+    ///
+    ///    The instance is responsible for discovering and managing available
+    ///    graphics and compute backends (such as Vulkan, Metal, DirectX, or
+    ///    OpenGL-compatible implementations).
+    ///
+    /// 2. Select a compute adapter.
+    ///
+    ///    The adapter request prefers high-performance hardware:
+    ///
+    ///    ```text
+    ///    PowerPreference::HighPerformance
+    ///    ```
+    ///
+    ///    Depending on the host platform, the selected adapter may be:
+    ///
+    ///    * A discrete GPU.
+    ///    * An integrated GPU.
+    ///    * A virtual GPU.
+    ///    * A software implementation such as Vulkan Lavapipe.
+    ///
+    ///    The exact adapter selected is determined by WGPU and the available
+    ///    system hardware.
+    ///
+    /// 3. Create a logical device and command queue.
+    ///
+    ///    The device is responsible for:
+    ///
+    ///    * Buffer allocation.
+    ///    * Shader execution.
+    ///    * Pipeline creation.
+    ///    * Resource binding.
+    ///
+    ///    The queue is used to submit command buffers for execution.
+    ///
+    /// 4. Compile all built-in WGSL compute kernels.
+    ///
+    ///    The following kernels are embedded directly into the binary using
+    ///    `include_str!` and compiled during initialization:
+    ///
+    ///    Matrix kernels:
+    ///
+    ///    * `unary_matrix.wgsl`
+    ///      Element-wise unary matrix operations.
+    ///
+    ///    * `binary_matrix.wgsl`
+    ///      Element-wise binary matrix operations.
+    ///
+    ///    * `contract_matrix.wgsl`
+    ///      Matrix contraction operations, including matrix multiplication.
+    ///
+    ///    Tensor kernels:
+    ///
+    ///    * `unary_tensor.wgsl`
+    ///      Element-wise unary tensor operations on arbitrary-rank tensors.
+    ///
+    ///    * `binary_tensor.wgsl`
+    ///      Element-wise binary tensor operations on arbitrary-rank tensors.
+    ///
+    ///    * `contract_tensor.wgsl`
+    ///      General tensor contractions supporting:
+    ///      - Arbitrary tensor rank.
+    ///      - Arbitrary contraction axes.
+    ///      - Tensor views.
+    ///      - Tensor slices.
+    ///      - Tensor transposes.
+    ///      - Custom pairwise and reduction operators.
+    ///
+    /// 5. Create compute pipelines.
+    ///
+    ///    Each shader module is converted into a compute pipeline and stored
+    ///    inside the context for reuse. Pipelines are created once during
+    ///    initialization to avoid repeated shader compilation during tensor
+    ///    execution.
+    ///
+    /// The resulting context owns:
+    ///
+    /// * The WGPU instance.
+    /// * The selected adapter.
+    /// * The logical device.
+    /// * The command queue.
+    /// * All built-in compute pipelines.
+    ///
+    /// These resources are subsequently used to:
+    ///
+    /// * Allocate GPU-backed tensors.
+    /// * Upload and download tensor data.
+    /// * Execute matrix operations.
+    /// * Execute tensor operations.
+    /// * Dispatch compute workloads.
+    /// * Manage GPU resources throughout the lifetime of the application.
+    ///
+    /// # Performance
+    ///
+    /// Shader compilation and pipeline creation occur during context
+    /// initialization rather than during the first operation dispatch. This
+    /// front-loads startup cost while minimizing runtime latency during tensor
+    /// execution.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    ///
+    /// * No suitable compute adapter can be found.
+    /// * The selected adapter cannot create a logical device.
+    /// * The command queue cannot be created.
+    /// * Any embedded WGSL shader fails validation or compilation.
+    /// * Any compute pipeline fails to be created.
+    /// * The underlying graphics or compute backend fails to initialize.
+    ///
+    /// # Notes
+    ///
+    /// The context is intended to be created once and reused for the lifetime
+    /// of a workload. Creating multiple contexts may incur additional shader
+    /// compilation, pipeline creation, and device initialization overhead.
+    pub async fn new() -> Result<Self> {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        // Request for the high performance adapter which should detect a dedicated GPU if they exist
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                ..Default::default() // use the defaults for the other fields
+            })
+            .await
+            .context("No adapter")?;
+        let (device, queue) = adapter.request_device(&Default::default()).await?;
+        let opcode_source: &str = include_str!("wgsl/opcodes.wgsl");
+        let kernel_sources: Vec<&str> = vec![
+            include_str!("wgsl/unary_matrix.wgsl"),
+            include_str!("wgsl/binary_matrix.wgsl"),
+            include_str!("wgsl/contract_matrix.wgsl"),
+            include_str!("wgsl/unary_tensor.wgsl"),
+            include_str!("wgsl/binary_tensor.wgsl"),
+            include_str!("wgsl/contract_tensor.wgsl"),
+        ];
+        let mut pipelines: Vec<ComputePipeline> = Vec::with_capacity(kernel_sources.len());
+        for kernel_source in kernel_sources {
+            let source = format!("{}\n{}", opcode_source, kernel_source);
+            let kernel_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("kernel"),
+                source: wgpu::ShaderSource::Wgsl(source.into()),
+            });
+            let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("pipeline"),
+                layout: None,
+                module: &kernel_module,
+                entry_point: None,
+                compilation_options: Default::default(),
+                cache: None,
+            });
+            pipelines.push(pipeline);
+        }
+        let unary_matrix_pipeline = pipelines.remove(0);
+        let binary_matrix_pipeline = pipelines.remove(0);
+        let contract_matrix_pipeline = pipelines.remove(0);
+        let unary_tensor_pipeline = pipelines.remove(0);
+        let binary_tensor_pipeline = pipelines.remove(0);
+        let contract_tensor_pipeline = pipelines.remove(0);
+        Ok(Self {
+            instance,
+            adapter,
+            device,
+            queue,
+            unary_matrix_pipeline,
+            binary_matrix_pipeline,
+            contract_matrix_pipeline,
+            unary_tensor_pipeline,
+            binary_tensor_pipeline,
+            contract_tensor_pipeline,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn context() -> GpuContext {
+        pollster::block_on(GpuContext::new()).expect("Failed to create GPU context")
+    }
+    #[test]
+    fn creates_gpu_context() {
+        let ctx = context();
+        println!("ctx: {}", ctx);
+        let info = ctx.adapter.get_info();
+        assert!(!info.name.is_empty(), "Adapter name should not be empty");
+    }
+    #[test]
+    fn exposes_valid_adapter_info() {
+        let ctx = context();
+        let info = ctx.adapter.get_info();
+        println!("Adapter: {:?}", info);
+        assert!(!info.name.is_empty());
+    }
+    #[test]
+    fn exposes_non_zero_compute_limits() {
+        let ctx = context();
+        let limits = ctx.device.limits();
+        assert!(limits.max_compute_workgroup_size_x > 0);
+        assert!(limits.max_compute_workgroup_size_y > 0);
+        assert!(limits.max_compute_workgroup_size_z > 0);
+        assert!(limits.max_compute_invocations_per_workgroup > 0);
+    }
+    #[test]
+    fn can_create_buffer() {
+        let ctx = context();
+        let buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("test-buffer"),
+            size: 1024,
+            usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        assert_eq!(buffer.size(), 1024);
+    }
+
+    #[test]
+    fn can_create_command_encoder() {
+        let ctx = context();
+        let _encoder = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("test-encoder"),
+            });
+    }
+    #[test]
+    fn can_submit_empty_command_buffer() {
+        let ctx = context();
+        let encoder = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("test-encoder"),
+            });
+        ctx.queue.submit(std::iter::once(encoder.finish()));
+        ctx.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("Device poll failed");
+    }
+    #[test]
+    fn device_exposes_features() {
+        let ctx = context();
+        let _features = ctx.device.features();
+    }
+}
+
+
+-------------------------------
+src/linalg/operations.rs
+use anyhow::{Result, bail};
+
+// See wgsl/opcodes.wgsl for reference and make sure of the consistencies between that and this file!
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Operation {
+    ABS,
+    NEG,
+    SQRT,
+    EXP,
+    LOG,
+    SIN,
+    COS,
+    NOT, // logical (not bitwise)
+    ADD,
+    SUB,
+    MUL,
+    DIV,
+    MIN,
+    MAX,
+    POW,
+    ATAN2,
+    EQ,
+    NE,
+    LT,
+    LE,
+    GT,
+    GE,
+    AND, // logical (not bitwise)
+    OR,  // logical (not bitwise)
+    XOR, // logical (not bitwise)
+}
+
+impl Operation {
+    pub fn unary_opcode(self) -> Result<u32> {
+        match self {
+            Self::ABS => Ok(0),
+            Self::NEG => Ok(1),
+            Self::SQRT => Ok(2),
+            Self::EXP => Ok(3),
+            Self::LOG => Ok(4),
+            Self::SIN => Ok(5),
+            Self::COS => Ok(6),
+            Self::NOT => Ok(7),
+            _ => bail!("Invalid unary matrix operation!"),
+        }
+    }
+    pub fn binary_opcode(self) -> Result<u32> {
+        match self {
+            Self::ADD => Ok(0),
+            Self::SUB => Ok(1),
+            Self::MUL => Ok(2),
+            Self::DIV => Ok(3),
+            Self::MIN => Ok(4),
+            Self::MAX => Ok(5),
+            Self::POW => Ok(6),
+            Self::ATAN2 => Ok(7),
+            Self::EQ => Ok(8),
+            Self::NE => Ok(9),
+            Self::LT => Ok(10),
+            Self::LE => Ok(11),
+            Self::GT => Ok(12),
+            Self::GE => Ok(13),
+            Self::AND => Ok(14),
+            Self::OR => Ok(15),
+            Self::XOR => Ok(16),
+            _ => bail!("Invalid binary matrix operation!"),
+        }
+    }
+    pub fn contract_pairwise_opcode(self) -> Result<u32> {
+        match self {
+            Self::ADD => Ok(0),
+            Self::SUB => Ok(1),
+            Self::MUL => Ok(2),
+            Self::DIV => Ok(3),
+            Self::MIN => Ok(4),
+            Self::MAX => Ok(5),
+            Self::EQ => Ok(6),
+            Self::NE => Ok(7),
+            Self::LT => Ok(8),
+            Self::LE => Ok(9),
+            Self::GT => Ok(10),
+            Self::GE => Ok(11),
+            Self::AND => Ok(12),
+            Self::OR => Ok(13),
+            Self::XOR => Ok(14),
+            _ => bail!("Invalid contract matrix pairwise operation!"),
+        }
+    }
+    pub fn contract_reduction_opcode(self) -> Result<u32> {
+        match self {
+            Self::ADD => Ok(0),
+            Self::MUL => Ok(1),
+            Self::MIN => Ok(2),
+            Self::MAX => Ok(3),
+            Self::AND => Ok(4),
+            Self::OR => Ok(5),
+            Self::XOR => Ok(6),
+            _ => bail!("Invalid contract matrix reduction operation!"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    ////////////////////////////////////
+    // Unary operations
+    ////////////////////////////////////
+    #[test]
+    fn maps_unary_opcodes() {
+        assert_eq!(Operation::ABS.unary_opcode().unwrap(), 0);
+        assert_eq!(Operation::NEG.unary_opcode().unwrap(), 1);
+        assert_eq!(Operation::SQRT.unary_opcode().unwrap(), 2);
+        assert_eq!(Operation::EXP.unary_opcode().unwrap(), 3);
+        assert_eq!(Operation::LOG.unary_opcode().unwrap(), 4);
+        assert_eq!(Operation::SIN.unary_opcode().unwrap(), 5);
+        assert_eq!(Operation::COS.unary_opcode().unwrap(), 6);
+        assert_eq!(Operation::NOT.unary_opcode().unwrap(), 7);
+    }
+    #[test]
+    fn rejects_invalid_unary_operations() {
+        assert!(Operation::ADD.unary_opcode().is_err());
+        assert!(Operation::MUL.unary_opcode().is_err());
+        assert!(Operation::EQ.unary_opcode().is_err());
+        assert!(Operation::AND.unary_opcode().is_err());
+    }
+    ////////////////////////////////////
+    // Binary operations
+    ////////////////////////////////////
+    #[test]
+    fn maps_binary_opcodes() {
+        assert_eq!(Operation::ADD.binary_opcode().unwrap(), 0);
+        assert_eq!(Operation::SUB.binary_opcode().unwrap(), 1);
+        assert_eq!(Operation::MUL.binary_opcode().unwrap(), 2);
+        assert_eq!(Operation::DIV.binary_opcode().unwrap(), 3);
+        assert_eq!(Operation::MIN.binary_opcode().unwrap(), 4);
+        assert_eq!(Operation::MAX.binary_opcode().unwrap(), 5);
+        assert_eq!(Operation::POW.binary_opcode().unwrap(), 6);
+        assert_eq!(Operation::ATAN2.binary_opcode().unwrap(), 7);
+        assert_eq!(Operation::EQ.binary_opcode().unwrap(), 8);
+        assert_eq!(Operation::NE.binary_opcode().unwrap(), 9);
+        assert_eq!(Operation::LT.binary_opcode().unwrap(), 10);
+        assert_eq!(Operation::LE.binary_opcode().unwrap(), 11);
+        assert_eq!(Operation::GT.binary_opcode().unwrap(), 12);
+        assert_eq!(Operation::GE.binary_opcode().unwrap(), 13);
+        assert_eq!(Operation::AND.binary_opcode().unwrap(), 14);
+        assert_eq!(Operation::OR.binary_opcode().unwrap(), 15);
+        assert_eq!(Operation::XOR.binary_opcode().unwrap(), 16);
+    }
+    #[test]
+    fn rejects_invalid_binary_operations() {
+        assert!(Operation::ABS.binary_opcode().is_err());
+        assert!(Operation::NEG.binary_opcode().is_err());
+        assert!(Operation::SQRT.binary_opcode().is_err());
+        assert!(Operation::NOT.binary_opcode().is_err());
+    }
+    ////////////////////////////////////
+    // Contraction pairwise operations
+    ////////////////////////////////////
+    #[test]
+    fn maps_contract_pairwise_opcodes() {
+        assert_eq!(Operation::ADD.contract_pairwise_opcode().unwrap(), 0);
+        assert_eq!(Operation::SUB.contract_pairwise_opcode().unwrap(), 1);
+        assert_eq!(Operation::MUL.contract_pairwise_opcode().unwrap(), 2);
+        assert_eq!(Operation::DIV.contract_pairwise_opcode().unwrap(), 3);
+        assert_eq!(Operation::MIN.contract_pairwise_opcode().unwrap(), 4);
+        assert_eq!(Operation::MAX.contract_pairwise_opcode().unwrap(), 5);
+        assert_eq!(Operation::EQ.contract_pairwise_opcode().unwrap(), 6);
+        assert_eq!(Operation::NE.contract_pairwise_opcode().unwrap(), 7);
+        assert_eq!(Operation::LT.contract_pairwise_opcode().unwrap(), 8);
+        assert_eq!(Operation::LE.contract_pairwise_opcode().unwrap(), 9);
+        assert_eq!(Operation::GT.contract_pairwise_opcode().unwrap(), 10);
+        assert_eq!(Operation::GE.contract_pairwise_opcode().unwrap(), 11);
+        assert_eq!(Operation::AND.contract_pairwise_opcode().unwrap(), 12);
+        assert_eq!(Operation::OR.contract_pairwise_opcode().unwrap(), 13);
+        assert_eq!(Operation::XOR.contract_pairwise_opcode().unwrap(), 14);
+    }
+    #[test]
+    fn rejects_invalid_contract_pairwise_operations() {
+        assert!(Operation::ABS.contract_pairwise_opcode().is_err());
+        assert!(Operation::NEG.contract_pairwise_opcode().is_err());
+        assert!(Operation::SQRT.contract_pairwise_opcode().is_err());
+        assert!(Operation::POW.contract_pairwise_opcode().is_err());
+        assert!(Operation::ATAN2.contract_pairwise_opcode().is_err());
+        assert!(Operation::NOT.contract_pairwise_opcode().is_err());
+    }
+    ////////////////////////////////////
+    // Contraction reduction operations
+    ////////////////////////////////////
+    #[test]
+    fn maps_contract_reduction_opcodes() {
+        assert_eq!(Operation::ADD.contract_reduction_opcode().unwrap(), 0);
+        assert_eq!(Operation::MUL.contract_reduction_opcode().unwrap(), 1);
+        assert_eq!(Operation::MIN.contract_reduction_opcode().unwrap(), 2);
+        assert_eq!(Operation::MAX.contract_reduction_opcode().unwrap(), 3);
+        assert_eq!(Operation::AND.contract_reduction_opcode().unwrap(), 4);
+        assert_eq!(Operation::OR.contract_reduction_opcode().unwrap(), 5);
+        assert_eq!(Operation::XOR.contract_reduction_opcode().unwrap(), 6);
+    }
+    #[test]
+    fn rejects_invalid_contract_reduction_operations() {
+        assert!(Operation::ABS.contract_reduction_opcode().is_err());
+        assert!(Operation::NEG.contract_reduction_opcode().is_err());
+        assert!(Operation::DIV.contract_reduction_opcode().is_err());
+        assert!(Operation::POW.contract_reduction_opcode().is_err());
+        assert!(Operation::EQ.contract_reduction_opcode().is_err());
+        assert!(Operation::LT.contract_reduction_opcode().is_err());
+        assert!(Operation::NOT.contract_reduction_opcode().is_err());
+    }
+}
+
+
+-------------------------------
+src/linalg/kernel.rs
+use crate::linalg::context::GpuContext;
+use crate::linalg::params::{
+    BinaryMatrixParams, BinaryTensorParams, ContractMatrixParams, ContractTensorParams,
+    UnaryMatrixParams, UnaryTensorParams,
+};
+use crate::linalg::tensor::GpuTensor;
+use anyhow::{Result, ensure};
+use std::sync::Arc;
+use wgpu::Buffer;
+use wgpu::util::{BufferInitDescriptor, DeviceExt};
+
+/// Kernels or Tensor Operations
+///
+/// A `GpuKernel`  borrows a `GpuContext`, allowing multiple tensor
+/// operations to share the same device, queue, and adapter.
+///
+/// * `ctx` is the GPU context used to compile kernels, allocate
+///   temporary resources, and submit work to the compute device.
+///
+/// Note that we will use this struct for future tensor or arbitrarily
+/// ranked tensor operations --> beyond matrices.
+pub struct GpuKernel<'a> {
+    pub ctx: &'a GpuContext,
+}
+
+pub enum Params {
+    UnaryMatrix(UnaryMatrixParams),
+    BinaryMatrix(BinaryMatrixParams),
+    ContractMatrix(ContractMatrixParams),
+    UnaryTensor(UnaryTensorParams),
+    BinaryTensor(BinaryTensorParams),
+    ContractTensor(ContractTensorParams),
+}
+
+impl GpuKernel<'_> {
+    pub fn new<'a>(ctx: &'a GpuContext) -> GpuKernel<'a> {
+        GpuKernel { ctx }
+    }
+
+    pub fn execute_kernel(
+        &self,
+        params: Params,
+        a: &GpuTensor,
+        b: Option<&GpuTensor>,
+    ) -> Result<GpuTensor> {
+        if matches!(&params, Params::UnaryMatrix(..) | Params::UnaryTensor(..)) {
+            ensure!(b.is_none(), "The b matrix should be None!");
+        } else {
+            ensure!(!b.is_none(), "The b matrix should be supplied!");
+        }
+        let (params_buffer, c_shape) = match &params {
+            Params::UnaryMatrix(par) => (
+                self.ctx.device.create_buffer_init(&BufferInitDescriptor {
+                    label: Some("params"),
+                    contents: bytemuck::bytes_of(par),
+                    usage: wgpu::BufferUsages::STORAGE,
+                }),
+                a.shape.clone(),
+            ),
+            Params::UnaryTensor(par) => (
+                self.ctx.device.create_buffer_init(&BufferInitDescriptor {
+                    label: Some("params"),
+                    contents: bytemuck::bytes_of(par),
+                    usage: wgpu::BufferUsages::STORAGE,
+                }),
+                a.shape.clone(),
+            ),
+            Params::BinaryMatrix(par) => (
+                self.ctx.device.create_buffer_init(&BufferInitDescriptor {
+                    label: Some("params"),
+                    contents: bytemuck::bytes_of(par),
+                    usage: wgpu::BufferUsages::STORAGE,
+                }),
+                a.shape.clone(),
+            ),
+            Params::BinaryTensor(par) => (
+                self.ctx.device.create_buffer_init(&BufferInitDescriptor {
+                    label: Some("params"),
+                    contents: bytemuck::bytes_of(par),
+                    usage: wgpu::BufferUsages::STORAGE,
+                }),
+                a.shape.clone(),
+            ),
+            Params::ContractMatrix(par) => (
+                self.ctx.device.create_buffer_init(&BufferInitDescriptor {
+                    label: Some("params"),
+                    contents: bytemuck::bytes_of(par),
+                    usage: wgpu::BufferUsages::STORAGE,
+                }),
+                vec![par.n, par.k],
+            ),
+            Params::ContractTensor(par) => (
+                self.ctx.device.create_buffer_init(&BufferInitDescriptor {
+                    label: Some("params"),
+                    contents: bytemuck::bytes_of(par),
+                    usage: wgpu::BufferUsages::STORAGE,
+                }),
+                par.c_shape[..par.c_rank as usize].to_vec(),
+            ),
+        };
+        let c_elements = c_shape.iter().product::<u32>();
+        let c_buffer: Buffer = self.ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("output"),
+            size: (c_elements as u64) * (std::mem::size_of::<f32>() as u64),
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let pipeline = match &params {
+            Params::UnaryMatrix(_) => &self.ctx.unary_matrix_pipeline,
+            Params::UnaryTensor(_) => &self.ctx.unary_tensor_pipeline,
+            Params::BinaryMatrix(_) => &self.ctx.binary_matrix_pipeline,
+            Params::BinaryTensor(_) => &self.ctx.binary_tensor_pipeline,
+            Params::ContractMatrix(_) => &self.ctx.contract_matrix_pipeline,
+            Params::ContractTensor(_) => &self.ctx.contract_tensor_pipeline,
+        };
+        let bind_group = match &params {
+            Params::UnaryMatrix(_) | Params::UnaryTensor(_) => {
+                self.ctx
+                    .device
+                    .create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("bind-group"),
+                        layout: &pipeline.get_bind_group_layout(0),
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: a.buffer.as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: c_buffer.as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 2,
+                                resource: params_buffer.as_entire_binding(),
+                            },
+                        ],
+                    })
+            }
+            _ => self
+                .ctx
+                .device
+                .create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("bind-group"),
+                    layout: &pipeline.get_bind_group_layout(0),
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: a.buffer.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: b
+                                .expect("Validated to exist for non-unary kernels!")
+                                .buffer
+                                .as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: c_buffer.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: params_buffer.as_entire_binding(),
+                        },
+                    ],
+                }),
+        };
+        let mut encoder = self
+            .ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("encoder"),
+            });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            if matches!(
+                &params,
+                Params::UnaryMatrix(_) | Params::BinaryMatrix(_) | Params::ContractMatrix(_)
+            ) {
+                let dispatch_x = c_shape[1].div_ceil(16);
+                let dispatch_y = c_shape[0].div_ceil(16);
+                pass.dispatch_workgroups(dispatch_x, dispatch_y, 1);
+            } else {
+                let dispatch_x = c_elements.div_ceil(256);
+                pass.dispatch_workgroups(dispatch_x, 1, 1);
+            }
+        }
+        self.ctx.queue.submit(std::iter::once(encoder.finish()));
+        GpuTensor::from_buffer(Arc::new(c_buffer), c_shape, None, None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::linalg::context::GpuContext;
+    use crate::linalg::params::{BinaryMatrixParams, ContractMatrixParams, UnaryMatrixParams};
+    use crate::linalg::tensor::GpuTensor;
+    use anyhow::Result;
+    use std::f64::consts::PI;
+
+    // Unary operations
+    const OP_ABS: u32 = 0;
+    const OP_NEG: u32 = 1;
+    const OP_SQRT: u32 = 2;
+    const OP_EXP: u32 = 3;
+    const OP_LOG: u32 = 4;
+    const OP_SIN: u32 = 5;
+    const OP_COS: u32 = 6;
+
+    // Binary operations
+    const OP_ADD: u32 = 0;
+    const OP_SUB: u32 = 1;
+    const OP_MUL: u32 = 2;
+    const OP_DIV: u32 = 3;
+    const OP_MIN: u32 = 4;
+    const OP_MAX: u32 = 5;
+    const OP_POW: u32 = 6;
+    const OP_ATAN2: u32 = 7;
+    const OP_EQ: u32 = 8;
+    const OP_NE: u32 = 9;
+    const OP_LT: u32 = 10;
+    const OP_LE: u32 = 11;
+    const OP_GT: u32 = 12;
+    const OP_GE: u32 = 13;
+
+    const OP_PAIR_ADD: u32 = 0;
+    const OP_PAIR_SUB: u32 = 1;
+    const OP_PAIR_MUL: u32 = 2;
+    const OP_PAIR_DIV: u32 = 3;
+    const OP_PAIR_MIN: u32 = 4;
+    const OP_PAIR_MAX: u32 = 5;
+
+    const OP_REDUCE_ADD: u32 = 0;
+    const OP_REDUCE_MUL: u32 = 1;
+    const OP_REDUCE_MIN: u32 = 2;
+    const OP_REDUCE_MAX: u32 = 3;
+
+    fn context() -> GpuContext {
+        pollster::block_on(GpuContext::new()).expect("Failed to create GPU context")
+    }
+
+    fn ops<'a>(ctx: &'a GpuContext) -> GpuKernel<'a> {
+        GpuKernel { ctx }
+    }
+
+    // Matrices
+
+    fn unary_matrix_params(op: u32) -> Params {
+        Params::UnaryMatrix(UnaryMatrixParams {
+            n: 2,
+            p: 2,
+            a_offset: 0,
+            a_row_stride: 2,
+            a_col_stride: 1,
+            c_offset: 0,
+            c_row_stride: 2,
+            c_col_stride: 1,
+            op,
+        })
+    }
+
+    fn binary_matrix_params(op: u32) -> Params {
+        Params::BinaryMatrix(BinaryMatrixParams {
+            n: 2,
+            p: 2,
+            a_offset: 0,
+            a_row_stride: 2,
+            a_col_stride: 1,
+            b_offset: 0,
+            b_row_stride: 2,
+            b_col_stride: 1,
+            c_offset: 0,
+            c_row_stride: 2,
+            c_col_stride: 1,
+            op,
+        })
+    }
+
+    fn contract_matrix_params(pairwise: u32, reduction: u32) -> Params {
+        Params::ContractMatrix(ContractMatrixParams {
+            n: 2,
+            p: 2,
+            k: 2,
+            a_offset: 0,
+            a_row_stride: 2,
+            a_col_stride: 1,
+            b_offset: 0,
+            b_row_stride: 2,
+            b_col_stride: 1,
+            c_offset: 0,
+            c_row_stride: 2,
+            c_col_stride: 1,
+            op_pairwise: pairwise,
+            op_reduction: reduction,
+        })
+    }
+
+    #[test]
+    fn unary_rejects_b_matrix() -> Result<()> {
+        let ctx = context();
+        let ops = ops(&ctx);
+        let a = GpuTensor::from_f32(&ctx, &[1.0, 2.0, 3.0, 4.0], vec![2, 2], None, None)?;
+        let b = GpuTensor::from_f32(&ctx, &[5.0, 6.0, 7.0, 8.0], vec![2, 2], None, None)?;
+        assert!(
+            ops.execute_kernel(unary_matrix_params(OP_ABS), &a, Some(&b),)
+                .is_err()
+        );
+        Ok(())
+    }
+    #[test]
+    fn binary_requires_b_matrix() -> Result<()> {
+        let ctx = context();
+        let ops = ops(&ctx);
+        let a = GpuTensor::from_f32(&ctx, &[1.0, 2.0, 3.0, 4.0], vec![2, 2], None, None)?;
+        assert!(
+            ops.execute_kernel(binary_matrix_params(OP_ADD), &a, None,)
+                .is_err()
+        );
+        Ok(())
+    }
+    #[test]
+    fn contract_requires_b_matrix() -> Result<()> {
+        let ctx = context();
+        let ops = ops(&ctx);
+        let a = GpuTensor::from_f32(&ctx, &[1.0, 2.0, 3.0, 4.0], vec![2, 2], None, None)?;
+        assert!(
+            ops.execute_kernel(
+                contract_matrix_params(OP_PAIR_MUL, OP_REDUCE_ADD,),
+                &a,
+                None,
+            )
+            .is_err()
+        );
+        Ok(())
+    }
+    #[test]
+    fn unary_preserves_shape() -> Result<()> {
+        let ctx = context();
+        let ops = ops(&ctx);
+        let a = GpuTensor::from_f32(&ctx, &[1.0, -2.0, 3.0, -4.0], vec![2, 2], None, None)?;
+        let c = ops.execute_kernel(unary_matrix_params(OP_ABS), &a, None)?;
+        assert_eq!(c.shape, vec![2, 2]);
+        Ok(())
+    }
+    #[test]
+    fn binary_preserves_shape() -> Result<()> {
+        let ctx = context();
+        let ops = ops(&ctx);
+        let a = GpuTensor::from_f32(&ctx, &[1.0, 2.0, 3.0, 4.0], vec![2, 2], None, None)?;
+        let b = GpuTensor::from_f32(&ctx, &[5.0, 6.0, 7.0, 8.0], vec![2, 2], None, None)?;
+        let c = ops.execute_kernel(binary_matrix_params(OP_ADD), &a, Some(&b))?;
+        assert_eq!(c.shape, vec![2, 2]);
+        Ok(())
+    }
+    #[test]
+    fn contract_returns_n_by_k_shape() -> Result<()> {
+        let ctx = context();
+        let ops = ops(&ctx);
+        let a = GpuTensor::from_f32(&ctx, &[1.0, 2.0, 3.0, 4.0], vec![2, 2], None, None)?;
+        let b = GpuTensor::from_f32(&ctx, &[5.0, 6.0, 7.0, 8.0], vec![2, 2], None, None)?;
+        let c = ops.execute_kernel(
+            contract_matrix_params(OP_PAIR_MUL, OP_REDUCE_ADD),
+            &a,
+            Some(&b),
+        )?;
+        assert_eq!(c.shape, vec![2, 2]);
+        Ok(())
+    }
+    #[test]
+    fn unary_abs() -> Result<()> {
+        let ctx = context();
+        let ops = ops(&ctx);
+        let a = GpuTensor::from_f32(&ctx, &[-1.0, 2.0, -3.0, 4.0], vec![2, 2], None, None)?;
+        let c = ops.execute_kernel(unary_matrix_params(OP_ABS), &a, None)?;
+        assert_eq!(c.to_vec_f32(&ctx)?, vec![1.0, 2.0, 3.0, 4.0]);
+        Ok(())
+    }
+    #[test]
+    fn unary_neg() -> Result<()> {
+        let ctx = context();
+        let ops = ops(&ctx);
+        let a = GpuTensor::from_f32(&ctx, &[1.0, -2.0, 3.0, -4.0], vec![2, 2], None, None)?;
+        let c = ops.execute_kernel(unary_matrix_params(OP_NEG), &a, None)?;
+        assert_eq!(c.to_vec_f32(&ctx)?, vec![-1.0, 2.0, -3.0, 4.0]);
+        Ok(())
+    }
+    #[test]
+    fn unary_sqrt() -> Result<()> {
+        let ctx = context();
+        let ops = ops(&ctx);
+        let a = GpuTensor::from_f32(&ctx, &[1.0, 4.0, 9.0, 16.0], vec![2, 2], None, None)?;
+        let c = ops.execute_kernel(unary_matrix_params(OP_SQRT), &a, None)?;
+        assert_eq!(c.to_vec_f32(&ctx)?, vec![1.0, 2.0, 3.0, 4.0]);
+        Ok(())
+    }
+    #[test]
+    fn binary_add() -> Result<()> {
+        let ctx = context();
+        let ops = ops(&ctx);
+        let a = GpuTensor::from_f32(&ctx, &[1.0, 2.0, 3.0, 4.0], vec![2, 2], None, None)?;
+        let b = GpuTensor::from_f32(&ctx, &[5.0, 6.0, 7.0, 8.0], vec![2, 2], None, None)?;
+        let c = ops.execute_kernel(binary_matrix_params(OP_ADD), &a, Some(&b))?;
+        assert_eq!(c.to_vec_f32(&ctx)?, vec![6.0, 8.0, 10.0, 12.0]);
+        Ok(())
+    }
+    #[test]
+    fn binary_sub() -> Result<()> {
+        let ctx = context();
+        let ops = ops(&ctx);
+        let a = GpuTensor::from_f32(&ctx, &[1.0, 2.0, 3.0, 4.0], vec![2, 2], None, None)?;
+        let b = GpuTensor::from_f32(&ctx, &[5.0, 6.0, 7.0, 8.0], vec![2, 2], None, None)?;
+        let c = ops.execute_kernel(binary_matrix_params(OP_SUB), &a, Some(&b))?;
+        assert_eq!(c.to_vec_f32(&ctx)?, vec![-4.0, -4.0, -4.0, -4.0]);
+        Ok(())
+    }
+    #[test]
+    fn binary_mul() -> Result<()> {
+        let ctx = context();
+        let ops = ops(&ctx);
+        let a = GpuTensor::from_f32(&ctx, &[1.0, 2.0, 3.0, 4.0], vec![2, 2], None, None)?;
+        let b = GpuTensor::from_f32(&ctx, &[5.0, 6.0, 7.0, 8.0], vec![2, 2], None, None)?;
+        let c = ops.execute_kernel(binary_matrix_params(OP_MUL), &a, Some(&b))?;
+        assert_eq!(c.to_vec_f32(&ctx)?, vec![5.0, 12.0, 21.0, 32.0]);
+        Ok(())
+    }
+    #[test]
+    fn binary_div() -> Result<()> {
+        let ctx = context();
+        let ops = ops(&ctx);
+        let a = GpuTensor::from_f32(&ctx, &[8.0, 16.0, 18.0, 20.0], vec![2, 2], None, None)?;
+        let b = GpuTensor::from_f32(&ctx, &[2.0, 4.0, 3.0, 5.0], vec![2, 2], None, None)?;
+        let c = ops.execute_kernel(binary_matrix_params(OP_DIV), &a, Some(&b))?;
+        assert_eq!(c.to_vec_f32(&ctx)?, vec![4.0, 4.0, 6.0, 4.0]);
+        Ok(())
+    }
+    #[test]
+    fn binary_min() -> Result<()> {
+        let ctx = context();
+        let ops = ops(&ctx);
+        let a = GpuTensor::from_f32(&ctx, &[1.0, 6.0, 3.0, 8.0], vec![2, 2], None, None)?;
+        let b = GpuTensor::from_f32(&ctx, &[5.0, 2.0, 7.0, 4.0], vec![2, 2], None, None)?;
+        let c = ops.execute_kernel(binary_matrix_params(OP_MIN), &a, Some(&b))?;
+        assert_eq!(c.to_vec_f32(&ctx)?, vec![1.0, 2.0, 3.0, 4.0]);
+        Ok(())
+    }
+    #[test]
+    fn binary_max() -> Result<()> {
+        let ctx = context();
+        let ops = ops(&ctx);
+        let a = GpuTensor::from_f32(&ctx, &[1.0, 6.0, 3.0, 8.0], vec![2, 2], None, None)?;
+        let b = GpuTensor::from_f32(&ctx, &[5.0, 2.0, 7.0, 4.0], vec![2, 2], None, None)?;
+        let c = ops.execute_kernel(binary_matrix_params(OP_MAX), &a, Some(&b))?;
+        assert_eq!(c.to_vec_f32(&ctx)?, vec![5.0, 6.0, 7.0, 8.0]);
+        Ok(())
+    }
+    #[test]
+    fn binary_eq() -> Result<()> {
+        let ctx = context();
+        let ops = ops(&ctx);
+        let a = GpuTensor::from_f32(&ctx, &[1.0, 2.0, 3.0, 4.0], vec![2, 2], None, None)?;
+        let b = GpuTensor::from_f32(&ctx, &[1.0, 0.0, 3.0, 9.0], vec![2, 2], None, None)?;
+        let c = ops.execute_kernel(binary_matrix_params(OP_EQ), &a, Some(&b))?;
+        assert_eq!(c.to_vec_f32(&ctx)?, vec![1.0, 0.0, 1.0, 0.0]);
+        Ok(())
+    }
+    #[test]
+    fn binary_atan2() -> Result<()> {
+        let ctx = context();
+        let ops = ops(&ctx);
+        let pi = PI as f32;
+        let a = GpuTensor::from_f32(&ctx, &[1.0, 0.0, 0.0, 1.0], vec![2, 2], None, None)?;
+        let b = GpuTensor::from_f32(&ctx, &[0.0, 1.0, 1.0, 0.0], vec![2, 2], None, None)?;
+        let c = ops.execute_kernel(binary_matrix_params(OP_ATAN2), &a, Some(&b))?;
+        assert_eq!(c.to_vec_f32(&ctx)?, vec![pi / 2.0, 0.0, 0.0, pi / 2.0]);
+        Ok(())
+    }
+    #[test]
+    fn contract_standard_matrix_multiply() -> Result<()> {
+        let ctx = context();
+        let ops = ops(&ctx);
+        let a = GpuTensor::from_f32(&ctx, &[1.0, 2.0, 3.0, 4.0], vec![2, 2], None, None)?;
+        let b = GpuTensor::from_f32(&ctx, &[5.0, 6.0, 7.0, 8.0], vec![2, 2], None, None)?;
+        let c = ops.execute_kernel(
+            contract_matrix_params(OP_PAIR_MUL, OP_REDUCE_ADD),
+            &a,
+            Some(&b),
+        )?;
+        assert_eq!(c.to_vec_f32(&ctx)?, vec![19.0, 22.0, 43.0, 50.0]);
+        Ok(())
+    }
+    #[test]
+    fn contract_min_plus() -> Result<()> {
+        let ctx = context();
+        let ops = ops(&ctx);
+        let a = GpuTensor::from_f32(&ctx, &[1.0, 2.0, 3.0, 4.0], vec![2, 2], None, None)?;
+        let b = GpuTensor::from_f32(&ctx, &[10.0, 20.0, 30.0, 40.0], vec![2, 2], None, None)?;
+        let c = ops.execute_kernel(
+            contract_matrix_params(OP_PAIR_ADD, OP_REDUCE_MIN),
+            &a,
+            Some(&b),
+        )?;
+        assert_eq!(c.to_vec_f32(&ctx)?, vec![11.0, 21.0, 13.0, 23.0]);
+        Ok(())
+    }
+    #[test]
+    fn contract_max_plus() -> Result<()> {
+        let ctx = context();
+        let ops = ops(&ctx);
+        let a = GpuTensor::from_f32(&ctx, &[1.0, 2.0, 3.0, 4.0], vec![2, 2], None, None)?;
+        let b = GpuTensor::from_f32(&ctx, &[10.0, 20.0, 30.0, 40.0], vec![2, 2], None, None)?;
+        let c = ops.execute_kernel(
+            contract_matrix_params(OP_PAIR_ADD, OP_REDUCE_MAX),
+            &a,
+            Some(&b),
+        )?;
+        assert_eq!(c.to_vec_f32(&ctx)?, vec![32.0, 42.0, 34.0, 44.0]);
+        Ok(())
+    }
+
+    // Tensors
+
+    const TENSOR_SHAPE_3D: &[u32] = &[2, 2, 2];
+    const TENSOR_SHAPE_4D: &[u32] = &[2, 2, 2, 2];
+
+    fn unary_tensor_params(op: u32) -> Params {
+        Params::UnaryTensor(UnaryTensorParams {
+            rank: 3,
+            n_elements: 8,
+            shape: [2, 2, 2, 0, 0, 0, 0, 0],
+            a_offset: 0,
+            a_strides: [4, 2, 1, 0, 0, 0, 0, 0],
+            c_offset: 0,
+            c_strides: [4, 2, 1, 0, 0, 0, 0, 0],
+            op,
+        })
+    }
+
+    fn binary_tensor_params(op: u32) -> Params {
+        Params::BinaryTensor(BinaryTensorParams {
+            rank: 3,
+            n_elements: 8,
+            shape: [2, 2, 2, 0, 0, 0, 0, 0],
+            a_offset: 0,
+            a_strides: [4, 2, 1, 0, 0, 0, 0, 0],
+            b_offset: 0,
+            b_strides: [4, 2, 1, 0, 0, 0, 0, 0],
+            c_offset: 0,
+            c_strides: [4, 2, 1, 0, 0, 0, 0, 0],
+            op,
+        })
+    }
+
+    fn contract_tensor_params(pairwise: u32, reduction: u32) -> Params {
+        Params::ContractTensor(ContractTensorParams {
+            a_rank: 2,
+            b_rank: 2,
+            c_rank: 2,
+            contraction_rank: 1,
+            c_elements: 4,
+            a_shape: [2, 2, 0, 0, 0, 0, 0, 0],
+            b_shape: [2, 2, 0, 0, 0, 0, 0, 0],
+            c_shape: [2, 2, 0, 0, 0, 0, 0, 0],
+            a_offset: 0,
+            a_strides: [2, 1, 0, 0, 0, 0, 0, 0],
+            b_offset: 0,
+            b_strides: [2, 1, 0, 0, 0, 0, 0, 0],
+            c_offset: 0,
+            c_strides: [2, 1, 0, 0, 0, 0, 0, 0],
+            a_contract_axes: [1, 0, 0, 0, 0, 0, 0, 0],
+            b_contract_axes: [0, 0, 0, 0, 0, 0, 0, 0],
+            op_pairwise: pairwise,
+            op_reduction: reduction,
+        })
+    }
+
+    #[test]
+    fn unary_tensor_rejects_b_tensor() -> Result<()> {
+        let ctx = context();
+        let ops = ops(&ctx);
+        let a = GpuTensor::from_f32(&ctx, &[1.0; 8], vec![2, 2, 2], None, None)?;
+        let b = GpuTensor::from_f32(&ctx, &[2.0; 8], vec![2, 2, 2], None, None)?;
+        assert!(
+            ops.execute_kernel(unary_tensor_params(OP_ABS), &a, Some(&b),)
+                .is_err()
+        );
+        Ok(())
+    }
+    #[test]
+    fn unary_tensor_preserves_shape() -> Result<()> {
+        let ctx = context();
+        let ops = ops(&ctx);
+        let a = GpuTensor::from_f32(&ctx, &[1.0; 8], vec![2, 2, 2], None, None)?;
+        let c = ops.execute_kernel(unary_tensor_params(OP_ABS), &a, None)?;
+        assert_eq!(c.shape, vec![2, 2, 2]);
+        Ok(())
+    }
+    #[test]
+    fn binary_tensor_preserves_shape() -> Result<()> {
+        let ctx = context();
+        let ops = ops(&ctx);
+        let a = GpuTensor::from_f32(&ctx, &[1.0; 8], vec![2, 2, 2], None, None)?;
+        let b = GpuTensor::from_f32(&ctx, &[2.0; 8], vec![2, 2, 2], None, None)?;
+        let c = ops.execute_kernel(binary_tensor_params(OP_ADD), &a, Some(&b))?;
+        assert_eq!(c.shape, vec![2, 2, 2]);
+        Ok(())
+    }
+    #[test]
+    fn unary_tensor_abs() -> Result<()> {
+        let ctx = context();
+        let ops = ops(&ctx);
+        let a = GpuTensor::from_f32(
+            &ctx,
+            &[-1.0, -2.0, 3.0, 4.0, -5.0, 6.0, -7.0, 8.0],
+            vec![2, 2, 2],
+            None,
+            None,
+        )?;
+        let c = ops.execute_kernel(unary_tensor_params(OP_ABS), &a, None)?;
+        assert_eq!(
+            c.to_vec_f32(&ctx)?,
+            vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+        );
+        Ok(())
+    }
+    #[test]
+    fn unary_tensor_neg() -> Result<()> {
+        let ctx = context();
+        let ops = ops(&ctx);
+        let a = GpuTensor::from_f32(
+            &ctx,
+            &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+            vec![2, 2, 2],
+            None,
+            None,
+        )?;
+        let c = ops.execute_kernel(unary_tensor_params(OP_NEG), &a, None)?;
+        assert_eq!(
+            c.to_vec_f32(&ctx)?,
+            vec![-1.0, -2.0, -3.0, -4.0, -5.0, -6.0, -7.0, -8.0]
+        );
+        Ok(())
+    }
+    #[test]
+    fn binary_tensor_add() -> Result<()> {
+        let ctx = context();
+        let ops = ops(&ctx);
+        let a = GpuTensor::from_f32(
+            &ctx,
+            &[1., 2., 3., 4., 5., 6., 7., 8.],
+            vec![2, 2, 2],
+            None,
+            None,
+        )?;
+        let b = GpuTensor::from_f32(
+            &ctx,
+            &[1., 1., 1., 1., 1., 1., 1., 1.],
+            vec![2, 2, 2],
+            None,
+            None,
+        )?;
+        let c = ops.execute_kernel(binary_tensor_params(OP_ADD), &a, Some(&b))?;
+        assert_eq!(c.to_vec_f32(&ctx)?, vec![2., 3., 4., 5., 6., 7., 8., 9.]);
+        Ok(())
+    }
+    #[test]
+    fn binary_tensor_mul() -> Result<()> {
+        let ctx = context();
+        let ops = ops(&ctx);
+        let a = GpuTensor::from_f32(
+            &ctx,
+            &[1., 2., 3., 4., 5., 6., 7., 8.],
+            vec![2, 2, 2],
+            None,
+            None,
+        )?;
+        let b = GpuTensor::from_f32(
+            &ctx,
+            &[2., 2., 2., 2., 2., 2., 2., 2.],
+            vec![2, 2, 2],
+            None,
+            None,
+        )?;
+        let c = ops.execute_kernel(binary_tensor_params(OP_MUL), &a, Some(&b))?;
+        assert_eq!(
+            c.to_vec_f32(&ctx)?,
+            vec![2., 4., 6., 8., 10., 12., 14., 16.]
+        );
+        Ok(())
+    }
+    #[test]
+    fn contract_tensor_preserves_output_shape() -> Result<()> {
+        let ctx = context();
+        let ops = ops(&ctx);
+        let a = GpuTensor::from_f32(&ctx, &[1., 2., 3., 4.], vec![2, 2], None, None)?;
+        let b = GpuTensor::from_f32(&ctx, &[5., 6., 7., 8.], vec![2, 2], None, None)?;
+        let c = ops.execute_kernel(
+            contract_tensor_params(OP_PAIR_MUL, OP_REDUCE_ADD),
+            &a,
+            Some(&b),
+        )?;
+        assert_eq!(c.shape, vec![2, 2]);
+        Ok(())
+    }
+    #[test]
+    fn contract_tensor_matches_matrix_multiply() -> Result<()> {
+        let ctx = context();
+        let ops = ops(&ctx);
+        let a = GpuTensor::from_f32(&ctx, &[1., 2., 3., 4.], vec![2, 2], None, None)?;
+        let b = GpuTensor::from_f32(&ctx, &[5., 6., 7., 8.], vec![2, 2], None, None)?;
+        let c = ops.execute_kernel(
+            contract_tensor_params(OP_PAIR_MUL, OP_REDUCE_ADD),
+            &a,
+            Some(&b),
+        )?;
+        assert_eq!(c.to_vec_f32(&ctx)?, vec![19.0, 22.0, 43.0, 50.0]);
+        Ok(())
+    }
+}
+
+
+-------------------------------
+src/linalg/tensor.rs
+use crate::linalg::context::GpuContext;
+use anyhow::{Result, ensure};
+use bytemuck::cast_slice;
+use std::fmt;
+use std::sync::Arc;
+use std::sync::mpsc::channel;
+use wgpu::{
+    Buffer,
+    util::{BufferInitDescriptor, DeviceExt},
+};
+
+/// GPU Tensor
+///
+/// * `shape` contains the size of each tensor dimension.
+/// * `strides` contains the storage stride of each dimension.
+/// * `offset` is the starting element within the underlying storage.
+/// * `buffer` contains the backing tensor data in GPU memory.
+///
+/// Tensors use a strided storage model, allowing multiple tensor views
+/// to reference the same underlying storage without copying data.
+/// Operations such as slicing, transposition, reshaping, and tensor
+/// contraction can therefore be implemented by modifying tensor
+/// metadata rather than reallocating storage.
+///
+/// The backing buffer is reference counted via `Arc`, allowing multiple
+/// tensors and tensor views to safely share ownership of the same GPU
+/// allocation. Creating a tensor view therefore creates a new
+/// `GpuTensor` instance with its own shape, strides, and offset while
+/// reusing the existing GPU storage.
+///
+/// For example:
+/// ```text
+/// shape   = [2, 3, 4]
+/// strides = [12, 4, 1]
+/// offset  = 0
+/// ```
+/// describes a contiguous row-major tensor.
+///
+/// Note that the backing buffer may contain more data than is directly
+/// accessible through this tensor. This enables tensor views and
+/// sub-tensors to share storage with one another while avoiding
+#[derive(Debug)]
+pub struct GpuTensor {
+    pub shape: Vec<u32>,
+    pub strides: Vec<u32>,
+    pub offset: u32,
+    pub buffer: Arc<wgpu::Buffer>,
+}
+
+/// Parse and validate tensor layout parameters.
+///
+/// * `n` is the number of elements available in the backing storage.
+/// * `shape` defines the tensor dimensions.
+/// * `strides` defines the storage stride of each dimension.
+/// * `offset` is the starting element within the backing storage.
+///
+/// If `strides` is not supplied, contiguous row-major strides are
+/// generated automatically.
+///
+/// If `offset` is not supplied, an offset of `0` is used.
+///
+/// For example:
+/// ```text
+/// shape   = [2, 3, 4]
+/// strides = [12, 4, 1]
+/// ```
+///
+/// The function validates:
+/// * The tensor rank matches the stride rank.
+/// * The backing storage is large enough for the requested tensor view.
+/// * The offset lies within the backing storage.
+///
+/// Empty tensors (those containing a dimension of size zero) are
+/// permitted and require no storage.
+///
+/// # Returns
+/// Returns the normalized `(shape, strides, offset)` tuple.
+///
+/// # Errors
+/// Returns an error if:
+/// * `shape.len() != strides.len()`.
+/// * The backing storage is too small for the specified layout
+fn parse_tensor_params(
+    n: u32,
+    shape: Vec<u32>,
+    strides: Option<Vec<u32>>,
+    offset: Option<u32>,
+) -> Result<(Vec<u32>, Vec<u32>, u32)> {
+    let n: u32 = n.max(1);
+    let strides: Vec<u32> = strides.unwrap_or_else(|| {
+        let mut products: Vec<u32> = Vec::with_capacity(shape.len());
+        let mut stride = 1;
+        for &d in shape.iter().rev() {
+            products.push(stride);
+            stride *= d;
+        }
+        products.reverse();
+        products
+    });
+    ensure!(
+        shape.len() == strides.len(),
+        "The shape and strides are incompatible!"
+    );
+    let required_len = if shape.contains(&0) {
+        0
+    } else {
+        shape
+            .iter()
+            .zip(strides.iter())
+            .map(|(&shape, &stride)| (shape - 1) * stride)
+            .sum::<u32>()
+            + 1
+    };
+    ensure!(
+        n >= required_len,
+        "The shape and strides are incompatible with the data!"
+    );
+    let offset: u32 = offset.unwrap_or(0);
+    ensure!(n > offset, "The offset must range from 0 to {}", n - 1);
+    Ok((shape, strides, offset))
+}
+
+impl GpuTensor {
+    /// Construct a tensor from host memory.
+    ///
+    /// * `ctx` provides access to the GPU device.
+    /// * `data` is the backing tensor storage to upload.
+    /// * `shape` defines the tensor dimensions.
+    /// * `strides` defines the storage stride of each dimension.
+    /// * `offset` is the starting element within the backing storage.
+    ///
+    /// If `strides` is not provided, contiguous row-major strides are
+    /// generated automatically.
+    ///
+    /// If `offset` is not provided, an offset of `0` is used.
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// * The shape and strides have different ranks.
+    /// * The backing storage is too small for the specified layout.
+    /// * The offset falls outside the backing storage.
+    pub fn from_f32(
+        ctx: &GpuContext,
+        data: &[f32],
+        shape: Vec<u32>,
+        strides: Option<Vec<u32>>,
+        offset: Option<u32>,
+    ) -> Result<Self> {
+        let (shape, strides, offset) =
+            parse_tensor_params(data.len() as u32, shape, strides, offset)?;
+        let buffer: Arc<Buffer> = Arc::new(ctx.device.create_buffer_init(&BufferInitDescriptor {
+            label: None,
+            contents: cast_slice(data),
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
+        }));
+        Ok(Self {
+            shape,
+            strides,
+            offset,
+            buffer,
+        })
+    }
+
+    /// Construct a tensor view from an existing GPU buffer.
+    ///
+    /// * `buffer` is the backing GPU storage.
+    /// * `shape` defines the tensor dimensions.
+    /// * `strides` defines the storage stride of each dimension.
+    /// * `offset` is the starting element within the backing storage.
+    ///
+    /// If `strides` is not provided, contiguous row-major strides are
+    /// generated automatically.
+    ///
+    /// If `offset` is not provided, an offset of `0` is used.
+    ///
+    /// The buffer is assumed to contain `f32` elements.
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// * The shape and strides have different ranks.
+    /// * The buffer is too small for the specified layout.
+    /// * The offset falls outside the buffer.
+    pub fn from_buffer(
+        buffer: Arc<Buffer>,
+        shape: Vec<u32>,
+        strides: Option<Vec<u32>>,
+        offset: Option<u32>,
+    ) -> Result<Self> {
+        let n: u32 = ((buffer.size() as usize) / std::mem::size_of::<f32>()) as u32;
+        let (shape, strides, offset) = parse_tensor_params(n, shape, strides, offset)?;
+        Ok(Self {
+            shape,
+            strides,
+            offset,
+            buffer,
+        })
+    }
+
+    /// Copy tensor data from GPU memory into a host vector.
+    ///
+    ///
+    /// * `self` is the tensor whose backing storage will be read.
+    /// * `ctx` provides access to the GPU device and queue.
+    ///
+    /// # Returns
+    /// Returns the contents of the backing GPU buffer as a vector of `f32`
+    /// values.
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// * The temporary readback buffer cannot be mapped.
+    /// * GPU execution fails during readback.
+    /// * The mapped data cannot be interpreted as `f32` values.
+    pub fn to_vec_f32(&self, ctx: &GpuContext) -> Result<Vec<f32>> {
+        let size = self.buffer.size();
+        let temp_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("tensor-readback"),
+            size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ, // critical to be MAP_READ and not COPY_DST as in `from_f32`
+            mapped_at_creation: false,
+        });
+        let mut encoder = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("tensor-readback"),
+            });
+        encoder.copy_buffer_to_buffer(&self.buffer, 0, &temp_buffer, 0, size);
+        ctx.queue.submit([encoder.finish()]);
+        let (tx, rx) = channel();
+        temp_buffer.map_async(wgpu::MapMode::Read, .., move |result| {
+            tx.send(result).unwrap();
+        });
+        ctx.device.poll(wgpu::PollType::wait_indefinitely())?;
+        rx.recv()??;
+        let mapped = temp_buffer.get_mapped_range(..)?;
+        let values = bytemuck::cast_slice::<u8, f32>(&mapped).to_vec();
+        drop(mapped);
+        temp_buffer.unmap();
+        Ok(values)
+    }
+
+    fn tensor_coords(&self, linear_idx: usize) -> Vec<usize> {
+        let rank: usize = self.shape.len();
+        let mut coords: Vec<usize> = Vec::with_capacity(rank);
+        if rank == 0 {
+            return coords;
+        }
+        let mut idx = linear_idx;
+        for i in (0..rank).rev() {
+            coords[i] = idx % (self.shape[i] as usize);
+            idx = idx / (self.shape[i] as usize);
+        }
+        return coords;
+    }
+
+    fn linear_index(&self, coords: &[usize]) -> usize {
+        let rank: usize = self.shape.len();
+        let mut idx = self.offset as usize;
+        for i in 0..rank {
+            idx += coords[i] * (self.strides[i] as usize);
+        }
+        return idx as usize;
+    }
+}
+
+/// Displays the tensor metadata, i.e.:
+/// * `Shape` - the dimensions of the tensor.
+/// * `Strides` - the storage stride of each dimension.
+/// * `Offset` - the starting element within the backing storage.
+/// * `Buffer Size` - the size of the underlying GPU buffer in bytes.
+impl fmt::Display for GpuTensor {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "GPU Tensor")?;
+        writeln!(f, "\t- Shape:   {:?}", self.shape)?;
+        writeln!(f, "\t- Strides: {:?}", self.strides)?;
+        writeln!(f, "\t- Offset:  {}", self.offset)?;
+        write!(f, "\t- Buffer Size: {} bytes", self.buffer.size())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::linalg::context::GpuContext;
+    fn context() -> GpuContext {
+        pollster::block_on(GpuContext::new()).expect("Failed to create GPU context")
+    }
+    #[test]
+    fn creates_1d_tensor() -> Result<()> {
+        let ctx = context();
+        let tensor = GpuTensor::from_f32(&ctx, &[1.0f32, 2.0, 3.0, 4.0], vec![4], None, None)?;
+        println!("tensor: {}", tensor);
+        assert_eq!(tensor.shape, vec![4]);
+        assert_eq!(
+            tensor.buffer.size(),
+            (4 * std::mem::size_of::<f32>()) as u64
+        );
+        Ok(())
+    }
+    #[test]
+    fn creates_2d_tensor() -> Result<()> {
+        let ctx = context();
+        let tensor = GpuTensor::from_f32(
+            &ctx,
+            &[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0],
+            vec![2, 3],
+            None,
+            None,
+        )?;
+        assert_eq!(tensor.shape, vec![2, 3]);
+        assert_eq!(
+            tensor.buffer.size(),
+            (6 * std::mem::size_of::<f32>()) as u64
+        );
+        Ok(())
+    }
+    #[test]
+    fn creates_3d_tensor() -> Result<()> {
+        let ctx = context();
+        let tensor = GpuTensor::from_f32(&ctx, &[0.0f32; 24], vec![2, 3, 4], None, None)?;
+        assert_eq!(tensor.shape, vec![2, 3, 4]);
+        assert_eq!(
+            tensor.buffer.size(),
+            (24 * std::mem::size_of::<f32>()) as u64
+        );
+        Ok(())
+    }
+    #[test]
+    fn creates_empty_tensor() -> Result<()> {
+        let ctx = context();
+        let tensor = GpuTensor::from_f32(&ctx, &[], vec![0], None, None)?;
+        assert_eq!(tensor.shape, vec![0]);
+        assert_eq!(tensor.buffer.size(), 0);
+        Ok(())
+    }
+    #[test]
+    fn creates_tensor_from_buffer() -> Result<()> {
+        let ctx = context();
+        let original = vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let source = GpuTensor::from_f32(&ctx, &original, vec![2, 3], None, None)?;
+        let tensor = GpuTensor::from_buffer(source.buffer, vec![2, 3], None, None)?;
+        assert_eq!(tensor.shape, vec![2, 3]);
+        assert_eq!(tensor.strides, vec![3, 1]);
+        assert_eq!(tensor.offset, 0);
+        Ok(())
+    }
+    #[test]
+    fn from_buffer_preserves_custom_strides() -> Result<()> {
+        let ctx = context();
+        let source = GpuTensor::from_f32(&ctx, &[0.0f32; 24], vec![2, 3, 4], None, None)?;
+
+        let tensor =
+            GpuTensor::from_buffer(source.buffer, vec![2, 3, 4], Some(vec![12, 4, 1]), None)?;
+        assert_eq!(tensor.shape, vec![2, 3, 4]);
+        assert_eq!(tensor.strides, vec![12, 4, 1]);
+        Ok(())
+    }
+    #[test]
+    fn from_buffer_preserves_offset() -> Result<()> {
+        let ctx = context();
+        let source = GpuTensor::from_f32(&ctx, &[0.0f32; 32], vec![32], None, None)?;
+        let tensor = GpuTensor::from_buffer(source.buffer, vec![4], None, Some(8))?;
+        assert_eq!(tensor.offset, 8);
+        Ok(())
+    }
+    #[test]
+    fn from_buffer_generates_default_strides() -> Result<()> {
+        let ctx = context();
+        let source = GpuTensor::from_f32(&ctx, &[0.0f32; 24], vec![2, 3, 4], None, None)?;
+        let tensor = GpuTensor::from_buffer(source.buffer, vec![2, 3, 4], None, None)?;
+        assert_eq!(tensor.strides, vec![12, 4, 1]);
+        Ok(())
+    }
+    #[test]
+    fn from_buffer_rejects_shape_stride_rank_mismatch() {
+        let ctx = context();
+        let source = GpuTensor::from_f32(&ctx, &[0.0f32; 24], vec![2, 3, 4], None, None).unwrap();
+        let result = GpuTensor::from_buffer(source.buffer, vec![2, 3, 4], Some(vec![12, 4]), None);
+        assert!(result.is_err());
+    }
+    #[test]
+    fn from_buffer_rejects_excessive_offset() {
+        let ctx = context();
+        let source = GpuTensor::from_f32(&ctx, &[0.0f32; 16], vec![16], None, None).unwrap();
+        let result = GpuTensor::from_buffer(source.buffer, vec![4], None, Some(100));
+        assert!(result.is_err());
+    }
+    #[test]
+    fn round_trip_tensor_data() -> Result<()> {
+        let ctx = context();
+        let original = vec![1.0f32, 2.0, 3.0, 4.0];
+        let tensor = GpuTensor::from_f32(&ctx, &original, vec![4], None, None)?;
+        let extracted = tensor.to_vec_f32(&ctx)?;
+        assert_eq!(extracted, original);
+        Ok(())
+    }
+    #[test]
+    fn from_buffer_round_trip_data() -> Result<()> {
+        let ctx = context();
+        let original: Vec<f32> = (0..32).map(|x| x as f32).collect();
+        let source = GpuTensor::from_f32(&ctx, &original, vec![32], None, None)?;
+        let tensor = GpuTensor::from_buffer(source.buffer, vec![32], None, None)?;
+        let extracted = tensor.to_vec_f32(&ctx)?;
+        assert_eq!(extracted, original);
+        Ok(())
+    }
+}
+
+
+-------------------------------
+src/linalg/transpose.rs
+use crate::linalg::tensor::GpuTensor;
+use anyhow::{Result, ensure};
+use std::sync::Arc;
+
+impl GpuTensor {
+    /// Transponse a tensor
+    ///
+    /// * `perm` defines the permutation of tensor axes.
+    ///   For example:
+    ///
+    /// ```text
+    /// [0, 1]    -> [1, 0]
+    /// [0, 1, 2] -> [2, 0, 1]
+    /// ```
+    ///
+    /// If `perm` is not provided, the tensor axes are reversed:
+    ///
+    /// ```text
+    /// [0, 1]    -> [1, 0]
+    /// [0, 1, 2] -> [2, 1, 0]
+    /// ```
+    ///
+    /// This operation does not copy any data. Instead, a new `GpuTensor`
+    /// is created with permuted `shape` and `strides` metadata while
+    /// sharing ownership of the same backing GPU buffer.
+    ///
+    /// # Returns
+    /// Returns a new tensor view with permuted axes.
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// * The permutation rank differs from the tensor rank.
+    /// * A permutation axis is out of bounds.
+    /// * A permutation axis appears more than once.
+    pub fn transpose(&self, perm: Option<Vec<usize>>) -> Result<Self> {
+        let perm: Vec<usize> = perm.unwrap_or_else(|| {
+            let mut x = (0..self.shape.len()).collect::<Vec<usize>>();
+            x.reverse();
+            x
+        });
+        ensure!(
+            perm.len() == self.shape.len(),
+            "Shape of the tensor ({:?}) and permutations argument ({:?}) are not compatible!",
+            self.shape,
+            perm
+        );
+        let mut seen: Vec<bool> = vec![false; perm.len()];
+        for &axis in perm.iter() {
+            ensure!(
+                axis < self.shape.len(),
+                "Axis {} is out of bounds for rank {} tensor!",
+                axis,
+                self.shape.len()
+            );
+            ensure!(
+                !seen[axis],
+                "Axis {} appears multiple times in the permutation!",
+                axis
+            );
+            seen[axis] = true;
+        }
+        let new_shape: Vec<u32> = perm.iter().map(|&i| self.shape[i]).collect();
+        let new_strides: Vec<u32> = perm.iter().map(|&i| self.strides[i]).collect();
+        Ok(Self {
+            buffer: Arc::clone(&self.buffer),
+            shape: new_shape,
+            strides: new_strides,
+            offset: self.offset,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::linalg::context::GpuContext;
+    fn context() -> GpuContext {
+        pollster::block_on(GpuContext::new()).expect("Failed to create GPU context")
+    }
+    #[test]
+    fn transpose_2d_default() -> Result<()> {
+        let ctx = context();
+        let tensor = GpuTensor::from_f32(
+            &ctx,
+            &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            vec![2, 3],
+            None,
+            None,
+        )?;
+        let t = tensor.transpose(None)?;
+        assert_eq!(t.shape, vec![3, 2]);
+        assert_eq!(t.strides, vec![1, 3]);
+        assert_eq!(t.offset, tensor.offset);
+        Ok(())
+    }
+    #[test]
+    fn transpose_3d_default() -> Result<()> {
+        let ctx = context();
+        let tensor = GpuTensor::from_f32(&ctx, &[0.0f32; 24], vec![2, 3, 4], None, None)?;
+        let t = tensor.transpose(None)?;
+        assert_eq!(t.shape, vec![4, 3, 2]);
+        assert_eq!(t.strides, vec![1, 4, 12]);
+        Ok(())
+    }
+    #[test]
+    fn transpose_custom_permutation() -> Result<()> {
+        let ctx = context();
+        let tensor = GpuTensor::from_f32(&ctx, &[0.0f32; 24], vec![2, 3, 4], None, None)?;
+        let t = tensor.transpose(Some(vec![2, 0, 1]))?;
+        assert_eq!(t.shape, vec![4, 2, 3]);
+        assert_eq!(t.strides, vec![1, 12, 4]);
+        Ok(())
+    }
+    #[test]
+    fn transpose_preserves_offset() -> Result<()> {
+        let ctx = context();
+        let tensor = GpuTensor::from_f32(&ctx, &[0.0f32; 32], vec![4, 4], None, Some(8))?;
+        let t = tensor.transpose(None)?;
+        assert_eq!(t.offset, 8);
+        Ok(())
+    }
+    #[test]
+    fn transpose_shares_buffer() -> Result<()> {
+        let ctx = context();
+        let tensor = GpuTensor::from_f32(&ctx, &[1.0f32, 2.0, 3.0, 4.0], vec![2, 2], None, None)?;
+        let t = tensor.transpose(None)?;
+        assert_eq!(tensor.buffer.size(), t.buffer.size());
+        Ok(())
+    }
+    #[test]
+    fn transpose_rejects_rank_mismatch() {
+        let ctx = context();
+        let tensor = GpuTensor::from_f32(&ctx, &[0.0f32; 24], vec![2, 3, 4], None, None).unwrap();
+        let result = tensor.transpose(Some(vec![1, 0]));
+        assert!(result.is_err());
+    }
+    #[test]
+    fn transpose_rejects_duplicate_axis() {
+        let ctx = context();
+        let tensor = GpuTensor::from_f32(&ctx, &[0.0f32; 24], vec![2, 3, 4], None, None).unwrap();
+        let result = tensor.transpose(Some(vec![0, 0, 2]));
+        assert!(result.is_err());
+    }
+    #[test]
+    fn transpose_rejects_out_of_bounds_axis() {
+        let ctx = context();
+        let tensor = GpuTensor::from_f32(&ctx, &[0.0f32; 24], vec![2, 3, 4], None, None).unwrap();
+        let result = tensor.transpose(Some(vec![0, 1, 3]));
+        assert!(result.is_err());
+    }
+    #[test]
+    fn transpose_twice_returns_original_layout() -> Result<()> {
+        let ctx = context();
+        let tensor = GpuTensor::from_f32(&ctx, &[0.0f32; 24], vec![2, 3, 4], None, None)?;
+        let t1 = tensor.transpose(Some(vec![2, 1, 0]))?;
+        let t2 = t1.transpose(Some(vec![2, 1, 0]))?;
+        assert_eq!(t2.shape, tensor.shape);
+        assert_eq!(t2.strides, tensor.strides);
+        Ok(())
+    }
+}
+
+
+-------------------------------
+src/linalg/slice.rs
+use crate::linalg::tensor::GpuTensor;
+use anyhow::{Result, ensure};
+use std::sync::Arc;
+
+impl GpuTensor {
+    pub fn slice_mut(&mut self, ranges: &[(usize, usize)]) -> Result<()> {
+        let rank = self.shape.len();
+        ensure!(
+            ranges.len() == rank,
+            "Number of slice ranges ({}) must match the tensor rank ({})",
+            ranges.len(),
+            rank
+        );
+        for (i, &(start, end)) in ranges.iter().enumerate() {
+            ensure!(
+                start <= end,
+                "The slice range should be (start <= end), i.e. {} is not less than {}.",
+                start,
+                end
+            );
+            ensure!(
+                end <= self.shape[i] as usize,
+                "The range is out-of-bounds, i.e. ranges[{}][1] = {} and shape[{}] = {}",
+                i,
+                end,
+                i,
+                self.shape[i]
+            );
+        }
+        let mut new_offset = self.offset;
+        for (i, &(start, end)) in ranges.iter().enumerate() {
+            // Math: The offset shifts by the start coordinate multiplied by the stride of that dimension.
+            // new_offset = old_offset + sum_i (start_i * stride_i)
+            new_offset += (start as u32) * self.strides[i];
+            // The new shape of this dimension is the length of the slice range.
+            self.shape[i] = (end - start) as u32;
+        }
+        // Strides remain completely unchanged because the step sizes along each dimension
+        // in memory are preserved [1].
+        self.offset = new_offset;
+        Ok(())
+    }
+
+    pub fn slice_view(&self, ranges: &[(usize, usize)]) -> Result<Self> {
+        let mut view = Self {
+            shape: self.shape.clone(),
+            strides: self.strides.clone(),
+            offset: self.offset,
+            buffer: Arc::clone(&self.buffer),
+        };
+        view.slice_mut(ranges)?;
+        Ok(view)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::linalg::context::GpuContext;
+    use crate::linalg::tensor::GpuTensor;
+    use anyhow::Result;
+
+    // Helper to initialize the GPU context for testing
+    fn context() -> GpuContext {
+        pollster::block_on(GpuContext::new()).expect("Failed to create GPU context")
+    }
+
+    // --- COORDINATE DECOMPOSITION TEST HELPERS ---
+
+    fn tensor_coords(linear_idx: usize, rank: usize, shape: &[u32]) -> Vec<usize> {
+        let mut coords = vec![0; rank];
+        if rank == 0 {
+            return coords;
+        }
+        let mut idx = linear_idx;
+        for i in (0..rank).rev() {
+            coords[i] = idx % (shape[i] as usize);
+            idx = idx / (shape[i] as usize);
+        }
+        coords
+    }
+
+    fn linear_index(coords: &[usize], rank: usize, offset: u32, strides: &[u32]) -> usize {
+        let mut idx = offset as usize;
+        for i in 0..rank {
+            idx += coords[i] * (strides[i] as usize);
+        }
+        idx
+    }
+
+    // --- METADATA MUTATION TESTS (slice_mut) ---
+
+    #[test]
+    fn test_slice_mut_1d() -> Result<()> {
+        let ctx = context();
+        // Contiguous 1D tensor: [10.0, 11.0, 12.0, 13.0, 14.0]
+        let data = vec![10.0f32, 11.0, 12.0, 13.0, 14.0];
+        let mut tensor = GpuTensor::from_f32(&ctx, &data, vec![1], None, None)?;
+
+        // Slice middle indices 1 to 4 (exclusive) -> [11.0, 12.0, 13.0]
+        tensor.slice_mut(&[(1, 4)])?;
+
+        assert_eq!(tensor.shape, vec![2]);
+        assert_eq!(tensor.strides, vec![3]);
+        assert_eq!(tensor.offset, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn test_slice_mut_2d() -> Result<()> {
+        let ctx = context();
+        // Contiguous 3x4 Matrix:
+        // [ 0.0,  1.0,  2.0,  3.0,
+        //   4.0,  5.0,  6.0,  7.0,
+        //   8.0,  9.0, 10.0, 11.0 ]
+        let data: Vec<f32> = (0..12).map(|x| x as f32).collect();
+        let mut tensor = GpuTensor::from_f32(&ctx, &data, vec![2, 4], None, None)?;
+
+        // Slice middle 2x2 matrix: rows [1, 3) and columns [1, 3)
+        // [ 5.0,  6.0,
+        //   9.0, 10.0 ]
+        tensor.slice_mut(&[(1, 3), (1, 3)])?;
+
+        // Row stride is 4, column stride is 1.
+        // Offset shift = 1 * 4 + 1 * 1 = 5
+        assert_eq!(tensor.shape, vec![5]);
+        assert_eq!(tensor.strides, vec![3, 4]);
+        assert_eq!(tensor.offset, 5);
+        Ok(())
+    }
+
+    #[test]
+    fn test_slice_mut_3d() -> Result<()> {
+        let ctx = context();
+        // Contiguous 2x3x4 3D tensor (24 elements)
+        let data: Vec<f32> = (0..24).map(|x| x as f32).collect();
+        let mut tensor = GpuTensor::from_f32(&ctx, &data, vec![2, 4, 5], None, None)?;
+
+        // Slice subset: Axis 0: [1, 2), Axis 1: [0, 2), Axis 2: [1, 4)
+        tensor.slice_mut(&[(1, 2), (0, 2), (1, 4)])?;
+
+        // Strides are [3, 4, 6]. Offset shift = 1 * 12 + 0 * 4 + 1 * 1 = 13
+        assert_eq!(tensor.shape, vec![2, 3, 5]);
+        assert_eq!(tensor.strides, vec![3, 4, 6]);
+        assert_eq!(tensor.offset, 13);
+        Ok(())
+    }
+
+    // --- IMMUTABLE VIEW CREATION TESTS (slice_view) ---
+
+    #[test]
+    fn test_slice_view_shares_buffer() -> Result<()> {
+        let ctx = context();
+        let data: Vec<f32> = (0..12).map(|x| x as f32).collect();
+        let parent = GpuTensor::from_f32(&ctx, &data, vec![2, 4], None, None)?;
+
+        // Create a sliced sub-view
+        let view = parent.slice_view(&[(1, 3), (1, 3)])?;
+
+        // 1. Parent metadata remains completely unchanged
+        assert_eq!(parent.shape, vec![2, 4]);
+        assert_eq!(parent.offset, 0);
+
+        // 2. View metadata is sliced correctly
+        assert_eq!(view.shape, vec![5]);
+        assert_eq!(view.offset, 5);
+
+        // 3. Both tensors share the same underlying GPU buffer allocation
+        assert_eq!(parent.buffer.size(), view.buffer.size());
+        Ok(())
+    }
+
+    // --- VALIDATION & TRANSACTION SAFETY TESTS ---
+
+    #[test]
+    fn test_slice_validation_checks() {
+        let ctx = context();
+        let data = vec![0.0f32; 12];
+        let mut tensor = GpuTensor::from_f32(&ctx, &data, vec![2, 4], None, None).unwrap();
+
+        // 1. Rank mismatch (A 2D tensor requires exactly 2 ranges)
+        assert!(
+            tensor.slice_mut(&[(0, 2)]).is_err(),
+            "Expected error for rank mismatch"
+        );
+
+        // 2. Invalid range boundaries (start > end)
+        assert!(
+            tensor.slice_mut(&[(2, 1), (0, 2)]).is_err(),
+            "Expected error for start index greater than end index"
+        );
+
+        // 3. Out-of-bounds index (end > shape[i])
+        assert!(
+            tensor.slice_mut(&[(0, 4), (0, 2)]).is_err(),
+            "Expected error for slicing beyond dimension boundary"
+        );
+
+        // 4. Edge limits (Slicing exactly up to the size boundary of the shape must succeed)
+        assert!(
+            tensor.slice_mut(&[(0, 3), (0, 4)]).is_ok(),
+            "Slicing exactly up to the size boundary of the shape should succeed"
+        );
+    }
+
+    // --- INTEGRATION MATH VERIFICATION ---
+
+    // #[test]
+    // fn test_slice_mut_and_coordinate_integration() -> Result<()> {
+    //     let ctx = context();
+    //     // Contiguous 3x4 matrix containing values 0.0 to 11.0
+    //     let data: Vec<f32> = (0..12).map(|x| x as f32).collect();
+    //     let mut tensor = GpuTensor::from_f32(&ctx, &data, vec![2, 4], None, None)?;
+
+    //     // Slice middle 2x2 matrix:
+    //     // [ 5.0,  6.0 ]
+    //     // [ 9.0, 10.0 ]
+    //     tensor.slice_mut(&[(1, 3), (1, 3)])?;
+
+    //     let sliced_shape = tensor.shape.clone(); // [5]
+    //     let sliced_strides = tensor.strides.clone(); // [3, 4]
+    //     let sliced_offset = tensor.offset; // 5
+
+    //     // Logical indices inside the 2x2 view: 0, 1, 2, 3
+    //     // Should map to physical buffer indexes: 5, 6, 9, 10
+    //     let expected_physical_indices = vec![1, 7 - 9];
+
+    //     for logical_idx in 0..4 {
+    //         let coords = tensor_coords(logical_idx, 2, &sliced_shape);
+    //         let physical_idx = linear_index(&coords, 2, sliced_offset, &sliced_strides);
+
+    //         assert_eq!(
+    //             physical_idx, expected_physical_indices[logical_idx],
+    //             "Logical index {} mapped to physical position {} (Expected {})",
+    //             logical_idx, physical_idx, expected_physical_indices[logical_idx]
+    //         );
+
+    //         // Verify the physical values are indeed 5.0, 6.0, 9.0, and 10.0
+    //         assert_eq!(
+    //             data[physical_idx],
+    //             expected_physical_indices[logical_idx] as f32
+    //         );
+    //     }
+
+    //     Ok(())
+    // }
+}
+
+
+-------------------------------
+src/linalg/wgsl
+
+
+-------------------------------
+src/linalg/wgsl/opcodes.wgsl
+// Unary Operations
+const OP_ABS  : u32 = 0u;
+const OP_NEG  : u32 = 1u;
+const OP_SQRT : u32 = 2u;
+const OP_EXP  : u32 = 3u;
+const OP_LOG  : u32 = 4u;
+const OP_SIN  : u32 = 5u;
+const OP_COS  : u32 = 6u;
+const OP_NOT  : u32 = 7u; // logical (not bitwise)
+
+// Binary operations
+const OP_ADD   : u32 = 0u;
+const OP_SUB   : u32 = 1u;
+const OP_MUL   : u32 = 2u;
+const OP_DIV   : u32 = 3u;
+const OP_MIN   : u32 = 4u;
+const OP_MAX   : u32 = 5u;
+const OP_POW   : u32 = 6u;
+const OP_ATAN2 : u32 = 7u;
+const OP_EQ    : u32 = 8u;
+const OP_NE    : u32 = 9u;
+const OP_LT    : u32 = 10u;
+const OP_LE    : u32 = 11u;
+const OP_GT    : u32 = 12u;
+const OP_GE    : u32 = 13u;
+const OP_AND   : u32 = 14u; // logical (not bitwise)
+const OP_OR    : u32 = 15u; // logical (not bitwise)
+const OP_XOR   : u32 = 16u; // logical (not bitwise)
+
+// Contraction: pairwise operations
+const OP_PAIR_ADD : u32 = 0u;
+const OP_PAIR_SUB : u32 = 1u;
+const OP_PAIR_MUL : u32 = 2u;
+const OP_PAIR_DIV : u32 = 3u;
+const OP_PAIR_MIN : u32 = 4u;
+const OP_PAIR_MAX : u32 = 5u;
+const OP_PAIR_EQ  : u32 = 6u;
+const OP_PAIR_NE  : u32 = 7u;
+const OP_PAIR_LT  : u32 = 8u;
+const OP_PAIR_LE  : u32 = 9u;
+const OP_PAIR_GT  : u32 = 10u;
+const OP_PAIR_GE  : u32 = 11u;
+const OP_PAIR_AND : u32 = 12u; // logical (not bitwise)
+const OP_PAIR_OR  : u32 = 13u; // logical (not bitwise)
+const OP_PAIR_XOR : u32 = 14u; // logical (not bitwise)
+
+// Contraction: reduction operations
+const OP_REDUCE_ADD : u32 = 0u;
+const OP_REDUCE_MUL : u32 = 1u;
+const OP_REDUCE_MIN : u32 = 2u;
+const OP_REDUCE_MAX : u32 = 3u;
+const OP_REDUCE_AND : u32 = 4u; // logical (not bitwise)
+const OP_REDUCE_OR  : u32 = 5u; // logical (not bitwise)
+const OP_REDUCE_XOR : u32 = 6u; // logical (not bitwise)
+
+
+-------------------------------
+src/linalg/wgsl/contract_tensor.wgsl
+///////////////////////////////////////////////////////////////////////////////
+// Generic Tensor Contraction Kernel
+//     C[i,j] = Σk A[i,k] * B[k,j]
+// For every output element C[i,j], we:
+// 1. Pick a row from A.
+// 2. Pick a column from B.
+// 3. Multiply matching values.
+// 4. Add (sum) the results.
+// The shared dimension k disappears because it is summed over.
+// Tensor contraction is exactly the same idea, but generalized from
+// matrices (rank-2 tensors) to tensors of arbitrary rank.
+// Example matrix multiplication:
+//     A[m,k]
+//     B[k,n]
+//    --------
+//     C[m,n]
+// We contract:
+//     A axis 1
+//     B axis 0
+// Example tensor contraction:
+//     A[a,b,c,d]
+//     B[c,d,e,f]
+//    ------------
+//     C[a,b,e,f]
+// We contract:
+//     A axes [2,3]
+//     B axes [0,1]
+// The contracted dimensions (c,d) disappear from the result because
+// we sum over them, just like k disappears during matrix multiplication.
+// --------------
+// Core Principle
+// --------------
+// Every output element of C is computed independently:
+//     C[free_axes]
+// We:
+// 1. Decode which logical element of C this thread owns.
+// 2. Recover the corresponding coordinates in A and B for all
+//    non-contracted ("free") axes.
+// 3. Enumerate every coordinate in the contraction subspace.
+// 4. Read matching elements from A and B.
+// 5. Accumulate:
+//        sum += A[...] * B[...]
+// 6. Write the final sum into C.
+// Unlike matrix multiplication, this kernel:
+// * Supports arbitrary tensor rank.
+// * Supports arbitrary contraction axes.
+// * Supports tensor views.
+// * Supports tensor slices.
+// * Supports tensor transposes.
+// because all indexing is performed through shape, stride, and offset
+// metadata rather than assuming contiguous matrix storage.
+// --------------------
+// Output Axis Ordering
+// --------------------
+// The output tensor C is defined as:
+//     C = [A free axes] + [B free axes]
+// Example:
+//     A[a,b,c]
+//     B[c,d,e]
+// Contract:
+//     c
+// Result:
+//     C[a,b,d,e]
+// The first dimensions of C come from the non-contracted axes of A,
+// followed by the non-contracted axes of B.
+///////////////////////////////////////////////////////////////////////////////
+struct ContractTensorParams {
+    // Tensor ranks.
+    a_rank: u32,
+    b_rank: u32,
+    c_rank: u32,
+    // Number of contracted axis pairs.
+    contraction_rank: u32,
+    // Total logical elements in C.
+    c_elements: u32,
+    // Logical tensor shapes.
+    a_shape: array<u32, 8>,
+    b_shape: array<u32, 8>,
+    c_shape: array<u32, 8>,
+    // Storage layout of A.
+    a_offset: u32,
+    a_strides: array<u32, 8>,
+    // Storage layout of B.
+    b_offset: u32,
+    b_strides: array<u32, 8>,
+    // Storage layout of C.
+    c_offset: u32,
+    c_strides: array<u32, 8>,
+    // Contracted axes.
+    a_contract_axes: array<u32, 8>,
+    b_contract_axes: array<u32, 8>,
+    // Operations
+    op_pairwise: u32,
+    op_reduction: u32,
+};
+
+///////////////////////////////////////////////////////////////////////////////
+// Decode a linear tensor element index into tensor coordinates.
+// Example:
+//     shape = [2,3,4]
+//     linear_idx = 17
+// becomes:
+//     coords = [1,1,1]
+// Conceptually this performs a mixed-radix base conversion where each
+// shape dimension acts as the base for that axis.
+///////////////////////////////////////////////////////////////////////////////
+fn tensor_coords(
+    linear_idx: u32,
+    rank: u32,
+    shape: array<u32, 8>,
+) -> array<u32, 8> {
+    var coords: array<u32, 8>;
+    if (rank == 0u) {
+        return coords;
+    }
+    var idx = linear_idx;
+    // Recover coordinates from fastest-moving axis to
+    // slowest-moving axis.
+    for (var axis = i32(rank) - 1; axis >= 0; axis--) {
+        let i = u32(axis);
+        coords[i] = idx % shape[i];
+        idx = idx / shape[i];
+    }
+    return coords;
+}
+
+///////////////////////////////////////////////////////////////////////////////
+// Convert tensor coordinates into an index within a backing storage buffer.
+// Given:
+//     coords  = [i₀,i₁,...]
+// and:
+//     strides = [s₀,s₁,...]
+// computes:
+//     offset +
+//     i₀*s₀ +
+//     i₁*s₁ +
+//     ...
+// This enables arbitrary tensor views, slices, and transposes.
+///////////////////////////////////////////////////////////////////////////////
+fn storage_index(
+    coords: array<u32, 8>,
+    rank: u32,
+    offset: u32,
+    strides: array<u32, 8>,
+) -> u32 {
+    var idx = offset;
+    for (var axis = 0u; axis < rank; axis++) {
+        idx += coords[axis] * strides[axis];
+    }
+    return idx;
+}
+
+@group(0) @binding(0)
+var<storage, read> A: array<f32>;
+
+@group(0) @binding(1)
+var<storage, read> B: array<f32>;
+
+@group(0) @binding(2)
+var<storage, read_write> C: array<f32>;
+
+@group(0) @binding(3)
+var<storage, read> params: ContractTensorParams;
+
+@compute
+@workgroup_size(256)
+fn main(
+    @builtin(global_invocation_id)
+    gid: vec3<u32>,
+) {
+    // One thread computes one logical element of C.
+    let c_linear_idx = gid.x;
+    if (c_linear_idx >= params.c_elements) {
+        return;
+    }
+    ///////////////////////////////////////////////////////////////////////
+    // Step 1.
+    // Determine which logical output element this thread owns.
+    // Convert:
+    //     c_linear_idx
+    // into:
+    //     c_coords
+    ///////////////////////////////////////////////////////////////////////
+    var c_coords = tensor_coords(
+        c_linear_idx,
+        params.c_rank,
+        params.c_shape,
+    );
+    //////////////////////////////////
+    // Step 2.
+    // Build coordinate vectors for A and B. Contracted coordinates will
+    // be filled later while iterating through the contraction space.
+    ///////////////////////////////////////////////////////////////////////
+    var a_coords: array<u32, 8>;
+    var b_coords: array<u32, 8>;
+    ///////////////////////////////////////////////////////////////////////
+    // Step 3.
+    // Copy free (non-contracted) coordinates from C into A and B.
+    // Since:
+    //     C = [A free axes] + [B free axes]
+    // C's coordinates can be distributed back into A and B.
+    ///////////////////////////////////////////////////////////////////////
+    var c_axis = 0u;
+    for (var a_axis = 0u; a_axis < params.a_rank; a_axis++) {
+        var contracted = false;
+        for (var i = 0u; i < params.contraction_rank; i++) {
+            if (a_axis == params.a_contract_axes[i]) {
+                contracted = true;
+                break;
+            }
+        }
+        if (!contracted) {
+            a_coords[a_axis] = c_coords[c_axis];
+            c_axis += 1u;
+        }
+    }
+    for (var b_axis = 0u; b_axis < params.b_rank; b_axis++) {
+        var contracted = false;
+        for (var i = 0u; i < params.contraction_rank; i++) {
+            if (b_axis == params.b_contract_axes[i]) {
+                contracted = true;
+                break;
+            }
+        }
+        if (!contracted) {
+            b_coords[b_axis] = c_coords[c_axis];
+            c_axis += 1u;
+        }
+    }
+    ///////////////////////////////////////////////////////////////////////
+    // Step 4.
+    // Compute the total number of coordinates in the contraction space.
+    // Example:
+    //     contract axes sizes = [4, 5]
+    // then:
+    //     contract_elements = 20
+    ///////////////////////////////////////////////////////////////////////
+    var contract_elements = 1u;
+    for (var i = 0u; i < params.contraction_rank; i++) {
+        let a_axis =
+            params.a_contract_axes[i];
+        contract_elements *=
+            params.a_shape[a_axis];
+    }
+    ///////////////////////////////////////////////////////////////////////
+    // Step 5.
+    // Enumerate every coordinate in the contraction subspace and compute:
+    //     Σ A[...] * B[...]
+    ///////////////////////////////////////////////////////////////////////
+    var reduced = 0.0;
+    switch(params.op_reduction) {
+        case OP_REDUCE_ADD: {
+            reduced = 0.0;
+        }
+        case OP_REDUCE_MUL: {
+            reduced = 1.0;
+        }
+        case OP_REDUCE_MIN: {
+            reduced = 3.4028235e+38;
+        }
+        case OP_REDUCE_MAX: {
+            reduced = -3.4028235e+38;
+        }
+        case OP_REDUCE_AND: {
+            reduced = 1.0;
+        }
+        case OP_REDUCE_OR: {
+            reduced = 0.0;
+        }
+        case OP_REDUCE_XOR: {
+            reduced = 0.0;
+        }
+        default: {
+            return;
+        }
+    }
+    for (var contract_linear = 0u; contract_linear < contract_elements; contract_linear++) {
+        ///////////////////////////////////////////////////////////////////
+        // Decode one point in the contraction subspace.
+        ///////////////////////////////////////////////////////////////////
+        var tmp = contract_linear;
+        for (var i = i32(params.contraction_rank) - 1; i >= 0; i--) {
+            let contract_axis = u32(i);
+            let a_axis = params.a_contract_axes[contract_axis];
+            let b_axis = params.b_contract_axes[contract_axis];
+            let extent = params.a_shape[a_axis];
+            let coord = tmp % extent;
+            tmp = tmp / extent;
+            a_coords[a_axis] = coord;
+            b_coords[b_axis] = coord;
+        }
+        ///////////////////////////////////////////////////////////////////
+        // Convert tensor coordinates into backing-buffer locations.
+        ///////////////////////////////////////////////////////////////////
+        let a_idx = storage_index(
+            a_coords,
+            params.a_rank,
+            params.a_offset,
+            params.a_strides,
+        );
+        let b_idx = storage_index(
+            b_coords,
+            params.b_rank,
+            params.b_offset,
+            params.b_strides,
+        );
+        ///////////////////////////////////////////////////////////////////
+        // Accumulate contribution from this contraction coordinate.
+        ///////////////////////////////////////////////////////////////////
+        let a = A[a_idx];
+        let b = B[b_idx];
+        var paired = a;
+        switch(params.op_pairwise) {
+            case OP_PAIR_ADD: {
+                paired = a + b;
+            }
+            case OP_PAIR_SUB: {
+                paired = a - b;
+            }
+            case OP_PAIR_MUL: {
+                paired = a * b;
+            }
+            case OP_PAIR_DIV: {
+                paired = a / b;
+            }
+            case OP_PAIR_MIN: {
+                paired = min(a, b);
+            }
+            case OP_PAIR_MAX: {
+                paired = max(a, b);
+            }
+            case OP_PAIR_EQ: {
+                paired = select(0.0, 1.0, a == b);
+            }
+            case OP_PAIR_AND: {
+                paired = select(0.0, 1.0, (a != 0.0) && (b != 0.0));
+            }
+            case OP_PAIR_OR: {
+                paired = select(0.0, 1.0, (a != 0.0) || (b != 0.0));
+            }
+            case OP_PAIR_XOR: {
+                paired = select(0.0, 1.0, (a != 0.0) != (b != 0.0));
+            }
+            default: {
+                return;
+            }
+        }
+        switch(params.op_reduction) {
+            case OP_REDUCE_ADD: {
+                reduced += paired;
+            }
+            case OP_REDUCE_MUL: {
+                reduced *= paired;
+            }
+            case OP_REDUCE_MIN: {
+                reduced = min(reduced, paired);
+            }
+            case OP_REDUCE_MAX: {
+                reduced = max(reduced, paired);
+            }
+            case OP_REDUCE_AND: {
+                reduced = select(0.0, 1.0, (reduced != 0.0) && (paired != 0.0));
+            }
+            case OP_REDUCE_OR: {
+                reduced = select(0.0, 1.0, (reduced != 0.0) || (paired != 0.0));
+            }
+            case OP_REDUCE_XOR: {
+                reduced = select(0.0, 1.0, (reduced != 0.0) != (paired != 0.0));
+            }
+            default: {
+                return;
+            }
+        }
+    }
+    ///////////////////////////////////////////////////////////////////////
+    // Step 6.
+    // Store the final result.
+    ///////////////////////////////////////////////////////////////////////
+    let c_idx = storage_index(
+        c_coords,
+        params.c_rank,
+        params.c_offset,
+        params.c_strides,
+    );
+    C[c_idx] = reduced;
+}
+
+
+-------------------------------
+src/linalg/wgsl/binary_tensor.wgsl
+struct BinaryTensorParams {
+    rank: u32,
+    n_elements: u32,
+
+    shape: array<u32, 8>,
+
+    a_offset: u32,
+    a_strides: array<u32, 8>,
+
+    b_offset: u32,
+    b_strides: array<u32, 8>,
+
+    c_offset: u32,
+    c_strides: array<u32, 8>,
+
+    op: u32,
+};
+
+// Convert a logical tensor element index into an index within the
+// underlying storage buffer.
+//
+// Tensor operations dispatch one thread per logical tensor element.
+// For example, a tensor with shape:
+//     [2, 3, 4]
+// contains:
+//     2 × 3 × 4 = 24
+// logical elements, numbered:
+//     0, 1, 2, ..., 23
+//
+// The GPU kernel therefore receives a flat (linear) index:
+//     linear_idx
+// but the tensor storage may be strided, transposed, or represent a
+// view into another tensor. We therefore cannot use `linear_idx`
+// directly to access the backing buffer.
+//
+// The algorithm proceeds in two steps:
+// 1. Convert the linear index into tensor coordinates.
+//    For shape [2, 3, 4]:
+//        linear_idx = 17
+//    corresponds to:
+//        (1, 1, 1)
+//    The coordinates are recovered from the last axis toward the first
+//    using repeated modulus and integer division:
+//        coord = idx % dimension_size
+//        idx   = idx / dimension_size
+//    This is analogous to extracting digits from a number in a mixed
+//    radix system whose bases are given by the tensor shape.
+//
+// 2. Convert tensor coordinates into a storage index.
+//    Given coordinates:
+//        (i₀, i₁, ..., iₙ)
+//    and strides:
+//        (s₀, s₁, ..., sₙ)
+//    the storage position is:
+//        offset +
+//        i₀·s₀ +
+//        i₁·s₁ +
+//        ...
+//        iₙ·sₙ
+//
+//    This formulation supports:
+//    * Contiguous tensors.
+//    * Tensor views.
+//    * Tensor slices.
+//    * Tensor transposes.
+//    without changing the kernel implementation. Only the shape,
+//    strides, and offset metadata need to differ.
+fn tensor_index(
+    linear_idx: u32,
+    offset: u32,
+    shape: array<u32, 8>,
+    strides: array<u32, 8>,
+    rank: u32,
+) -> u32 {
+    if (rank == 0u) {
+        return offset;
+    }
+    // Working copy of the logical element index.
+    var idx = linear_idx;
+    // Initialize the storage position to the tensor's starting offset
+    // within the backing buffer.
+    var storage_idx = offset;
+    // Recover tensor coordinates from the fastest-varying axis to the
+    // slowest-varying axis.
+    // For shape [2, 3, 4] and linear_idx = 17:
+    //     axis = 2  -> coord = 1
+    //     axis = 1  -> coord = 1
+    //     axis = 0  -> coord = 1
+    // yielding coordinates (1, 1, 1).
+    for (var axis = i32(rank) - 1; axis >= 0; axis--) {
+        let i = u32(axis);
+        // Coordinate of the current tensor dimension.
+        let coord = idx % shape[i];
+        // Remove the coordinate just extracted, preparing the index
+        // for the next (slower-varying) dimension.
+        idx = idx / shape[i];
+        // Accumulate the corresponding contribution to the storage
+        // index using the tensor stride for this dimension.
+        storage_idx += coord * strides[i];
+    }
+    return storage_idx;
+}
+
+@group(0) @binding(0)
+var<storage, read> A: array<f32>;
+
+@group(0) @binding(1)
+var<storage, read> B: array<f32>;
+
+@group(0) @binding(2)
+var<storage, read_write> C: array<f32>;
+
+@group(0) @binding(3)
+var<storage> params: BinaryTensorParams;
+
+@compute
+@workgroup_size(256)
+fn main(
+    @builtin(global_invocation_id)
+    gid: vec3<u32>,
+) {
+    let linear_idx = gid.x;
+    if (linear_idx >= params.n_elements) {
+        return;
+    }
+    let a_idx = tensor_index(
+        linear_idx,
+        params.a_offset,
+        params.shape,
+        params.a_strides,
+        params.rank,
+    );
+    let b_idx = tensor_index(
+        linear_idx,
+        params.b_offset,
+        params.shape,
+        params.b_strides,
+        params.rank,
+    );
+    let c_idx = tensor_index(
+        linear_idx,
+        params.c_offset,
+        params.shape,
+        params.c_strides,
+        params.rank,
+    );
+    let a = A[a_idx];
+    let b = B[b_idx];
+    var result = a;
+    switch(params.op) {
+        case OP_ADD: {
+            result = a + b;
+        }
+        case OP_SUB: {
+            result = a - b;
+        }
+        case OP_MUL: {
+            result = a * b;
+        }
+        case OP_DIV: {
+            result = a / b;
+        }
+        case OP_MIN: {
+            result = min(a, b);
+        }
+        case OP_MAX: {
+            result = max(a, b);
+        }
+        case OP_POW: {
+            result = pow(a, b);
+        }
+        case OP_ATAN2: {
+            result = atan2(a, b);
+        }
+        case OP_EQ: {
+            result = select(0.0, 1.0, a == b);
+        }
+        case OP_NE: {
+            result = select(0.0, 1.0, a != b);
+        }
+        case OP_LT: {
+            result = select(0.0, 1.0, a < b);
+        }
+        case OP_LE: {
+            result = select(0.0, 1.0, a <= b);
+        }
+        case OP_GT: {
+            result = select(0.0, 1.0, a > b);
+        }
+        case OP_GE: {
+            result = select(0.0, 1.0, a >= b);
+        }
+        case OP_AND: {
+            result = select(0.0, 1.0, (a != 0.0) && (b != 0.0));
+        }
+        case OP_OR: {
+            result = select(0.0, 1.0, (a != 0.0) || (b != 0.0));
+        }
+        case OP_XOR: {
+            result = select(0.0, 1.0, (a != 0.0) != (b != 0.0));
+        }
+        default: {
+            return;
+        }
+    }
+    C[c_idx] = result;
+}
+
+-------------------------------
+src/linalg/wgsl/contract_matrix.wgsl
+struct ContractMatrixParams {
+    // A %*% B = C
+    n: u32, // nrows of A and C
+    p: u32, // nrows of B and ncols of A
+    k: u32, // ncols of B and C
+
+    a_offset: u32,
+    a_row_stride: u32,
+    a_col_stride: u32,
+
+    b_offset: u32,
+    b_row_stride: u32,
+    b_col_stride: u32,
+
+    c_offset: u32,
+    c_row_stride: u32,
+    c_col_stride: u32,
+    
+    op_pairwise: u32,
+    op_reduction: u32,
+};
+
+fn matrix_index(
+    row: u32,
+    col: u32,
+    offset: u32,
+    row_stride: u32,
+    col_stride: u32
+) -> u32 {
+    return offset +
+           row * row_stride +
+           col * col_stride;
+}
+
+@group(0) @binding(0)
+var<storage, read> A: array<f32>;
+
+@group(0) @binding(1)
+var<storage, read> B: array<f32>;
+
+@group(0) @binding(2)
+var<storage, read_write> C: array<f32>;
+
+@group(0) @binding(3)
+var<storage> params: ContractMatrixParams;
+
+@compute
+@workgroup_size(16,16,1)
+fn main(
+    @builtin(global_invocation_id)
+    gid: vec3<u32>
+) {
+    let row = gid.y;
+    let col = gid.x;
+    if (row >= params.n || col >= params.k) {
+        return;
+    }
+    var reduced = 0.0;
+    switch(params.op_reduction) {
+        case OP_REDUCE_ADD: {
+            reduced = 0.0;
+        }
+        case OP_REDUCE_MUL: {
+            reduced = 1.0;
+        }
+        case OP_REDUCE_MIN: {
+            reduced = 3.4028235e+38;
+        }
+        case OP_REDUCE_MAX: {
+            reduced = -3.4028235e+38;
+        }
+        case OP_REDUCE_AND: {
+            reduced = 1.0;
+        }
+        case OP_REDUCE_OR: {
+            reduced = 0.0;
+        }
+        case OP_REDUCE_XOR: {
+            reduced = 0.0;
+        }
+        default: {
+            return;
+        }
+    }
+    for (var p = 0u; p < params.p; p++) {
+        let a_idx = matrix_index(
+            row,
+            p,
+            params.a_offset,
+            params.a_row_stride,
+            params.a_col_stride
+        );
+        let b_idx = matrix_index(
+            p,
+            col,
+            params.b_offset,
+            params.b_row_stride,
+            params.b_col_stride
+        );
+        let a = A[a_idx];
+        let b = B[b_idx];
+        var paired = a;
+        switch(params.op_pairwise) {
+            case OP_PAIR_ADD: {
+                paired = a + b;
+            }
+            case OP_PAIR_SUB: {
+                paired = a - b;
+            }
+            case OP_PAIR_MUL: {
+                paired = a * b;
+            }
+            case OP_PAIR_DIV: {
+                paired = a / b;
+            }
+            case OP_PAIR_MIN: {
+                paired = min(a, b);
+            }
+            case OP_PAIR_MAX: {
+                paired = max(a, b);
+            }
+            case OP_PAIR_EQ: {
+                paired = select(0.0, 1.0, a == b);
+            }
+            case OP_PAIR_AND: {
+                paired = select(0.0, 1.0, (a != 0.0) && (b != 0.0));
+            }
+            case OP_PAIR_OR: {
+                paired = select(0.0, 1.0, (a != 0.0) || (b != 0.0));
+            }
+            case OP_PAIR_XOR: {
+                paired = select(0.0, 1.0, (a != 0.0) != (b != 0.0));
+            }
+            default: {
+                return;
+            }
+        }
+        switch(params.op_reduction) {
+            case OP_REDUCE_ADD: {
+                reduced += paired;
+            }
+            case OP_REDUCE_MUL: {
+                reduced *= paired;
+            }
+            case OP_REDUCE_MIN: {
+                reduced = min(reduced, paired);
+            }
+            case OP_REDUCE_MAX: {
+                reduced = max(reduced, paired);
+            }
+            case OP_REDUCE_AND: {
+                reduced = select(0.0, 1.0, (reduced != 0.0) && (paired != 0.0));
+            }
+            case OP_REDUCE_OR: {
+                reduced = select(0.0, 1.0, (reduced != 0.0) || (paired != 0.0));
+            }
+            case OP_REDUCE_XOR: {
+                reduced = select(0.0, 1.0, (reduced != 0.0) != (paired != 0.0));
+            }
+            default: {
+                return;
+            }
+        }
+    }
+    let c_idx = matrix_index(
+        row,
+        col,
+        params.c_offset,
+        params.c_row_stride,
+        params.c_col_stride
+    );
+    C[c_idx] = reduced;
+}
+
+-------------------------------
+src/linalg/wgsl/unary_matrix.wgsl
+struct UnaryMatrixParams {
+    // op(A) = C
+    n: u32,
+    p: u32,
+
+    a_offset: u32,
+    a_row_stride: u32,
+    a_col_stride: u32,
+
+    c_offset: u32,
+    c_row_stride: u32,
+    c_col_stride: u32,
+
+    op: u32,
+};
+
+fn matrix_index(
+    row: u32,
+    col: u32,
+    offset: u32,
+    row_stride: u32,
+    col_stride: u32
+) -> u32 {
+    return offset +
+           row * row_stride +
+           col * col_stride;
+}
+
+@group(0) @binding(0)
+var<storage, read> A: array<f32>;
+
+@group(0) @binding(1)
+var<storage, read_write> C: array<f32>;
+
+@group(0) @binding(2)
+var<storage> params: UnaryMatrixParams;
+
+@compute
+@workgroup_size(16,16,1)
+fn main(
+    @builtin(global_invocation_id)
+    gid: vec3<u32>
+) {
+    let row = gid.y;
+    let col = gid.x;
+    if (row >= params.n || col >= params.p) {
+        return;
+    }
+    let a_idx = matrix_index(
+        row,
+        col,
+        params.a_offset,
+        params.a_row_stride,
+        params.a_col_stride
+    );
+    let c_idx = matrix_index(
+        row,
+        col,
+        params.c_offset,
+        params.c_row_stride,
+        params.c_col_stride
+    );
+    let a = A[a_idx];
+    var result = a;
+    switch(params.op) {
+        case OP_ABS: {
+            result = abs(a);
+        }
+        case OP_NEG: {
+            result = -a;
+        }
+        case OP_SQRT: {
+            result = sqrt(a); // NaN if a < 0
+        }
+        case OP_EXP: {
+            result = exp(a);
+        }
+        case OP_LOG: {
+            result = log(a); // -inf if a == 0 and NaN if a < 0
+        }
+        case OP_SIN: {
+            result = sin(a);
+        }
+        case OP_COS: {
+            result = cos(a);
+        }
+        case OP_NOT: {
+            result = select(0.0, 1.0, a == 0.0);
+        }
+        default: {
+            return;
+        }
+    }
+    C[c_idx] = result;
+}
+
+-------------------------------
+src/linalg/wgsl/binary_matrix.wgsl
+struct BinaryMatrixParams {
+    n: u32,
+    p: u32,
+
+    a_offset: u32,
+    a_row_stride: u32,
+    a_col_stride: u32,
+
+    b_offset: u32,
+    b_row_stride: u32,
+    b_col_stride: u32,
+
+    c_offset: u32,
+    c_row_stride: u32,
+    c_col_stride: u32,
+
+    op: u32,
+};
+
+fn matrix_index(
+    row: u32,
+    col: u32,
+    offset: u32,
+    row_stride: u32,
+    col_stride: u32
+) -> u32 {
+    return offset +
+           row * row_stride +
+           col * col_stride;
+}
+
+@group(0) @binding(0)
+var<storage, read> A: array<f32>;
+
+@group(0) @binding(1)
+var<storage, read> B: array<f32>;
+
+@group(0) @binding(2)
+var<storage, read_write> C: array<f32>;
+
+@group(0) @binding(3)
+var<storage> params: BinaryMatrixParams;
+
+@compute
+@workgroup_size(16,16,1)
+fn main(
+    @builtin(global_invocation_id)
+    gid: vec3<u32>
+) {
+    let row = gid.y;
+    let col = gid.x;
+    if (row >= params.n || col >= params.p) {
+        return;
+    }
+    let a_idx = matrix_index(
+        row,
+        col,
+        params.a_offset,
+        params.a_row_stride,
+        params.a_col_stride
+    );
+    let b_idx = matrix_index(
+        row,
+        col,
+        params.b_offset,
+        params.b_row_stride,
+        params.b_col_stride
+    );
+    let c_idx = matrix_index(
+        row,
+        col,
+        params.c_offset,
+        params.c_row_stride,
+        params.c_col_stride
+    );
+    let a = A[a_idx];
+    let b = B[b_idx];
+    var result = a;
+    switch(params.op) {
+        case OP_ADD: {
+            result = a + b;
+        }
+        case OP_SUB: {
+            result = a - b;
+        }
+        case OP_MUL: {
+            result = a * b;
+        }
+        case OP_DIV: {
+            result = a / b;
+        }
+        case OP_MIN: {
+            result = min(a, b);
+        }
+        case OP_MAX: {
+            result = max(a, b);
+        }
+        case OP_POW: {
+            result = pow(a, b);
+        }
+        case OP_ATAN2: {
+            result = atan2(a, b);
+        }
+        case OP_EQ: {
+            result = select(0.0, 1.0, a == b);
+        }
+        case OP_NE: {
+            result = select(0.0, 1.0, a != b);
+        }
+        case OP_LT: {
+            result = select(0.0, 1.0, a < b);
+        }
+        case OP_LE: {
+            result = select(0.0, 1.0, a <= b);
+        }
+        case OP_GT: {
+            result = select(0.0, 1.0, a > b);
+        }
+        case OP_GE: {
+            result = select(0.0, 1.0, a >= b);
+        }
+        case OP_AND: {
+            result = select(0.0, 1.0, (a != 0.0) && (b != 0.0));
+        }
+        case OP_OR: {
+            result = select(0.0, 1.0, (a != 0.0) || (b != 0.0));
+        }
+        case OP_XOR: {
+            result = select(0.0, 1.0, (a != 0.0) != (b != 0.0));
+        }
+        default: {
+            return;
+        }
+    }
+    C[c_idx] = result;
+}
+
+-------------------------------
+src/linalg/wgsl/unary_tensor.wgsl
+struct UnaryTensorParams {
+    rank: u32,
+    n_elements: u32,
+
+    shape: array<u32, 8>,
+
+    a_offset: u32,
+    a_strides: array<u32, 8>,
+
+    c_offset: u32,
+    c_strides: array<u32, 8>,
+
+    op: u32,
+};
+
+// Convert a logical tensor element index into an index within the
+// underlying storage buffer.
+//
+// Tensor operations dispatch one thread per logical tensor element.
+// For example, a tensor with shape:
+//     [2, 3, 4]
+// contains:
+//     2 × 3 × 4 = 24
+// logical elements, numbered:
+//     0, 1, 2, ..., 23
+//
+// The GPU kernel therefore receives a flat (linear) index:
+//     linear_idx
+// but the tensor storage may be strided, transposed, or represent a
+// view into another tensor. We therefore cannot use `linear_idx`
+// directly to access the backing buffer.
+//
+// The algorithm proceeds in two steps:
+// 1. Convert the linear index into tensor coordinates.
+//    For shape [2, 3, 4]:
+//        linear_idx = 17
+//    corresponds to:
+//        (1, 1, 1)
+//    The coordinates are recovered from the last axis toward the first
+//    using repeated modulus and integer division:
+//        coord = idx % dimension_size
+//        idx   = idx / dimension_size
+//    This is analogous to extracting digits from a number in a mixed
+//    radix system whose bases are given by the tensor shape.
+//
+// 2. Convert tensor coordinates into a storage index.
+//    Given coordinates:
+//        (i₀, i₁, ..., iₙ)
+//    and strides:
+//        (s₀, s₁, ..., sₙ)
+//    the storage position is:
+//        offset +
+//        i₀·s₀ +
+//        i₁·s₁ +
+//        ...
+//        iₙ·sₙ
+//
+//    This formulation supports:
+//    * Contiguous tensors.
+//    * Tensor views.
+//    * Tensor slices.
+//    * Tensor transposes.
+//    without changing the kernel implementation. Only the shape,
+//    strides, and offset metadata need to differ.
+fn tensor_index(
+    linear_idx: u32,
+    offset: u32,
+    shape: array<u32, 8>,
+    strides: array<u32, 8>,
+    rank: u32,
+) -> u32 {
+    if (rank == 0u) {
+        return offset;
+    }
+    // Working copy of the logical element index.
+    var idx = linear_idx;
+    // Initialize the storage position to the tensor's starting offset
+    // within the backing buffer.
+    var storage_idx = offset;
+    // Recover tensor coordinates from the fastest-varying axis to the
+    // slowest-varying axis.
+    // For shape [2, 3, 4] and linear_idx = 17:
+    //     axis = 2  -> coord = 1
+    //     axis = 1  -> coord = 1
+    //     axis = 0  -> coord = 1
+    // yielding coordinates (1, 1, 1).
+    for (var axis = i32(rank) - 1; axis >= 0; axis--) {
+        let i = u32(axis);
+        // Coordinate of the current tensor dimension.
+        let coord = idx % shape[i];
+        // Remove the coordinate just extracted, preparing the index
+        // for the next (slower-varying) dimension.
+        idx = idx / shape[i];
+        // Accumulate the corresponding contribution to the storage
+        // index using the tensor stride for this dimension.
+        storage_idx += coord * strides[i];
+    }
+    return storage_idx;
+}
+
+@group(0) @binding(0)
+var<storage, read> A: array<f32>;
+
+@group(0) @binding(1)
+var<storage, read_write> C: array<f32>;
+
+@group(0) @binding(2)
+var<storage> params: UnaryTensorParams;
+
+@compute
+@workgroup_size(256)
+fn main(
+    @builtin(global_invocation_id)
+    gid: vec3<u32>,
+) {
+    let linear_idx = gid.x;
+    if (linear_idx >= params.n_elements) {
+        return;
+    }
+    let a_idx = tensor_index(
+        linear_idx,
+        params.a_offset,
+        params.shape,
+        params.a_strides,
+        params.rank,
+    );
+    let c_idx = tensor_index(
+        linear_idx,
+        params.c_offset,
+        params.shape,
+        params.c_strides,
+        params.rank,
+    );
+    let a = A[a_idx];
+    var result = a;
+    switch(params.op) {
+        case OP_ABS: {
+            result = abs(a);
+        }
+        case OP_NEG: {
+            result = -a;
+        }
+        case OP_SQRT: {
+            result = sqrt(a); // NaN if a < 0
+        }
+        case OP_EXP: {
+            result = exp(a);
+        }
+        case OP_LOG: {
+            result = log(a); // -inf if a == 0 and NaN if a < 0
+        }
+        case OP_SIN: {
+            result = sin(a);
+        }
+        case OP_COS: {
+            result = cos(a);
+        }
+        case OP_NOT: {
+            result = select(0.0, 1.0, a == 0.0);
+        }
+        default: {
+            return;
+        }
+    }
+    C[c_idx] = result;
+}
+
+-------------------------------
+src/linalg/wrappers_tensor.rs
+use crate::linalg::kernel::{GpuKernel, Params};
+use crate::linalg::operations::Operation;
+use crate::linalg::params::{BinaryTensorParams, ContractTensorParams, UnaryTensorParams};
+use crate::linalg::tensor::GpuTensor;
+use anyhow::{Result, ensure};
+
+const MAX_RANK: usize = 8;
+
+impl GpuTensor {
+    pub fn params_unary(&self, op: Operation) -> Result<Params> {
+        ensure!(
+            self.shape.len() <= MAX_RANK,
+            "Tensor rank exceeds MAX_RANK ({})",
+            MAX_RANK
+        );
+        let n_elements: u32 = self.shape.iter().product();
+        let mut shape = [0u32; MAX_RANK];
+        let mut self_strides = [0u32; MAX_RANK];
+        let mut c_strides = [0u32; MAX_RANK];
+        shape[..self.shape.len()].copy_from_slice(&self.shape[..]);
+        self_strides[..self.shape.len()].copy_from_slice(&self.strides[..]);
+        let mut stride = 1u32;
+        for i in (0..self.shape.len()).rev() {
+            c_strides[i] = stride;
+            stride *= self.shape[i];
+        }
+        let params = UnaryTensorParams {
+            // Number of tensor dimensions.
+            rank: self.shape.len() as u32,
+            // Total number of logical tensor elements.
+            n_elements,
+            // Shape of the logical tensor.
+            shape,
+            // Starting element of `A` within its backing storage.
+            a_offset: self.offset,
+            // Storage strides of `A` per dimension.
+            a_strides: self_strides,
+            // Starting element of `C` within its backing storage.
+            c_offset: 0,
+            // Storage strides of `C` per dimension.
+            c_strides,
+            // Mathematical operation: op(A) -> C (see operations.rs & wgsl/opcodes.wgsl).
+            op: op.unary_opcode()?,
+        };
+        Ok(Params::UnaryTensor(params))
+    }
+
+    pub fn params_binary(&self, b: &Self, op: Operation) -> Result<Params> {
+        ensure!(
+            self.shape == b.shape,
+            "Incompatible shapes: {:?} and {:?}",
+            self.shape,
+            b.shape
+        );
+        ensure!(
+            self.shape.len() <= MAX_RANK,
+            "Tensor rank exceeds MAX_RANK ({})",
+            MAX_RANK
+        );
+        let mut shape = [0u32; MAX_RANK];
+        let mut a_strides = [0u32; MAX_RANK];
+        let mut b_strides = [0u32; MAX_RANK];
+        let mut c_strides = [0u32; MAX_RANK];
+        shape[..self.shape.len()].copy_from_slice(&self.shape[..]);
+        a_strides[..self.shape.len()].copy_from_slice(&self.strides[..]);
+        b_strides[..self.shape.len()].copy_from_slice(&b.strides[..]);
+        let mut stride = 1u32;
+        for i in (0..self.shape.len()).rev() {
+            c_strides[i] = stride;
+            stride *= self.shape[i];
+        }
+        let params = BinaryTensorParams {
+            // Number of tensor dimensions.
+            rank: self.shape.len() as u32,
+            // Total number of logical tensor elements.
+            n_elements: self.shape.iter().product(),
+            // Shape of the logical tensor.
+            shape,
+            // Starting element of `A` within its backing storage.
+            a_offset: self.offset,
+            // Storage strides of `A` per dimension.
+            a_strides,
+            // Starting element of `B` within its backing storage.
+            b_offset: b.offset,
+            // Storage strides of `B` per dimension.
+            b_strides,
+            // Starting element of `C` within its backing storage.
+            c_offset: 0,
+            // Storage strides of `C` per dimension.
+            c_strides,
+            // Mathematical operation: op(A, B) -> C (see operations.rs & wgsl/opcodes.wgsl).
+            op: op.binary_opcode()?,
+        };
+        Ok(Params::BinaryTensor(params))
+    }
+
+    pub fn params_contract(
+        &self,
+        b: &Self,
+        op_pairwise: Operation,
+        op_reduction: Operation,
+        contract_axes: Option<(Vec<usize>, Vec<usize>)>,
+    ) -> Result<Params> {
+        let (a_contract_axes, b_contract_axes) = match contract_axes {
+            Some(x) => x,
+            None => {
+                ensure!(
+                    !self.shape.is_empty(),
+                    "Cannot infer contraction axes for a scalar tensor!"
+                );
+                (vec![self.shape.len() - 1], vec![0])
+            }
+        };
+        ensure!(
+            a_contract_axes.len() == b_contract_axes.len(),
+            "Contraction axis count mismatch"
+        );
+        for i in 0..a_contract_axes.len() {
+            ensure!(
+                a_contract_axes[i] < self.shape.len(),
+                "The contract axis of A is out of bounds!"
+            );
+            ensure!(
+                b_contract_axes[i] < b.shape.len(),
+                "The contract axis of B is out of bounds!"
+            );
+        }
+        for i in 0..a_contract_axes.len() {
+            for j in (i + 1)..a_contract_axes.len() {
+                ensure!(
+                    a_contract_axes[i] != a_contract_axes[j],
+                    "Duplicate contraction axes ({} at {} and {}) are not allowed!",
+                    a_contract_axes[i],
+                    i,
+                    j
+                );
+                ensure!(
+                    b_contract_axes[i] != b_contract_axes[j],
+                    "Duplicate contraction axes ({} at {} and {}) are not allowed!",
+                    b_contract_axes[i],
+                    i,
+                    j
+                );
+            }
+        }
+        let contraction_rank = a_contract_axes.len();
+        ensure!(self.shape.len() <= MAX_RANK, "A rank exceeds MAX_RANK");
+        ensure!(b.shape.len() <= MAX_RANK, "B rank exceeds MAX_RANK");
+        for i in 0..contraction_rank {
+            let a_axis = a_contract_axes[i];
+            let b_axis = b_contract_axes[i];
+            ensure!(
+                self.shape[a_axis] == b.shape[b_axis],
+                "Contracted dimensions must match: \
+                A axis {} ({}) != B axis {} ({})",
+                a_axis,
+                self.shape[a_axis],
+                b_axis,
+                b.shape[b_axis],
+            );
+        }
+        // Build output shape:
+        // C = A free axes + B free axes
+        let mut c_shape = Vec::new();
+        for axis in 0..self.shape.len() {
+            if !a_contract_axes.contains(&axis) {
+                c_shape.push(self.shape[axis]);
+            }
+        }
+        for axis in 0..b.shape.len() {
+            if !b_contract_axes.contains(&axis) {
+                c_shape.push(b.shape[axis]);
+            }
+        }
+        ensure!(c_shape.len() <= MAX_RANK, "Result rank exceeds MAX_RANK");
+        // Convert shapes
+        let mut a_shape = [0u32; MAX_RANK];
+        let mut b_shape = [0u32; MAX_RANK];
+        let mut c_shape_arr = [0u32; MAX_RANK];
+        a_shape[..self.shape.len()].copy_from_slice(&self.shape[..]);
+        b_shape[..b.shape.len()].copy_from_slice(&b.shape[..]);
+        c_shape_arr[..c_shape.len()].copy_from_slice(&c_shape[..]);
+        // Convert strides
+        let mut a_strides = [0u32; MAX_RANK];
+        let mut b_strides = [0u32; MAX_RANK];
+        let mut c_strides = [0u32; MAX_RANK];
+        a_strides[..self.strides.len()].copy_from_slice(&self.strides[..]);
+        b_strides[..b.strides.len()].copy_from_slice(&b.strides[..]);
+        // Create contiguous output strides
+        let mut stride = 1u32;
+        for i in (0..c_shape.len()).rev() {
+            c_strides[i] = stride;
+            stride *= c_shape[i];
+        }
+        // Contract axes
+        let mut a_contract = [0u32; MAX_RANK];
+        let mut b_contract = [0u32; MAX_RANK];
+        for i in 0..contraction_rank {
+            a_contract[i] = a_contract_axes[i] as u32;
+            b_contract[i] = b_contract_axes[i] as u32;
+        }
+        let c_elements = c_shape.iter().copied().product::<u32>();
+        let params = ContractTensorParams {
+            // Number of dimensions in tensor A.
+            a_rank: self.shape.len() as u32,
+            // Number of dimensions in tensor B.
+            b_rank: b.shape.len() as u32,
+            // Number of dimensions in tensor C.
+            c_rank: c_shape.len() as u32,
+            // Number of contracted axis pairs.
+            contraction_rank: contraction_rank as u32,
+            // Total number of logical elements in the output tensor C.
+            // i.e.: product(c_shape[..c_rank])
+            c_elements,
+            // Logical shape of tensor A.
+            a_shape,
+            // Logical shape of tensor B.
+            b_shape,
+            // Logical shape of tensor C.
+            c_shape: c_shape_arr,
+            // Starting element of `A` within its backing storage.
+            a_offset: self.offset,
+            // Storage strides of `A` per dimension.
+            a_strides,
+            // Starting element of `B` within its backing storage.
+            b_offset: b.offset,
+            // Storage strides of `B` per dimension.
+            b_strides,
+            // Starting element of `C` within its backing storage.
+            c_offset: 0,
+            // Storage strides of `C` per dimension.
+            c_strides,
+            // Contracted axes of tensor A.
+            a_contract_axes: a_contract,
+            // Contracted axes of tensor B.
+            b_contract_axes: b_contract,
+            // Pairwise operation (see operations.rs & wgsl/opcodes.wgsl).
+            op_pairwise: op_pairwise.contract_pairwise_opcode()?,
+            // Reduction operation (see operations.rs & wgsl/opcodes.wgsl).
+            op_reduction: op_reduction.contract_reduction_opcode()?,
+        };
+        Ok(Params::ContractTensor(params))
+    }
+}
+
+impl GpuKernel<'_> {
+    // Unary
+    pub fn abs(&self, a: &GpuTensor) -> Result<GpuTensor> {
+        self.execute_kernel(a.params_unary(Operation::ABS)?, a, None)
+    }
+    pub fn neg(&self, a: &GpuTensor) -> Result<GpuTensor> {
+        self.execute_kernel(a.params_unary(Operation::NEG)?, a, None)
+    }
+    pub fn sqrt(&self, a: &GpuTensor) -> Result<GpuTensor> {
+        self.execute_kernel(a.params_unary(Operation::SQRT)?, a, None)
+    }
+    pub fn exp(&self, a: &GpuTensor) -> Result<GpuTensor> {
+        self.execute_kernel(a.params_unary(Operation::EXP)?, a, None)
+    }
+    pub fn log(&self, a: &GpuTensor) -> Result<GpuTensor> {
+        self.execute_kernel(a.params_unary(Operation::LOG)?, a, None)
+    }
+    pub fn sin(&self, a: &GpuTensor) -> Result<GpuTensor> {
+        self.execute_kernel(a.params_unary(Operation::SIN)?, a, None)
+    }
+    pub fn cos(&self, a: &GpuTensor) -> Result<GpuTensor> {
+        self.execute_kernel(a.params_unary(Operation::COS)?, a, None)
+    }
+
+    // Binary
+    pub fn add(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
+        self.execute_kernel(a.params_binary(b, Operation::ADD)?, a, Some(b))
+    }
+    pub fn sub(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
+        self.execute_kernel(a.params_binary(b, Operation::SUB)?, a, Some(b))
+    }
+    pub fn mul(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
+        self.execute_kernel(a.params_binary(b, Operation::MUL)?, a, Some(b))
+    }
+    pub fn div(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
+        self.execute_kernel(a.params_binary(b, Operation::DIV)?, a, Some(b))
+    }
+    pub fn min(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
+        self.execute_kernel(a.params_binary(b, Operation::MIN)?, a, Some(b))
+    }
+    pub fn max(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
+        self.execute_kernel(a.params_binary(b, Operation::MAX)?, a, Some(b))
+    }
+    pub fn pow(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
+        self.execute_kernel(a.params_binary(b, Operation::POW)?, a, Some(b))
+    }
+    pub fn atan2(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
+        self.execute_kernel(a.params_binary(b, Operation::ATAN2)?, a, Some(b))
+    }
+    pub fn eq(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
+        self.execute_kernel(a.params_binary(b, Operation::EQ)?, a, Some(b))
+    }
+    pub fn ne(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
+        self.execute_kernel(a.params_binary(b, Operation::NE)?, a, Some(b))
+    }
+    pub fn lt(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
+        self.execute_kernel(a.params_binary(b, Operation::LT)?, a, Some(b))
+    }
+    pub fn le(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
+        self.execute_kernel(a.params_binary(b, Operation::LE)?, a, Some(b))
+    }
+    pub fn gt(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
+        self.execute_kernel(a.params_binary(b, Operation::GT)?, a, Some(b))
+    }
+    pub fn ge(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
+        self.execute_kernel(a.params_binary(b, Operation::GE)?, a, Some(b))
+    }
+
+    // Matrix multiplication (MUL --> ADD)
+    pub fn contract(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
+        let params = a.params_contract(b, Operation::MUL, Operation::ADD, None)?;
+        self.execute_kernel(params, a, Some(b))
+    }
+    // Hadamard sum (ADD --> ADD)
+    pub fn hadamard_sum(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
+        let params = a.params_contract(b, Operation::ADD, Operation::ADD, None)?;
+        self.execute_kernel(params, a, Some(b))
+    }
+    // Min-Plus Algebra (ADD --> MIN)
+    pub fn min_plus(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
+        let params = a.params_contract(b, Operation::ADD, Operation::MIN, None)?;
+        self.execute_kernel(params, a, Some(b))
+    }
+    // Max-Plus Algebra (ADD --> MAX)
+    pub fn max_plus(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
+        let params = a.params_contract(b, Operation::ADD, Operation::MAX, None)?;
+        self.execute_kernel(params, a, Some(b))
+    }
+    // Min-Mul (MUL --> MIN)
+    pub fn min_mul(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
+        let params = a.params_contract(b, Operation::MUL, Operation::MIN, None)?;
+        self.execute_kernel(params, a, Some(b))
+    }
+    // Max-Mul (MUL --> MAX)
+    pub fn max_mul(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
+        let params = a.params_contract(b, Operation::MUL, Operation::MAX, None)?;
+        self.execute_kernel(params, a, Some(b))
+    }
+    // Boolean matrix multiplication (AND --> OR)
+    pub fn contract_bool(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
+        let params = a.params_contract(b, Operation::AND, Operation::OR, None)?;
+        self.execute_kernel(params, a, Some(b))
+    }
+    // Equality Counting (EQ --> ADD)
+    pub fn eqcount(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
+        let params = a.params_contract(b, Operation::EQ, Operation::ADD, None)?;
+        self.execute_kernel(params, a, Some(b))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::linalg::context::GpuContext;
+    use crate::linalg::kernel::Params;
+    use crate::linalg::operations::Operation;
+    use crate::linalg::tensor::GpuTensor;
+    use anyhow::Result;
+
+    fn context() -> GpuContext {
+        pollster::block_on(GpuContext::new()).expect("Failed to create GPU context")
+    }
+
+    fn vector(ctx: &GpuContext, n: usize) -> Result<GpuTensor> {
+        let data: Vec<f32> = (0..n).map(|i| (i + 1) as f32).collect();
+        GpuTensor::from_f32(ctx, &data, vec![n as u32], None, None)
+    }
+
+    fn matrix(ctx: &GpuContext, rows: usize, cols: usize) -> Result<GpuTensor> {
+        let data: Vec<f32> = (0..rows * cols).map(|i| (i + 1) as f32).collect();
+        GpuTensor::from_f32(ctx, &data, vec![rows as u32, cols as u32], None, None)
+    }
+
+    fn tensor(ctx: &GpuContext, shape: &[u32]) -> Result<GpuTensor> {
+        let n_elements: usize = shape.iter().copied().map(|x| x as usize).product();
+        let data: Vec<f32> = (0..n_elements.max(1)).map(|i| (i + 1) as f32).collect();
+        GpuTensor::from_f32(ctx, &data, shape.to_vec(), None, None)
+    }
+    ////////////////////////////////////////
+    // Unary
+    ////////////////////////////////////////
+    #[test]
+    fn unary_params_rank_and_element_count() -> Result<()> {
+        let ctx = context();
+        let a = matrix(&ctx, 2, 3)?;
+        let params = a.params_unary(Operation::ABS)?;
+        match params {
+            Params::UnaryTensor(p) => {
+                assert_eq!(p.rank, 2);
+                assert_eq!(p.n_elements, 6);
+                assert_eq!(&p.shape[..2], &[2, 3]);
+            }
+            _ => panic!("Expected UnaryTensor params"),
+        }
+        Ok(())
+    }
+    #[test]
+    fn unary_output_strides_are_contiguous() -> Result<()> {
+        let ctx = context();
+        let a = tensor(&ctx, &[2, 3, 4])?;
+        let params = a.params_unary(Operation::ABS)?;
+        match params {
+            Params::UnaryTensor(p) => {
+                assert_eq!(&p.c_strides[..3], &[12, 4, 1]);
+            }
+            _ => panic!("Expected UnaryTensor params"),
+        }
+        Ok(())
+    }
+    ////////////////////////////////////////
+    // Binary
+    ////////////////////////////////////////
+    #[test]
+    fn binary_accepts_matching_shapes() -> Result<()> {
+        let ctx = context();
+        let a = matrix(&ctx, 2, 3)?;
+        let b = matrix(&ctx, 2, 3)?;
+        assert!(a.params_binary(&b, Operation::ADD).is_ok());
+        Ok(())
+    }
+    #[test]
+    fn binary_rejects_mismatched_shapes() -> Result<()> {
+        let ctx = context();
+        let a = matrix(&ctx, 2, 3)?;
+        let b = matrix(&ctx, 3, 2)?;
+        assert!(a.params_binary(&b, Operation::ADD).is_err());
+        Ok(())
+    }
+    #[test]
+    fn binary_params_rank_and_element_count() -> Result<()> {
+        let ctx = context();
+        let a = tensor(&ctx, &[2, 3, 4])?;
+        let b = tensor(&ctx, &[2, 3, 4])?;
+        let params = a.params_binary(&b, Operation::MUL)?;
+        match params {
+            Params::BinaryTensor(p) => {
+                assert_eq!(p.rank, 3);
+                assert_eq!(p.n_elements, 24);
+                assert_eq!(&p.shape[..3], &[2, 3, 4]);
+            }
+            _ => panic!("Expected BinaryTensor params"),
+        }
+        Ok(())
+    }
+    #[test]
+    fn binary_output_strides_are_contiguous() -> Result<()> {
+        let ctx = context();
+        let a = tensor(&ctx, &[2, 3, 4])?;
+        let b = tensor(&ctx, &[2, 3, 4])?;
+        let params = a.params_binary(&b, Operation::ADD)?;
+        match params {
+            Params::BinaryTensor(p) => {
+                assert_eq!(&p.c_strides[..3], &[12, 4, 1]);
+            }
+            _ => panic!("Expected BinaryTensor params"),
+        }
+        Ok(())
+    }
+    ////////////////////////////////////////
+    // Contraction validation
+    ////////////////////////////////////////
+    #[test]
+    fn contract_default_matrix_multiplication_is_valid() -> Result<()> {
+        let ctx = context();
+        let a = matrix(&ctx, 2, 3)?;
+        let b = matrix(&ctx, 3, 4)?;
+        assert!(
+            a.params_contract(&b, Operation::MUL, Operation::ADD, None)
+                .is_ok()
+        );
+        Ok(())
+    }
+    #[test]
+    fn contract_rejects_scalar_default_axes() -> Result<()> {
+        let ctx = context();
+        let a = tensor(&ctx, &[])?;
+        let b = vector(&ctx, 4)?;
+        assert!(
+            a.params_contract(&b, Operation::MUL, Operation::ADD, None)
+                .is_err()
+        );
+        Ok(())
+    }
+    #[test]
+    fn contract_rejects_axis_count_mismatch() -> Result<()> {
+        let ctx = context();
+        let a = tensor(&ctx, &[2, 3, 4])?;
+        let b = tensor(&ctx, &[2, 3, 4])?;
+        assert!(
+            a.params_contract(
+                &b,
+                Operation::MUL,
+                Operation::ADD,
+                Some((vec![0, 1], vec![0]))
+            )
+            .is_err()
+        );
+        Ok(())
+    }
+    #[test]
+    fn contract_rejects_a_axis_out_of_bounds() -> Result<()> {
+        let ctx = context();
+        let a = matrix(&ctx, 2, 3)?;
+        let b = matrix(&ctx, 3, 4)?;
+        assert!(
+            a.params_contract(
+                &b,
+                Operation::MUL,
+                Operation::ADD,
+                Some((vec![99], vec![0]))
+            )
+            .is_err()
+        );
+        Ok(())
+    }
+    #[test]
+    fn contract_rejects_b_axis_out_of_bounds() -> Result<()> {
+        let ctx = context();
+        let a = matrix(&ctx, 2, 3)?;
+        let b = matrix(&ctx, 3, 4)?;
+        assert!(
+            a.params_contract(
+                &b,
+                Operation::MUL,
+                Operation::ADD,
+                Some((vec![1], vec![99]))
+            )
+            .is_err()
+        );
+        Ok(())
+    }
+    #[test]
+    fn contract_rejects_duplicate_a_axes() -> Result<()> {
+        let ctx = context();
+        let a = tensor(&ctx, &[2, 3, 4])?;
+        let b = tensor(&ctx, &[3, 4, 5])?;
+        assert!(
+            a.params_contract(
+                &b,
+                Operation::MUL,
+                Operation::ADD,
+                Some((vec![1, 1], vec![0, 1]))
+            )
+            .is_err()
+        );
+        Ok(())
+    }
+    #[test]
+    fn contract_rejects_duplicate_b_axes() -> Result<()> {
+        let ctx = context();
+        let a = tensor(&ctx, &[2, 3, 4])?;
+        let b = tensor(&ctx, &[3, 4, 5])?;
+        assert!(
+            a.params_contract(
+                &b,
+                Operation::MUL,
+                Operation::ADD,
+                Some((vec![1, 2], vec![0, 0]))
+            )
+            .is_err()
+        );
+        Ok(())
+    }
+    #[test]
+    fn contract_rejects_dimension_mismatch() -> Result<()> {
+        let ctx = context();
+        let a = matrix(&ctx, 2, 3)?;
+        let b = matrix(&ctx, 4, 5)?;
+        assert!(
+            a.params_contract(&b, Operation::MUL, Operation::ADD, Some((vec![1], vec![0])))
+                .is_err()
+        );
+        Ok(())
+    }
+    ////////////////////////////////////////
+    // Contraction correctness
+    ////////////////////////////////////////
+    #[test]
+    fn contract_accepts_multi_axis_contraction() -> Result<()> {
+        let ctx = context();
+        let a = tensor(&ctx, &[2, 3, 4, 5])?;
+        let b = tensor(&ctx, &[4, 3, 7])?;
+        assert!(
+            a.params_contract(
+                &b,
+                Operation::MUL,
+                Operation::ADD,
+                Some((vec![2, 1], vec![0, 1]))
+            )
+            .is_ok()
+        );
+        Ok(())
+    }
+    #[test]
+    fn contract_output_shape_is_correct() -> Result<()> {
+        let ctx = context();
+        let a = tensor(&ctx, &[2, 3, 4])?;
+        let b = tensor(&ctx, &[4, 5])?;
+        let params =
+            a.params_contract(&b, Operation::MUL, Operation::ADD, Some((vec![2], vec![0])))?;
+        match params {
+            Params::ContractTensor(p) => {
+                assert_eq!(p.c_rank, 3);
+                assert_eq!(&p.c_shape[..3], &[2, 3, 5]);
+                assert_eq!(p.c_elements, 30);
+            }
+            _ => panic!("Expected ContractTensor params"),
+        }
+        Ok(())
+    }
+    #[test]
+    fn contract_output_strides_are_contiguous() -> Result<()> {
+        let ctx = context();
+        let a = tensor(&ctx, &[2, 3, 4])?;
+        let b = tensor(&ctx, &[4, 5])?;
+        let params =
+            a.params_contract(&b, Operation::MUL, Operation::ADD, Some((vec![2], vec![0])))?;
+        match params {
+            Params::ContractTensor(p) => {
+                assert_eq!(&p.c_strides[..3], &[15, 5, 1]);
+            }
+            _ => panic!("Expected ContractTensor params"),
+        }
+        Ok(())
+    }
+    #[test]
+    fn contract_matrix_multiplication_output_shape() -> Result<()> {
+        let ctx = context();
+        let a = matrix(&ctx, 2, 3)?;
+        let b = matrix(&ctx, 3, 4)?;
+        let params = a.params_contract(&b, Operation::MUL, Operation::ADD, None)?;
+        match params {
+            Params::ContractTensor(p) => {
+                assert_eq!(p.c_rank, 2);
+                assert_eq!(&p.c_shape[..2], &[2, 4]);
+                assert_eq!(p.c_elements, 8);
+            }
+            _ => panic!("Expected ContractTensor params"),
+        }
+        Ok(())
+    }
+    #[test]
+    fn contract_preserves_contracted_axes() -> Result<()> {
+        let ctx = context();
+        let a = tensor(&ctx, &[2, 3, 4])?;
+        let b = tensor(&ctx, &[5, 4, 6])?;
+        let params =
+            a.params_contract(&b, Operation::MUL, Operation::ADD, Some((vec![2], vec![1])))?;
+        match params {
+            Params::ContractTensor(p) => {
+                assert_eq!(p.contraction_rank, 1);
+                assert_eq!(p.a_contract_axes[0], 2);
+                assert_eq!(p.b_contract_axes[0], 1);
+            }
+            _ => panic!("Expected ContractTensor params"),
+        }
+        Ok(())
+    }
+    #[test]
+    fn contract_rejects_result_rank_exceeding_max_rank() -> Result<()> {
+        let ctx = context();
+        let a = tensor(&ctx, &[2, 2, 2, 2, 2])?;
+        let b = tensor(&ctx, &[2, 2, 2, 2, 2])?;
+        assert!(
+            a.params_contract(
+                &b,
+                Operation::MUL,
+                Operation::ADD,
+                Some((vec![10], vec![10]))
+            )
+            .is_err()
+        );
+        Ok(())
+    }
+    ////////////////////////////////////////
+    // GpuKernel wrapper methods
+    ////////////////////////////////////////
+    #[test]
+    fn kernel_abs() -> Result<()> {
+        let ctx = context();
+        let kernel = GpuKernel::new(&ctx);
+        let a = vector(&ctx, 8)?;
+        let c = kernel.abs(&a)?;
+        assert_eq!(c.shape, vec![8]);
+        Ok(())
+    }
+    #[test]
+    fn kernel_neg() -> Result<()> {
+        let ctx = context();
+        let kernel = GpuKernel::new(&ctx);
+        let a = vector(&ctx, 8)?;
+        let c = kernel.neg(&a)?;
+        assert_eq!(c.shape, vec![8]);
+        Ok(())
+    }
+    #[test]
+    fn kernel_sqrt() -> Result<()> {
+        let ctx = context();
+        let kernel = GpuKernel::new(&ctx);
+        let a = vector(&ctx, 8)?;
+        let c = kernel.sqrt(&a)?;
+        assert_eq!(c.shape, vec![8]);
+        Ok(())
+    }
+    #[test]
+    fn kernel_exp() -> Result<()> {
+        let ctx = context();
+        let kernel = GpuKernel::new(&ctx);
+        let a = vector(&ctx, 8)?;
+        let c = kernel.exp(&a)?;
+        assert_eq!(c.shape, vec![8]);
+        Ok(())
+    }
+    #[test]
+    fn kernel_log() -> Result<()> {
+        let ctx = context();
+        let kernel = GpuKernel::new(&ctx);
+        let a = vector(&ctx, 8)?;
+        let c = kernel.log(&a)?;
+        assert_eq!(c.shape, vec![8]);
+        Ok(())
+    }
+    #[test]
+    fn kernel_sin() -> Result<()> {
+        let ctx = context();
+        let kernel = GpuKernel::new(&ctx);
+        let a = vector(&ctx, 8)?;
+        let c = kernel.sin(&a)?;
+        assert_eq!(c.shape, vec![8]);
+        Ok(())
+    }
+    #[test]
+    fn kernel_cos() -> Result<()> {
+        let ctx = context();
+        let kernel = GpuKernel::new(&ctx);
+        let a = vector(&ctx, 8)?;
+        let c = kernel.cos(&a)?;
+        assert_eq!(c.shape, vec![8]);
+        Ok(())
+    }
+    #[test]
+    fn kernel_add() -> Result<()> {
+        let ctx = context();
+        let kernel = GpuKernel::new(&ctx);
+        let a = matrix(&ctx, 2, 3)?;
+        let b = matrix(&ctx, 2, 3)?;
+        let c = kernel.add(&a, &b)?;
+        assert_eq!(c.shape, vec![2, 3]);
+        Ok(())
+    }
+    #[test]
+    fn kernel_sub() -> Result<()> {
+        let ctx = context();
+        let kernel = GpuKernel::new(&ctx);
+        let a = matrix(&ctx, 2, 3)?;
+        let b = matrix(&ctx, 2, 3)?;
+        let c = kernel.sub(&a, &b)?;
+        assert_eq!(c.shape, vec![2, 3]);
+        Ok(())
+    }
+    #[test]
+    fn kernel_mul() -> Result<()> {
+        let ctx = context();
+        let kernel = GpuKernel::new(&ctx);
+        let a = matrix(&ctx, 2, 3)?;
+        let b = matrix(&ctx, 2, 3)?;
+        let c = kernel.mul(&a, &b)?;
+        assert_eq!(c.shape, vec![2, 3]);
+        Ok(())
+    }
+    #[test]
+    fn kernel_div() -> Result<()> {
+        let ctx = context();
+        let kernel = GpuKernel::new(&ctx);
+        let a = matrix(&ctx, 2, 3)?;
+        let b = matrix(&ctx, 2, 3)?;
+        let c = kernel.div(&a, &b)?;
+        assert_eq!(c.shape, vec![2, 3]);
+        Ok(())
+    }
+    #[test]
+    fn kernel_min() -> Result<()> {
+        let ctx = context();
+        let kernel = GpuKernel::new(&ctx);
+        let a = matrix(&ctx, 2, 3)?;
+        let b = matrix(&ctx, 2, 3)?;
+        let c = kernel.min(&a, &b)?;
+        assert_eq!(c.shape, vec![2, 3]);
+        Ok(())
+    }
+    #[test]
+    fn kernel_max() -> Result<()> {
+        let ctx = context();
+        let kernel = GpuKernel::new(&ctx);
+        let a = matrix(&ctx, 2, 3)?;
+        let b = matrix(&ctx, 2, 3)?;
+        let c = kernel.max(&a, &b)?;
+        assert_eq!(c.shape, vec![2, 3]);
+        Ok(())
+    }
+    #[test]
+    fn kernel_pow() -> Result<()> {
+        let ctx = context();
+        let kernel = GpuKernel::new(&ctx);
+        let a = matrix(&ctx, 2, 3)?;
+        let b = matrix(&ctx, 2, 3)?;
+        let c = kernel.pow(&a, &b)?;
+        assert_eq!(c.shape, vec![2, 3]);
+        Ok(())
+    }
+    #[test]
+    fn kernel_atan2() -> Result<()> {
+        let ctx = context();
+        let kernel = GpuKernel::new(&ctx);
+        let a = matrix(&ctx, 2, 3)?;
+        let b = matrix(&ctx, 2, 3)?;
+        let c = kernel.atan2(&a, &b)?;
+        assert_eq!(c.shape, vec![2, 3]);
+        Ok(())
+    }
+    #[test]
+    fn kernel_comparison_ops() -> Result<()> {
+        let ctx = context();
+        let kernel = GpuKernel::new(&ctx);
+        let a = matrix(&ctx, 2, 3)?;
+        let b = matrix(&ctx, 2, 3)?;
+        assert_eq!(kernel.eq(&a, &b)?.shape, vec![2, 3]);
+        assert_eq!(kernel.ne(&a, &b)?.shape, vec![2, 3]);
+        assert_eq!(kernel.lt(&a, &b)?.shape, vec![2, 3]);
+        assert_eq!(kernel.le(&a, &b)?.shape, vec![2, 3]);
+        assert_eq!(kernel.gt(&a, &b)?.shape, vec![2, 3]);
+        assert_eq!(kernel.ge(&a, &b)?.shape, vec![2, 3]);
+        Ok(())
+    }
+    #[test]
+    fn kernel_binary_shape_mismatch_fails() -> Result<()> {
+        let ctx = context();
+        let kernel = GpuKernel::new(&ctx);
+        let a = matrix(&ctx, 2, 3)?;
+        let b = matrix(&ctx, 3, 2)?;
+        assert!(kernel.add(&a, &b).is_err());
+        assert!(kernel.mul(&a, &b).is_err());
+        assert!(kernel.eq(&a, &b).is_err());
+        Ok(())
+    }
+    #[test]
+    fn kernel_contract() -> Result<()> {
+        let ctx = context();
+        let kernel = GpuKernel::new(&ctx);
+        let a = matrix(&ctx, 2, 3)?;
+        let b = matrix(&ctx, 3, 4)?;
+        let c = kernel.contract(&a, &b)?;
+        assert_eq!(c.shape, vec![2, 4]);
+        Ok(())
+    }
+    #[test]
+    fn kernel_hadamard_sum() -> Result<()> {
+        let ctx = context();
+        let kernel = GpuKernel::new(&ctx);
+        let a = matrix(&ctx, 2, 3)?;
+        let b = matrix(&ctx, 3, 4)?;
+        let c = kernel.hadamard_sum(&a, &b)?;
+        assert_eq!(c.shape, vec![2, 4]);
+        Ok(())
+    }
+    #[test]
+    fn kernel_min_plus() -> Result<()> {
+        let ctx = context();
+        let kernel = GpuKernel::new(&ctx);
+        let a = matrix(&ctx, 2, 3)?;
+        let b = matrix(&ctx, 3, 4)?;
+        let c = kernel.min_plus(&a, &b)?;
+        assert_eq!(c.shape, vec![2, 4]);
+        Ok(())
+    }
+    #[test]
+    fn kernel_max_plus() -> Result<()> {
+        let ctx = context();
+        let kernel = GpuKernel::new(&ctx);
+        let a = matrix(&ctx, 2, 3)?;
+        let b = matrix(&ctx, 3, 4)?;
+        let c = kernel.max_plus(&a, &b)?;
+        assert_eq!(c.shape, vec![2, 4]);
+        Ok(())
+    }
+    #[test]
+    fn kernel_min_mul() -> Result<()> {
+        let ctx = context();
+        let kernel = GpuKernel::new(&ctx);
+        let a = matrix(&ctx, 2, 3)?;
+        let b = matrix(&ctx, 3, 4)?;
+        let c = kernel.min_mul(&a, &b)?;
+        assert_eq!(c.shape, vec![2, 4]);
+        Ok(())
+    }
+    #[test]
+    fn kernel_max_mul() -> Result<()> {
+        let ctx = context();
+        let kernel = GpuKernel::new(&ctx);
+        let a = matrix(&ctx, 2, 3)?;
+        let b = matrix(&ctx, 3, 4)?;
+        let c = kernel.max_mul(&a, &b)?;
+        assert_eq!(c.shape, vec![2, 4]);
+        Ok(())
+    }
+    #[test]
+    fn kernel_contract_bool() -> Result<()> {
+        let ctx = context();
+        let kernel = GpuKernel::new(&ctx);
+        let a = matrix(&ctx, 2, 3)?;
+        let b = matrix(&ctx, 3, 4)?;
+        let c = kernel.contract_bool(&a, &b)?;
+        assert_eq!(c.shape, vec![2, 4]);
+        Ok(())
+    }
+    #[test]
+    fn kernel_eqcount() -> Result<()> {
+        let ctx = context();
+        let kernel = GpuKernel::new(&ctx);
+        let a = matrix(&ctx, 2, 3)?;
+        let b = matrix(&ctx, 3, 4)?;
+        let c = kernel.eqcount(&a, &b)?;
+        assert_eq!(c.shape, vec![2, 4]);
+        Ok(())
+    }
+    #[test]
+    fn kernel_contract_dimension_mismatch_fails() -> Result<()> {
+        let ctx = context();
+        let kernel = GpuKernel::new(&ctx);
+        let a = matrix(&ctx, 2, 3)?;
+        let b = matrix(&ctx, 5, 4)?;
+        assert!(kernel.contract(&a, &b).is_err());
+        Ok(())
+    }
+    #[test]
+    fn kernel_hadamard_sum_dimension_mismatch_fails() -> Result<()> {
+        let ctx = context();
+        let kernel = GpuKernel::new(&ctx);
+        let a = matrix(&ctx, 2, 3)?;
+        let b = matrix(&ctx, 5, 4)?;
+        assert!(kernel.hadamard_sum(&a, &b).is_err());
+        Ok(())
+    }
+    #[test]
+    fn kernel_min_plus_dimension_mismatch_fails() -> Result<()> {
+        let ctx = context();
+        let kernel = GpuKernel::new(&ctx);
+        let a = matrix(&ctx, 2, 3)?;
+        let b = matrix(&ctx, 5, 4)?;
+        assert!(kernel.min_plus(&a, &b).is_err());
+        Ok(())
+    }
+    #[test]
+    fn kernel_max_plus_dimension_mismatch_fails() -> Result<()> {
+        let ctx = context();
+        let kernel = GpuKernel::new(&ctx);
+        let a = matrix(&ctx, 2, 3)?;
+        let b = matrix(&ctx, 5, 4)?;
+        assert!(kernel.max_plus(&a, &b).is_err());
+        Ok(())
+    }
+    #[test]
+    fn kernel_min_mul_dimension_mismatch_fails() -> Result<()> {
+        let ctx = context();
+        let kernel = GpuKernel::new(&ctx);
+        let a = matrix(&ctx, 2, 3)?;
+        let b = matrix(&ctx, 5, 4)?;
+        assert!(kernel.min_mul(&a, &b).is_err());
+        Ok(())
+    }
+    #[test]
+    fn kernel_max_mul_dimension_mismatch_fails() -> Result<()> {
+        let ctx = context();
+        let kernel = GpuKernel::new(&ctx);
+        let a = matrix(&ctx, 2, 3)?;
+        let b = matrix(&ctx, 5, 4)?;
+        assert!(kernel.max_mul(&a, &b).is_err());
+        Ok(())
+    }
+    #[test]
+    fn kernel_contract_bool_dimension_mismatch_fails() -> Result<()> {
+        let ctx = context();
+        let kernel = GpuKernel::new(&ctx);
+        let a = matrix(&ctx, 2, 3)?;
+        let b = matrix(&ctx, 5, 4)?;
+        assert!(kernel.contract_bool(&a, &b).is_err());
+        Ok(())
+    }
+    #[test]
+    fn kernel_eqcount_dimension_mismatch_fails() -> Result<()> {
+        let ctx = context();
+        let kernel = GpuKernel::new(&ctx);
+        let a = matrix(&ctx, 2, 3)?;
+        let b = matrix(&ctx, 5, 4)?;
+        assert!(kernel.eqcount(&a, &b).is_err());
+        Ok(())
+    }
+}
+
+
+-------------------------------
+src/linalg/wrappers_matrix.rs
+use crate::linalg::kernel::{GpuKernel, Params};
+use crate::linalg::operations::Operation;
+use crate::linalg::params::{BinaryMatrixParams, ContractMatrixParams, UnaryMatrixParams};
+use crate::linalg::tensor::GpuTensor;
+use anyhow::{Result, ensure};
+
+impl GpuTensor {
+    pub fn params_unary_matrix(&self, op: Operation) -> Result<Params> {
+        ensure!(self.shape.len() == 2, "A must be rank 2!");
+        let params = UnaryMatrixParams {
+            // Number of rows in `A`, and `C`.
+            n: self.shape[0],
+            // Number of columns in `A`, and `C`.
+            p: self.shape[1],
+            // Starting element of `A` within its backing storage.
+            a_offset: self.offset,
+            // Storage stride between rows of `A`.
+            a_row_stride: self.strides[0],
+            // Storage stride between columns of `A`.
+            a_col_stride: self.strides[1],
+            // Starting element of `C` within its backing storage.
+            c_offset: 0,
+            // Storage stride between rows of `C`.
+            c_row_stride: self.shape[1],
+            // Storage stride between columns of `C`.
+            c_col_stride: 1,
+            // Mathematical operation: op(A) -> C (see operations.rs & wgsl/opcodes.wgsl).
+            op: op.unary_opcode()?,
+        };
+        Ok(Params::UnaryMatrix(params))
+    }
+
+    pub fn params_binary_matrix(&self, b: &Self, op: Operation) -> Result<Params> {
+        ensure!(self.shape.len() == 2, "A must be rank 2!");
+        ensure!(b.shape.len() == 2, "B must be rank 2!");
+        ensure!(self.shape == b.shape, "A and B mush have the same shape!");
+        let params = BinaryMatrixParams {
+            // Number of rows in `A`, `B`, and `C`.
+            n: self.shape[0],
+            // Number of columns in `A`, `B`, and `C`.
+            p: self.shape[1],
+            // Starting element of `A` within its backing storage.
+            a_offset: self.offset,
+            // Storage stride between rows of `A`.
+            a_row_stride: self.strides[0],
+            // Storage stride between columns of `A`.
+            a_col_stride: self.strides[1],
+            // Starting element of `B` within its backing storage.
+            b_offset: b.offset,
+            // Storage stride between rows of `B`.
+            b_row_stride: b.strides[0],
+            // Storage stride between columns of `B`.
+            b_col_stride: b.strides[1],
+            // Starting element of `C` within its backing storage.
+            c_offset: 0,
+            // Storage stride between rows of `C`.
+            c_row_stride: self.shape[1],
+            // Storage stride between columns of `C`.
+            c_col_stride: 1,
+            // Mathematical operation: op(A, B) -> C (see operations.rs & wgsl/opcodes.wgsl).
+            op: op.binary_opcode()?,
+        };
+        Ok(Params::BinaryMatrix(params))
+    }
+
+    pub fn params_contract_matrix(
+        &self,
+        b: &Self,
+        op_pairwise: Operation,
+        op_reduction: Operation,
+    ) -> Result<Params> {
+        ensure!(self.shape.len() == 2, "A must be rank 2!");
+        ensure!(b.shape.len() == 2, "B must be rank 2!");
+        ensure!(
+            self.shape[1] == b.shape[0],
+            "Incomaptible shapes: A {:?} x B {:?}!",
+            self.shape,
+            b.shape
+        );
+        let params = ContractMatrixParams {
+            // Number of rows in `A` and `C`.
+            n: self.shape[0],
+            // Shared contraction dimension.
+            p: self.shape[1],
+            // Number of columns in `B` and `C`.
+            k: b.shape[1],
+            // Starting element of `A` within its backing storage.
+            a_offset: self.offset,
+            // Storage stride between rows of `A`.
+            a_row_stride: self.strides[0],
+            // Storage stride between columns of `A`.
+            a_col_stride: self.strides[1],
+            // Starting element of `B` within its backing storage.
+            b_offset: b.offset,
+            // Storage stride between rows of `B`.
+            b_row_stride: b.strides[0],
+            // Storage stride between columns of `B`.
+            b_col_stride: b.strides[1],
+            // Starting element of `C` within its backing storage.
+            c_offset: 0,
+            // Storage stride between rows of `C`.
+            c_row_stride: b.shape[1],
+            // Storage stride between columns of `C`.
+            c_col_stride: 1,
+            // Pairwise operation (see operations.rs & wgsl/opcodes.wgsl)
+            op_pairwise: op_pairwise.contract_pairwise_opcode()?,
+            // Reduction operation (see operations.rs & wgsl/opcodes.wgsl)
+            op_reduction: op_reduction.contract_reduction_opcode()?,
+        };
+        Ok(Params::ContractMatrix(params))
+    }
+}
+
+impl GpuKernel<'_> {
+    // Unary
+    pub fn abs_matrix(&self, a: &GpuTensor) -> Result<GpuTensor> {
+        self.execute_kernel(a.params_unary_matrix(Operation::ABS)?, a, None)
+    }
+    pub fn neg_matrix(&self, a: &GpuTensor) -> Result<GpuTensor> {
+        self.execute_kernel(a.params_unary_matrix(Operation::NEG)?, a, None)
+    }
+    pub fn sqrt_matrix(&self, a: &GpuTensor) -> Result<GpuTensor> {
+        self.execute_kernel(a.params_unary_matrix(Operation::SQRT)?, a, None)
+    }
+    pub fn exp_matrix(&self, a: &GpuTensor) -> Result<GpuTensor> {
+        self.execute_kernel(a.params_unary_matrix(Operation::EXP)?, a, None)
+    }
+    pub fn log_matrix(&self, a: &GpuTensor) -> Result<GpuTensor> {
+        self.execute_kernel(a.params_unary_matrix(Operation::LOG)?, a, None)
+    }
+    pub fn sin_matrix(&self, a: &GpuTensor) -> Result<GpuTensor> {
+        self.execute_kernel(a.params_unary_matrix(Operation::SIN)?, a, None)
+    }
+    pub fn cos_matrix(&self, a: &GpuTensor) -> Result<GpuTensor> {
+        self.execute_kernel(a.params_unary_matrix(Operation::COS)?, a, None)
+    }
+
+    // Binary
+    pub fn add_matrix(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
+        self.execute_kernel(a.params_binary_matrix(b, Operation::ADD)?, a, Some(b))
+    }
+    pub fn sub_matrix(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
+        self.execute_kernel(a.params_binary_matrix(b, Operation::SUB)?, a, Some(b))
+    }
+    pub fn mul_matrix(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
+        self.execute_kernel(a.params_binary_matrix(b, Operation::MUL)?, a, Some(b))
+    }
+    pub fn div_matrix(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
+        self.execute_kernel(a.params_binary_matrix(b, Operation::DIV)?, a, Some(b))
+    }
+    pub fn min_matrix(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
+        self.execute_kernel(a.params_binary_matrix(b, Operation::MIN)?, a, Some(b))
+    }
+    pub fn max_matrix(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
+        self.execute_kernel(a.params_binary_matrix(b, Operation::MAX)?, a, Some(b))
+    }
+    pub fn pow_matrix(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
+        self.execute_kernel(a.params_binary_matrix(b, Operation::POW)?, a, Some(b))
+    }
+    pub fn atan2_matrix(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
+        self.execute_kernel(a.params_binary_matrix(b, Operation::ATAN2)?, a, Some(b))
+    }
+    pub fn eq_matrix(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
+        self.execute_kernel(a.params_binary_matrix(b, Operation::EQ)?, a, Some(b))
+    }
+    pub fn ne_matrix(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
+        self.execute_kernel(a.params_binary_matrix(b, Operation::NE)?, a, Some(b))
+    }
+    pub fn lt_matrix(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
+        self.execute_kernel(a.params_binary_matrix(b, Operation::LT)?, a, Some(b))
+    }
+    pub fn le_matrix(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
+        self.execute_kernel(a.params_binary_matrix(b, Operation::LE)?, a, Some(b))
+    }
+    pub fn gt_matrix(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
+        self.execute_kernel(a.params_binary_matrix(b, Operation::GT)?, a, Some(b))
+    }
+    pub fn ge_matrix(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
+        self.execute_kernel(a.params_binary_matrix(b, Operation::GE)?, a, Some(b))
+    }
+
+    // Matrix multiplication (MUL --> ADD)
+    pub fn matmul(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
+        let params = a.params_contract_matrix(b, Operation::MUL, Operation::ADD)?;
+        self.execute_kernel(params, a, Some(b))
+    }
+    // Hadamard sum (ADD --> ADD)
+    pub fn hadamard_sum_matrix(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
+        let params = a.params_contract_matrix(b, Operation::ADD, Operation::ADD)?;
+        self.execute_kernel(params, a, Some(b))
+    }
+    // Min-Plus Algebra (ADD --> MIN)
+    pub fn min_plus_matrix(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
+        let params = a.params_contract_matrix(b, Operation::ADD, Operation::MIN)?;
+        self.execute_kernel(params, a, Some(b))
+    }
+    // Max-Plus Algebra (ADD --> MAX)
+    pub fn max_plus_matrix(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
+        let params = a.params_contract_matrix(b, Operation::ADD, Operation::MAX)?;
+        self.execute_kernel(params, a, Some(b))
+    }
+    // Min-Mul (MUL --> MIN)
+    pub fn min_mul_matrix(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
+        let params = a.params_contract_matrix(b, Operation::MUL, Operation::MIN)?;
+        self.execute_kernel(params, a, Some(b))
+    }
+    // Max-Mul (MUL --> MAX)
+    pub fn max_mul_matrix(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
+        let params = a.params_contract_matrix(b, Operation::MUL, Operation::MAX)?;
+        self.execute_kernel(params, a, Some(b))
+    }
+    // Boolean matrix multiplication (AND --> OR)
+    pub fn matmul_bool(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
+        let params = a.params_contract_matrix(b, Operation::AND, Operation::OR)?;
+        self.execute_kernel(params, a, Some(b))
+    }
+    // Equality Counting (EQ --> ADD)
+    pub fn eqcount_matrix(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
+        let params = a.params_contract_matrix(b, Operation::EQ, Operation::ADD)?;
+        self.execute_kernel(params, a, Some(b))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::linalg::context::GpuContext;
+    use crate::linalg::operations::Operation;
+
+    fn context() -> GpuContext {
+        pollster::block_on(GpuContext::new()).expect("Failed to create GPU context")
+    }
+
+    fn vector(ctx: &GpuContext, n: usize) -> Result<GpuTensor> {
+        let data: Vec<f32> = (0..n).map(|i| (i + 1) as f32).collect();
+        GpuTensor::from_f32(ctx, &data, vec![n as u32], None, None)
+    }
+
+    fn matrix(ctx: &GpuContext, rows: usize, cols: usize) -> Result<GpuTensor> {
+        let data: Vec<f32> = (0..rows * cols).map(|i| (i + 1) as f32).collect();
+        GpuTensor::from_f32(ctx, &data, vec![rows as u32, cols as u32], None, None)
+    }
+    ////////////////////////////////////////////
+    // Unary parameter builder
+    ////////////////////////////////////////////
+    #[test]
+    fn builds_unary_matrix_params() -> Result<()> {
+        let ctx = context();
+        let a = matrix(&ctx, 3, 4)?;
+        let params = a.params_unary_matrix(Operation::ABS)?;
+        match params {
+            Params::UnaryMatrix(p) => {
+                assert_eq!(p.n, 3);
+                assert_eq!(p.p, 4);
+                assert_eq!(p.a_offset, 0);
+                assert_eq!(p.a_row_stride, 4);
+                assert_eq!(p.a_col_stride, 1);
+                assert_eq!(p.c_offset, 0);
+                assert_eq!(p.c_row_stride, 4);
+                assert_eq!(p.c_col_stride, 1);
+                assert_eq!(p.op, 0); // ABS
+            }
+            _ => panic!("Expected Params::UnaryMatrix"),
+        }
+        Ok(())
+    }
+    #[test]
+    fn unary_matrix_requires_rank_2() -> Result<()> {
+        let ctx = context();
+        let a = vector(&ctx, 4)?;
+        assert!(a.params_unary_matrix(Operation::ABS).is_err());
+        Ok(())
+    }
+    #[test]
+    fn unary_matrix_propagates_invalid_operation() -> Result<()> {
+        let ctx = context();
+        let a = matrix(&ctx, 3, 4)?;
+        assert!(a.params_unary_matrix(Operation::ADD).is_err());
+        Ok(())
+    }
+    ////////////////////////////////////////////
+    // Binary parameter builder
+    ////////////////////////////////////////////
+    #[test]
+    fn builds_binary_matrix_params() -> Result<()> {
+        let ctx = context();
+        let a = matrix(&ctx, 3, 4)?;
+        let b = matrix(&ctx, 3, 4)?;
+        let params = a.params_binary_matrix(&b, Operation::ADD)?;
+        match params {
+            Params::BinaryMatrix(p) => {
+                assert_eq!(p.n, 3);
+                assert_eq!(p.p, 4);
+                assert_eq!(p.a_offset, 0);
+                assert_eq!(p.b_offset, 0);
+                assert_eq!(p.a_row_stride, 4);
+                assert_eq!(p.a_col_stride, 1);
+                assert_eq!(p.b_row_stride, 4);
+                assert_eq!(p.b_col_stride, 1);
+                assert_eq!(p.c_row_stride, 4);
+                assert_eq!(p.c_col_stride, 1);
+                assert_eq!(p.op, 0); // ADD
+            }
+            _ => panic!("Expected Params::BinaryMatrix"),
+        }
+        Ok(())
+    }
+    #[test]
+    fn binary_matrix_requires_a_rank_2() -> Result<()> {
+        let ctx = context();
+        let a = vector(&ctx, 4)?;
+        let b = matrix(&ctx, 4, 1)?;
+        assert!(a.params_binary_matrix(&b, Operation::ADD).is_err());
+        Ok(())
+    }
+    #[test]
+    fn binary_matrix_requires_b_rank_2() -> Result<()> {
+        let ctx = context();
+        let a = matrix(&ctx, 4, 1)?;
+        let b = vector(&ctx, 4)?;
+        assert!(a.params_binary_matrix(&b, Operation::ADD).is_err());
+        Ok(())
+    }
+    #[test]
+    fn binary_matrix_requires_same_shape() -> Result<()> {
+        let ctx = context();
+        let a = matrix(&ctx, 3, 4)?;
+        let b = matrix(&ctx, 4, 3)?;
+        assert!(a.params_binary_matrix(&b, Operation::ADD).is_err());
+        Ok(())
+    }
+    #[test]
+    fn binary_matrix_propagates_invalid_operation() -> Result<()> {
+        let ctx = context();
+        let a = matrix(&ctx, 3, 4)?;
+        let b = matrix(&ctx, 3, 4)?;
+        assert!(a.params_binary_matrix(&b, Operation::ABS).is_err());
+        Ok(())
+    }
+    #[test]
+    fn binary_matrix_uses_correct_opcode() -> Result<()> {
+        let ctx = context();
+        let a = matrix(&ctx, 3, 4)?;
+        let b = matrix(&ctx, 3, 4)?;
+        let params = a.params_binary_matrix(&b, Operation::EQ)?;
+        match params {
+            Params::BinaryMatrix(p) => {
+                assert_eq!(p.op, 8); // OP_EQ
+            }
+            _ => panic!("Expected Params::BinaryMatrix"),
+        }
+        Ok(())
+    }
+    ////////////////////////////////////////////
+    // Contract parameter builder
+    ////////////////////////////////////////////
+    #[test]
+    fn builds_contract_matrix_params() -> Result<()> {
+        let ctx = context();
+        let a = matrix(&ctx, 3, 5)?;
+        let b = matrix(&ctx, 5, 7)?;
+        let params = a.params_contract_matrix(&b, Operation::MUL, Operation::ADD)?;
+        match params {
+            Params::ContractMatrix(p) => {
+                assert_eq!(p.n, 3);
+                assert_eq!(p.p, 5);
+                assert_eq!(p.k, 7);
+                assert_eq!(p.a_offset, 0);
+                assert_eq!(p.b_offset, 0);
+                assert_eq!(p.a_row_stride, 5);
+                assert_eq!(p.a_col_stride, 1);
+                assert_eq!(p.b_row_stride, 7);
+                assert_eq!(p.b_col_stride, 1);
+                assert_eq!(p.c_row_stride, 7);
+                assert_eq!(p.c_col_stride, 1);
+                assert_eq!(p.op_pairwise, 2); // MUL
+                assert_eq!(p.op_reduction, 0); // ADD
+            }
+            _ => panic!("Expected Params::ContractMatrix"),
+        }
+        Ok(())
+    }
+    #[test]
+    fn contract_matrix_requires_a_rank_2() -> Result<()> {
+        let ctx = context();
+        let a = vector(&ctx, 5)?;
+        let b = matrix(&ctx, 5, 7)?;
+        assert!(
+            a.params_contract_matrix(&b, Operation::MUL, Operation::ADD,)
+                .is_err()
+        );
+        Ok(())
+    }
+    #[test]
+    fn contract_matrix_requires_b_rank_2() -> Result<()> {
+        let ctx = context();
+        let a = matrix(&ctx, 3, 5)?;
+        let b = vector(&ctx, 5)?;
+        assert!(
+            a.params_contract_matrix(&b, Operation::MUL, Operation::ADD,)
+                .is_err()
+        );
+        Ok(())
+    }
+    #[test]
+    fn contract_matrix_requires_compatible_shapes() -> Result<()> {
+        let ctx = context();
+        let a = matrix(&ctx, 3, 5)?;
+        let b = matrix(&ctx, 6, 7)?;
+        assert!(
+            a.params_contract_matrix(&b, Operation::MUL, Operation::ADD,)
+                .is_err()
+        );
+        Ok(())
+    }
+    #[test]
+    fn contract_matrix_rejects_invalid_pairwise_operation() -> Result<()> {
+        let ctx = context();
+        let a = matrix(&ctx, 3, 5)?;
+        let b = matrix(&ctx, 5, 7)?;
+        assert!(
+            a.params_contract_matrix(&b, Operation::POW, Operation::ADD,)
+                .is_err()
+        );
+        Ok(())
+    }
+    #[test]
+    fn contract_matrix_rejects_invalid_reduction_operation() -> Result<()> {
+        let ctx = context();
+        let a = matrix(&ctx, 3, 5)?;
+        let b = matrix(&ctx, 5, 7)?;
+        assert!(
+            a.params_contract_matrix(&b, Operation::MUL, Operation::DIV,)
+                .is_err()
+        );
+        Ok(())
+    }
+    ////////////////////////////////////////////
+    // Semiring regression tests
+    ////////////////////////////////////////////
+    #[test]
+    fn matmul_semiring_opcodes_match_expectations() -> Result<()> {
+        let ctx = context();
+        let a = matrix(&ctx, 2, 3)?;
+        let b = matrix(&ctx, 3, 4)?;
+        let params = a.params_contract_matrix(&b, Operation::MUL, Operation::ADD)?;
+        match params {
+            Params::ContractMatrix(p) => {
+                assert_eq!(p.op_pairwise, 2);
+                assert_eq!(p.op_reduction, 0);
+            }
+            _ => panic!("Expected Params::ContractMatrix"),
+        }
+        Ok(())
+    }
+    #[test]
+    fn min_plus_matrix_semiring_opcodes_match_expectations() -> Result<()> {
+        let ctx = context();
+        let a = matrix(&ctx, 2, 3)?;
+        let b = matrix(&ctx, 3, 4)?;
+        let params = a.params_contract_matrix(&b, Operation::ADD, Operation::MIN)?;
+        match params {
+            Params::ContractMatrix(p) => {
+                assert_eq!(p.op_pairwise, 0);
+                assert_eq!(p.op_reduction, 2);
+            }
+            _ => panic!("Expected Params::ContractMatrix"),
+        }
+        Ok(())
+    }
+    #[test]
+    fn max_plus_matrix_semiring_opcodes_match_expectations() -> Result<()> {
+        let ctx = context();
+        let a = matrix(&ctx, 2, 3)?;
+        let b = matrix(&ctx, 3, 4)?;
+        let params = a.params_contract_matrix(&b, Operation::ADD, Operation::MAX)?;
+        match params {
+            Params::ContractMatrix(p) => {
+                assert_eq!(p.op_pairwise, 0);
+                assert_eq!(p.op_reduction, 3);
+            }
+            _ => panic!("Expected Params::ContractMatrix"),
+        }
+        Ok(())
+    }
+    #[test]
+    fn min_mul_matrix_semiring_opcodes_match_expectations() -> Result<()> {
+        let ctx = context();
+        let a = matrix(&ctx, 2, 3)?;
+        let b = matrix(&ctx, 3, 4)?;
+        let params = a.params_contract_matrix(&b, Operation::MUL, Operation::MIN)?;
+        match params {
+            Params::ContractMatrix(p) => {
+                assert_eq!(p.op_pairwise, 2);
+                assert_eq!(p.op_reduction, 2);
+            }
+            _ => panic!("Expected Params::ContractMatrix"),
+        }
+        Ok(())
+    }
+    #[test]
+    fn max_mul_matrix_semiring_opcodes_match_expectations() -> Result<()> {
+        let ctx = context();
+        let a = matrix(&ctx, 2, 3)?;
+        let b = matrix(&ctx, 3, 4)?;
+        let params = a.params_contract_matrix(&b, Operation::MUL, Operation::MAX)?;
+        match params {
+            Params::ContractMatrix(p) => {
+                assert_eq!(p.op_pairwise, 2);
+                assert_eq!(p.op_reduction, 3);
+            }
+            _ => panic!("Expected Params::ContractMatrix"),
+        }
+        Ok(())
+    }
+    #[test]
+    fn boolean_matmul_semiring_opcodes_match_expectations() -> Result<()> {
+        let ctx = context();
+        let a = matrix(&ctx, 2, 3)?;
+        let b = matrix(&ctx, 3, 4)?;
+        let params = a.params_contract_matrix(&b, Operation::AND, Operation::OR)?;
+        match params {
+            Params::ContractMatrix(p) => {
+                assert_eq!(p.op_pairwise, 12);
+                assert_eq!(p.op_reduction, 5);
+            }
+            _ => panic!("Expected Params::ContractMatrix"),
+        }
+        Ok(())
+    }
+    #[test]
+    fn eqcount_matrix_semiring_opcodes_match_expectations() -> Result<()> {
+        let ctx = context();
+        let a = matrix(&ctx, 2, 3)?;
+        let b = matrix(&ctx, 3, 4)?;
+        let params = a.params_contract_matrix(&b, Operation::EQ, Operation::ADD)?;
+        match params {
+            Params::ContractMatrix(p) => {
+                assert_eq!(p.op_pairwise, 6);
+                assert_eq!(p.op_reduction, 0);
+            }
+            _ => panic!("Expected Params::ContractMatrix"),
+        }
+        Ok(())
+    }
+    ////////////////////////////////////////////
+    // GpuKernel wrapper methods
+    ////////////////////////////////////////////
+    #[test]
+    fn kernel_abs_matrix() -> Result<()> {
+        let ctx = context();
+        let kernel = GpuKernel::new(&ctx);
+        let a = matrix(&ctx, 2, 3)?;
+        let c = kernel.abs_matrix(&a)?;
+        assert_eq!(c.shape, vec![2, 3]);
+        Ok(())
+    }
+    #[test]
+    fn kernel_neg_matrix() -> Result<()> {
+        let ctx = context();
+        let kernel = GpuKernel::new(&ctx);
+        let a = matrix(&ctx, 2, 3)?;
+        let c = kernel.neg_matrix(&a)?;
+        assert_eq!(c.shape, vec![2, 3]);
+        Ok(())
+    }
+    #[test]
+    fn kernel_sqrt_matrix() -> Result<()> {
+        let ctx = context();
+        let kernel = GpuKernel::new(&ctx);
+        let a = matrix(&ctx, 2, 3)?;
+        let c = kernel.sqrt_matrix(&a)?;
+        assert_eq!(c.shape, vec![2, 3]);
+        Ok(())
+    }
+    #[test]
+    fn kernel_exp_matrix() -> Result<()> {
+        let ctx = context();
+        let kernel = GpuKernel::new(&ctx);
+        let a = matrix(&ctx, 2, 3)?;
+        let c = kernel.exp_matrix(&a)?;
+        assert_eq!(c.shape, vec![2, 3]);
+        Ok(())
+    }
+    #[test]
+    fn kernel_log_matrix() -> Result<()> {
+        let ctx = context();
+        let kernel = GpuKernel::new(&ctx);
+        let a = matrix(&ctx, 2, 3)?;
+        let c = kernel.log_matrix(&a)?;
+        assert_eq!(c.shape, vec![2, 3]);
+        Ok(())
+    }
+    #[test]
+    fn kernel_sin_matrix() -> Result<()> {
+        let ctx = context();
+        let kernel = GpuKernel::new(&ctx);
+        let a = matrix(&ctx, 2, 3)?;
+        let c = kernel.sin_matrix(&a)?;
+        assert_eq!(c.shape, vec![2, 3]);
+        Ok(())
+    }
+    #[test]
+    fn kernel_cos_matrix() -> Result<()> {
+        let ctx = context();
+        let kernel = GpuKernel::new(&ctx);
+        let a = matrix(&ctx, 2, 3)?;
+        let c = kernel.cos_matrix(&a)?;
+        assert_eq!(c.shape, vec![2, 3]);
+        Ok(())
+    }
+    #[test]
+    fn kernel_add_matrix() -> Result<()> {
+        let ctx = context();
+        let kernel = GpuKernel::new(&ctx);
+        let a = matrix(&ctx, 2, 3)?;
+        let b = matrix(&ctx, 2, 3)?;
+        let c = kernel.add_matrix(&a, &b)?;
+        assert_eq!(c.shape, vec![2, 3]);
+        Ok(())
+    }
+    #[test]
+    fn kernel_sub_matrix() -> Result<()> {
+        let ctx = context();
+        let kernel = GpuKernel::new(&ctx);
+        let a = matrix(&ctx, 2, 3)?;
+        let b = matrix(&ctx, 2, 3)?;
+        let c = kernel.sub_matrix(&a, &b)?;
+        assert_eq!(c.shape, vec![2, 3]);
+        Ok(())
+    }
+    #[test]
+    fn kernel_mul_matrix() -> Result<()> {
+        let ctx = context();
+        let kernel = GpuKernel::new(&ctx);
+        let a = matrix(&ctx, 2, 3)?;
+        let b = matrix(&ctx, 2, 3)?;
+        let c = kernel.mul_matrix(&a, &b)?;
+        assert_eq!(c.shape, vec![2, 3]);
+        Ok(())
+    }
+    #[test]
+    fn kernel_div_matrix() -> Result<()> {
+        let ctx = context();
+        let kernel = GpuKernel::new(&ctx);
+        let a = matrix(&ctx, 2, 3)?;
+        let b = matrix(&ctx, 2, 3)?;
+        let c = kernel.div_matrix(&a, &b)?;
+        assert_eq!(c.shape, vec![2, 3]);
+        Ok(())
+    }
+    #[test]
+    fn kernel_min_matrix() -> Result<()> {
+        let ctx = context();
+        let kernel = GpuKernel::new(&ctx);
+        let a = matrix(&ctx, 2, 3)?;
+        let b = matrix(&ctx, 2, 3)?;
+        let c = kernel.min_matrix(&a, &b)?;
+        assert_eq!(c.shape, vec![2, 3]);
+        Ok(())
+    }
+    #[test]
+    fn kernel_max_matrix() -> Result<()> {
+        let ctx = context();
+        let kernel = GpuKernel::new(&ctx);
+        let a = matrix(&ctx, 2, 3)?;
+        let b = matrix(&ctx, 2, 3)?;
+        let c = kernel.max_matrix(&a, &b)?;
+        assert_eq!(c.shape, vec![2, 3]);
+        Ok(())
+    }
+    #[test]
+    fn kernel_pow_matrix() -> Result<()> {
+        let ctx = context();
+        let kernel = GpuKernel::new(&ctx);
+        let a = matrix(&ctx, 2, 3)?;
+        let b = matrix(&ctx, 2, 3)?;
+        let c = kernel.pow_matrix(&a, &b)?;
+        assert_eq!(c.shape, vec![2, 3]);
+        Ok(())
+    }
+    #[test]
+    fn kernel_atan2_matrix() -> Result<()> {
+        let ctx = context();
+        let kernel = GpuKernel::new(&ctx);
+        let a = matrix(&ctx, 2, 3)?;
+        let b = matrix(&ctx, 2, 3)?;
+        let c = kernel.atan2_matrix(&a, &b)?;
+        assert_eq!(c.shape, vec![2, 3]);
+        Ok(())
+    }
+    #[test]
+    fn kernel_comparison_matrix_ops() -> Result<()> {
+        let ctx = context();
+        let kernel = GpuKernel::new(&ctx);
+        let a = matrix(&ctx, 2, 3)?;
+        let b = matrix(&ctx, 2, 3)?;
+        assert_eq!(kernel.eq_matrix(&a, &b)?.shape, vec![2, 3]);
+        assert_eq!(kernel.ne_matrix(&a, &b)?.shape, vec![2, 3]);
+        assert_eq!(kernel.lt_matrix(&a, &b)?.shape, vec![2, 3]);
+        assert_eq!(kernel.le_matrix(&a, &b)?.shape, vec![2, 3]);
+        assert_eq!(kernel.gt_matrix(&a, &b)?.shape, vec![2, 3]);
+        assert_eq!(kernel.ge_matrix(&a, &b)?.shape, vec![2, 3]);
+        Ok(())
+    }
+    #[test]
+    fn kernel_binary_matrix_shape_mismatch_fails() -> Result<()> {
+        let ctx = context();
+        let kernel = GpuKernel::new(&ctx);
+        let a = matrix(&ctx, 2, 3)?;
+        let b = matrix(&ctx, 3, 2)?;
+        assert!(kernel.add_matrix(&a, &b).is_err());
+        assert!(kernel.mul_matrix(&a, &b).is_err());
+        assert!(kernel.eq_matrix(&a, &b).is_err());
+        Ok(())
+    }
+    #[test]
+    fn kernel_matmul() -> Result<()> {
+        let ctx = context();
+        let kernel = GpuKernel::new(&ctx);
+        let a = matrix(&ctx, 2, 3)?;
+        let b = matrix(&ctx, 3, 4)?;
+        let c = kernel.matmul(&a, &b)?;
+        assert_eq!(c.shape, vec![2, 4]);
+        Ok(())
+    }
+    #[test]
+    fn kernel_hadamard_sum_matrix() -> Result<()> {
+        let ctx = context();
+        let kernel = GpuKernel::new(&ctx);
+        let a = matrix(&ctx, 2, 3)?;
+        let b = matrix(&ctx, 3, 4)?;
+        let c = kernel.hadamard_sum_matrix(&a, &b)?;
+        assert_eq!(c.shape, vec![2, 4]);
+        Ok(())
+    }
+    #[test]
+    fn kernel_min_plus_matrix() -> Result<()> {
+        let ctx = context();
+        let kernel = GpuKernel::new(&ctx);
+        let a = matrix(&ctx, 2, 3)?;
+        let b = matrix(&ctx, 3, 4)?;
+        let c = kernel.min_plus_matrix(&a, &b)?;
+        assert_eq!(c.shape, vec![2, 4]);
+        Ok(())
+    }
+    #[test]
+    fn kernel_max_plus_matrix() -> Result<()> {
+        let ctx = context();
+        let kernel = GpuKernel::new(&ctx);
+        let a = matrix(&ctx, 2, 3)?;
+        let b = matrix(&ctx, 3, 4)?;
+        let c = kernel.max_plus_matrix(&a, &b)?;
+        assert_eq!(c.shape, vec![2, 4]);
+        Ok(())
+    }
+    #[test]
+    fn kernel_min_mul_matrix() -> Result<()> {
+        let ctx = context();
+        let kernel = GpuKernel::new(&ctx);
+        let a = matrix(&ctx, 2, 3)?;
+        let b = matrix(&ctx, 3, 4)?;
+        let c = kernel.min_mul_matrix(&a, &b)?;
+        assert_eq!(c.shape, vec![2, 4]);
+        Ok(())
+    }
+    #[test]
+    fn kernel_max_mul_matrix() -> Result<()> {
+        let ctx = context();
+        let kernel = GpuKernel::new(&ctx);
+        let a = matrix(&ctx, 2, 3)?;
+        let b = matrix(&ctx, 3, 4)?;
+        let c = kernel.max_mul_matrix(&a, &b)?;
+        assert_eq!(c.shape, vec![2, 4]);
+        Ok(())
+    }
+    #[test]
+    fn kernel_matmul_bool() -> Result<()> {
+        let ctx = context();
+        let kernel = GpuKernel::new(&ctx);
+        let a = matrix(&ctx, 2, 3)?;
+        let b = matrix(&ctx, 3, 4)?;
+        let c = kernel.matmul_bool(&a, &b)?;
+        assert_eq!(c.shape, vec![2, 4]);
+        Ok(())
+    }
+    #[test]
+    fn kernel_eqcount_matrix() -> Result<()> {
+        let ctx = context();
+        let kernel = GpuKernel::new(&ctx);
+        let a = matrix(&ctx, 2, 3)?;
+        let b = matrix(&ctx, 3, 4)?;
+        let c = kernel.eqcount_matrix(&a, &b)?;
+        assert_eq!(c.shape, vec![2, 4]);
+        Ok(())
+    }
+    #[test]
+    fn kernel_matmul_dimension_mismatch_fails() -> Result<()> {
+        let ctx = context();
+        let kernel = GpuKernel::new(&ctx);
+        let a = matrix(&ctx, 2, 3)?;
+        let b = matrix(&ctx, 5, 4)?;
+        assert!(kernel.matmul(&a, &b).is_err());
+        Ok(())
+    }
+    #[test]
+    fn kernel_hadamard_sum_matrix_dimension_mismatch_fails() -> Result<()> {
+        let ctx = context();
+        let kernel = GpuKernel::new(&ctx);
+        let a = matrix(&ctx, 2, 3)?;
+        let b = matrix(&ctx, 5, 4)?;
+        assert!(kernel.hadamard_sum_matrix(&a, &b).is_err());
+        Ok(())
+    }
+    #[test]
+    fn kernel_min_plus_matrix_dimension_mismatch_fails() -> Result<()> {
+        let ctx = context();
+        let kernel = GpuKernel::new(&ctx);
+        let a = matrix(&ctx, 2, 3)?;
+        let b = matrix(&ctx, 5, 4)?;
+        assert!(kernel.min_plus_matrix(&a, &b).is_err());
+        Ok(())
+    }
+    #[test]
+    fn kernel_max_plus_matrix_dimension_mismatch_fails() -> Result<()> {
+        let ctx = context();
+        let kernel = GpuKernel::new(&ctx);
+        let a = matrix(&ctx, 2, 3)?;
+        let b = matrix(&ctx, 5, 4)?;
+        assert!(kernel.max_plus_matrix(&a, &b).is_err());
+        Ok(())
+    }
+    #[test]
+    fn kernel_min_mul_matrix_dimension_mismatch_fails() -> Result<()> {
+        let ctx = context();
+        let kernel = GpuKernel::new(&ctx);
+        let a = matrix(&ctx, 2, 3)?;
+        let b = matrix(&ctx, 5, 4)?;
+        assert!(kernel.min_mul_matrix(&a, &b).is_err());
+        Ok(())
+    }
+    #[test]
+    fn kernel_max_mul_matrix_dimension_mismatch_fails() -> Result<()> {
+        let ctx = context();
+        let kernel = GpuKernel::new(&ctx);
+        let a = matrix(&ctx, 2, 3)?;
+        let b = matrix(&ctx, 5, 4)?;
+        assert!(kernel.max_mul_matrix(&a, &b).is_err());
+        Ok(())
+    }
+    #[test]
+    fn kernel_matmul_bool_dimension_mismatch_fails() -> Result<()> {
+        let ctx = context();
+        let kernel = GpuKernel::new(&ctx);
+        let a = matrix(&ctx, 2, 3)?;
+        let b = matrix(&ctx, 5, 4)?;
+        assert!(kernel.matmul_bool(&a, &b).is_err());
+        Ok(())
+    }
+    #[test]
+    fn kernel_eqcount_matrix_dimension_mismatch_fails() -> Result<()> {
+        let ctx = context();
+        let kernel = GpuKernel::new(&ctx);
+        let a = matrix(&ctx, 2, 3)?;
+        let b = matrix(&ctx, 5, 4)?;
+        assert!(kernel.eqcount_matrix(&a, &b).is_err());
+        Ok(())
+    }
+}
+
+
+-------------------------------
+src/linalg/params.rs
+use bytemuck::{Pod, Zeroable};
+
+const MAX_RANK: usize = 8;
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct UnaryMatrixParams {
+    /// Number of rows in `A`, and `C`.
+    pub n: u32,
+    /// Number of columns in `A`, and `C`.
+    pub p: u32,
+    /// Starting element of `A` within its backing storage.
+    pub a_offset: u32,
+    /// Storage stride between rows of `A`.
+    pub a_row_stride: u32,
+    /// Storage stride between columns of `A`.
+    pub a_col_stride: u32,
+    /// Starting element of `C` within its backing storage.
+    pub c_offset: u32,
+    /// Storage stride between rows of `C`.
+    pub c_row_stride: u32,
+    /// Storage stride between columns of `C`.
+    pub c_col_stride: u32,
+    /// Mathematical operation: op(A) -> C (see operations.rs & wgsl/opcodes.wgsl).
+    pub op: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct BinaryMatrixParams {
+    /// Number of rows in `A`, `B`, and `C`.
+    pub n: u32,
+    /// Number of columns in `A`, `B`, and `C`.
+    pub p: u32,
+    /// Starting element of `A` within its backing storage.
+    pub a_offset: u32,
+    /// Storage stride between rows of `A`.
+    pub a_row_stride: u32,
+    /// Storage stride between columns of `A`.
+    pub a_col_stride: u32,
+    /// Starting element of `B` within its backing storage.
+    pub b_offset: u32,
+    /// Storage stride between rows of `B`.
+    pub b_row_stride: u32,
+    /// Storage stride between columns of `B`.
+    pub b_col_stride: u32,
+    /// Starting element of `C` within its backing storage.
+    pub c_offset: u32,
+    /// Storage stride between rows of `C`.
+    pub c_row_stride: u32,
+    /// Storage stride between columns of `C`.
+    pub c_col_stride: u32,
+    /// Mathematical operation: op(A, B) -> C (see operations.rs & wgsl/opcodes.wgsl).
+    pub op: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct ContractMatrixParams {
+    /// Number of rows in `A` and `C`.
+    pub n: u32,
+    /// Shared contraction dimension.
+    pub p: u32,
+    /// Number of columns in `B` and `C`.
+    pub k: u32,
+    /// Starting element of `A` within its backing storage.
+    pub a_offset: u32,
+    /// Storage stride between rows of `A`.
+    pub a_row_stride: u32,
+    /// Storage stride between columns of `A`.
+    pub a_col_stride: u32,
+    /// Starting element of `B` within its backing storage.
+    pub b_offset: u32,
+    /// Storage stride between rows of `B`.
+    pub b_row_stride: u32,
+    /// Storage stride between columns of `B`.
+    pub b_col_stride: u32,
+    /// Starting element of `C` within its backing storage.
+    pub c_offset: u32,
+    /// Storage stride between rows of `C`.
+    pub c_row_stride: u32,
+    /// Storage stride between columns of `C`.
+    pub c_col_stride: u32,
+    /// Pairwise operation (see operations.rs & wgsl/opcodes.wgsl).
+    pub op_pairwise: u32,
+    /// Reduction operation (see operations.rs & wgsl/opcodes.wgsl).
+    pub op_reduction: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct UnaryTensorParams {
+    /// Number of tensor dimensions.
+    pub rank: u32,
+    /// Total number of logical tensor elements.
+    pub n_elements: u32,
+    /// Shape of the logical tensor.
+    pub shape: [u32; MAX_RANK],
+    /// Starting element of `A` within its backing storage.
+    pub a_offset: u32,
+    /// Storage strides of `A` per dimension.
+    pub a_strides: [u32; MAX_RANK],
+    /// Starting element of `C` within its backing storage.
+    pub c_offset: u32,
+    /// Storage strides of `C` per dimension.
+    pub c_strides: [u32; MAX_RANK],
+    /// Mathematical operation: op(A) -> C (see operations.rs & wgsl/opcodes.wgsl).
+    pub op: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct BinaryTensorParams {
+    /// Number of tensor dimensions.
+    pub rank: u32,
+    /// Total number of logical tensor elements.
+    pub n_elements: u32,
+    /// Shape of the logical tensor.
+    pub shape: [u32; MAX_RANK],
+    /// Starting element of `A` within its backing storage.
+    pub a_offset: u32,
+    /// Storage strides of `A` per dimension.
+    pub a_strides: [u32; MAX_RANK],
+    /// Starting element of `B` within its backing storage.
+    pub b_offset: u32,
+    /// Storage strides of `B` per dimension.
+    pub b_strides: [u32; MAX_RANK],
+    /// Starting element of `C` within its backing storage.
+    pub c_offset: u32,
+    /// Storage strides of `C` per dimension.
+    pub c_strides: [u32; MAX_RANK],
+    /// Mathematical operation: op(A, B) -> C (see operations.rs & wgsl/opcodes.wgsl).
+    pub op: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct ContractTensorParams {
+    /// Number of dimensions in tensor A.
+    pub a_rank: u32,
+    /// Number of dimensions in tensor B.
+    pub b_rank: u32,
+    /// Number of dimensions in tensor C.
+    pub c_rank: u32,
+    /// Number of contracted axis pairs.
+    /// Example:
+    ///     A[a,b,c,d]
+    ///     B[c,d,e,f]
+    /// Contracts:
+    ///     [c,d]
+    /// contraction_rank = 2
+    pub contraction_rank: u32,
+    /// Total number of logical elements in the output tensor C.
+    /// i.e.: product(c_shape[..c_rank])
+    pub c_elements: u32,
+    /// Logical shape of tensor A.
+    pub a_shape: [u32; MAX_RANK],
+    /// Logical shape of tensor B.
+    pub b_shape: [u32; MAX_RANK],
+    /// Logical shape of tensor C.
+    pub c_shape: [u32; MAX_RANK],
+    /// Starting element of `A` within its backing storage.
+    pub a_offset: u32,
+    /// Storage strides of `A` per dimension.
+    pub a_strides: [u32; MAX_RANK],
+    /// Starting element of `B` within its backing storage.
+    pub b_offset: u32,
+    /// Storage strides of `B` per dimension.
+    pub b_strides: [u32; MAX_RANK],
+    /// Starting element of `C` within its backing storage.
+    pub c_offset: u32,
+    /// Storage strides of `C` per dimension.
+    pub c_strides: [u32; MAX_RANK],
+    /// Contracted axes of tensor A.
+    /// Example:
+    ///     A[a,b,c,d]
+    ///     B[c,d,e,f]
+    /// a_contract_axes = [2,3]
+    pub a_contract_axes: [u32; MAX_RANK],
+    /// Contracted axes of tensor B.
+    /// Example:
+    ///     A[a,b,c,d]
+    ///     B[c,d,e,f]
+    /// b_contract_axes = [0,1]
+    pub b_contract_axes: [u32; MAX_RANK],
+    /// Pairwise operation (see operations.rs & wgsl/opcodes.wgsl).
+    pub op_pairwise: u32,
+    /// Reduction operation (see operations.rs & wgsl/opcodes.wgsl).
+    pub op_reduction: u32,
+}

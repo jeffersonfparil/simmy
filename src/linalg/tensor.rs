@@ -86,7 +86,7 @@ fn parse_tensor_params(
     strides: Option<Vec<u32>>,
     offset: Option<u32>,
 ) -> Result<(Vec<u32>, Vec<u32>, u32)> {
-    let n: u32 = n.max(1);
+    let n = n.max(1);
     let strides: Vec<u32> = strides.unwrap_or_else(|| {
         let mut products: Vec<u32> = Vec::with_capacity(shape.len());
         let mut stride = 1;
@@ -101,22 +101,24 @@ fn parse_tensor_params(
         shape.len() == strides.len(),
         "The shape and strides are incompatible!"
     );
-    let required_len = if shape.contains(&0) {
+    let offset: u32 = offset.unwrap_or(0);
+    ensure!(n > offset, "The offset must range from 0 to {}", n - 1);
+    let required_len = if (shape.len() == 0) | (shape.contains(&0)) {
         0
     } else {
-        shape
-            .iter()
-            .zip(strides.iter())
-            .map(|(&shape, &stride)| (shape - 1) * stride)
-            .sum::<u32>()
+        offset
+            + shape
+                .iter()
+                .zip(strides.iter())
+                .map(|(&d, &s)| (d - 1) * s)
+                .max()
+                .unwrap()
             + 1
     };
     ensure!(
         n >= required_len,
         "The shape and strides are incompatible with the data!"
     );
-    let offset: u32 = offset.unwrap_or(0);
-    ensure!(n > offset, "The offset must range from 0 to {}", n - 1);
     Ok((shape, strides, offset))
 }
 
@@ -239,6 +241,110 @@ impl GpuTensor {
         drop(mapped);
         temp_buffer.unmap();
         Ok(values)
+    }
+
+    /// Compute the multi‑dimensional tensor coordinates corresponding to a
+    /// given linear (flattened) index.
+    ///
+    /// ### Tensor Engine Context
+    /// This method performs the inverse of `linear_index`, decomposing a
+    /// single linear position inside the backing GPU buffer into its
+    /// logical `(i, j, k, ...)` coordinate tuple according to the tensor’s
+    /// current `shape`.  
+    ///
+    /// It is used by:
+    /// * Debugging and validation routines.
+    /// * Logical‑to‑physical index mapping tests.
+    /// * Slice, transpose, and contraction correctness checks.
+    ///
+    /// ### Row‑Major Interpretation
+    /// Coordinates are computed assuming standard row‑major layout:
+    /// the last dimension varies fastest, and the first dimension varies
+    /// slowest.  
+    ///
+    /// For example, for a tensor with:
+    /// ```text
+    /// shape = [2, 3, 4]
+    /// ```
+    /// a `linear_idx` of `17` decomposes into:
+    /// ```text
+    /// coords = [1, 1, 1]
+    /// ```
+    ///
+    /// ### Returns
+    /// A vector of length `rank` containing the coordinate for each axis.
+    ///
+    /// ### Notes
+    /// * Rank‑0 tensors return an empty coordinate vector.
+    /// * This method does **not** consider strides or offset; it purely
+    ///   decomposes the logical coordinate space.
+    ///
+    /// ### Errors
+    /// This method does not perform bounds checking; callers must ensure
+    /// `linear_idx < product(shape)`.
+    pub fn tensor_coords(&self, linear_idx: usize) -> Vec<usize> {
+        let rank: usize = self.shape.len();
+        let mut coords: Vec<usize> = vec![0; rank];
+        if rank == 0 {
+            return coords;
+        }
+        let mut idx = linear_idx;
+        for i in (0..rank).rev() {
+            coords[i] = idx % (self.shape[i] as usize);
+            idx = idx / (self.shape[i] as usize);
+        }
+        return coords;
+    }
+
+    /// Compute the linear (flattened) index inside the backing GPU buffer
+    /// corresponding to a multi‑dimensional coordinate tuple.
+    ///
+    /// ### Tensor Engine Context
+    /// This method performs the forward mapping from logical tensor
+    /// coordinates `(i, j, k, ...)` into the physical storage index used
+    /// by GPU kernels.  
+    ///
+    /// It incorporates:
+    /// * The tensor’s `offset` (view origin).
+    /// * The tensor’s `strides` (row‑major or custom layout).
+    ///
+    /// This is the exact same index computation performed inside the WGSL
+    /// kernels for unary, binary, and contraction operations.
+    ///
+    /// ### Row‑Major Interpretation
+    /// For a contiguous tensor with:
+    /// ```text
+    /// shape   = [2, 3, 4]
+    /// strides = [12, 4, 1]
+    /// offset  = 0
+    /// ```
+    /// the coordinate:
+    /// ```text
+    /// coords = [1, 1, 1]
+    /// ```
+    /// maps to:
+    /// ```text
+    /// linear_index = 1*12 + 1*4 + 1*1 = 17
+    /// ```
+    ///
+    /// ### Returns
+    /// The physical index inside the underlying GPU buffer.
+    ///
+    /// ### Notes
+    /// * This method assumes `coords.len() == shape.len()`.
+    /// * No bounds checking is performed; callers must ensure each
+    ///   coordinate lies within its dimension.
+    ///
+    /// ### Errors
+    /// This method does not return errors; invalid coordinates will produce
+    /// out‑of‑bounds indices that may fail later GPU operations.
+    pub fn linear_index(&self, coords: &[usize]) -> usize {
+        let rank: usize = self.shape.len();
+        let mut idx = self.offset as usize;
+        for i in 0..rank {
+            idx += coords[i] * (self.strides[i] as usize);
+        }
+        return idx as usize;
     }
 }
 
@@ -381,6 +487,74 @@ mod tests {
         let tensor = GpuTensor::from_buffer(source.buffer, vec![32], None, None)?;
         let extracted = tensor.to_vec_f32(&ctx)?;
         assert_eq!(extracted, original);
+        Ok(())
+    }
+    #[test]
+    fn test_tensor_coords_basic() -> Result<()> {
+        let ctx = context();
+        // shape = [2, 3, 4] --> 24 elements
+        let data: Vec<f32> = (0..24).map(|x| x as f32).collect();
+        let tensor = GpuTensor::from_f32(&ctx, &data, vec![2, 3, 4], None, None)?;
+        // linear_idx = 17 --> coords = [1, 1, 1]
+        let coords = tensor.tensor_coords(17);
+        assert_eq!(coords, vec![1, 1, 1]);
+        Ok(())
+    }
+    #[test]
+    fn test_tensor_coords_zero_rank() -> Result<()> {
+        let ctx = context();
+        // Rank‑0 tensor
+        let tensor = GpuTensor::from_f32(&ctx, &[], vec![], None, None)?;
+        let coords = tensor.tensor_coords(0);
+        assert_eq!(coords.len(), 0);
+        Ok(())
+    }
+    #[test]
+    fn test_tensor_coords_all_positions() -> Result<()> {
+        let ctx = context();
+        // shape = [2, 2] --> 4 elements
+        let data: Vec<f32> = (0..4).map(|x| x as f32).collect();
+        let tensor = GpuTensor::from_f32(&ctx, &data, vec![2, 2], None, None)?;
+        let expected = vec![vec![0, 0], vec![0, 1], vec![1, 0], vec![1, 1]];
+        for (idx, exp) in expected.iter().enumerate() {
+            assert_eq!(tensor.tensor_coords(idx), *exp);
+        }
+        Ok(())
+    }
+    #[test]
+    fn test_linear_index_basic() -> Result<()> {
+        let ctx = context();
+        // shape = [2, 3, 4]
+        let data: Vec<f32> = (0..24).map(|x| x as f32).collect();
+        let tensor = GpuTensor::from_f32(&ctx, &data, vec![2, 3, 4], None, None)?;
+        // coords = [1, 1, 1] --> 1*12 + 1*4 + 1*1 = 17
+        let idx = tensor.linear_index(&[1, 1, 1]);
+        assert_eq!(idx, 17);
+        Ok(())
+    }
+    #[test]
+    fn test_linear_index_with_offset() -> Result<()> {
+        let ctx = context();
+        // shape = [3], offset = 10
+        let data: Vec<f32> = (0..13).map(|x| x as f32).collect();
+        let tensor = GpuTensor::from_f32(&ctx, &data, vec![3], None, Some(10))?;
+        // coords = [2] --> offset + 2*1 = 12
+        let idx = tensor.linear_index(&[2]);
+        assert_eq!(idx, 12);
+        Ok(())
+    }
+    #[test]
+    fn test_linear_index_round_trip() -> Result<()> {
+        let ctx = context();
+        // shape = [2, 3, 4]
+        let data: Vec<f32> = (0..24).map(|x| x as f32).collect();
+        let tensor = GpuTensor::from_f32(&ctx, &data, vec![2, 3, 4], None, None)?;
+        // For every linear index, tensor_coords --> linear_index must round‑trip
+        for linear in 0..24 {
+            let coords = tensor.tensor_coords(linear);
+            let back = tensor.linear_index(&coords);
+            assert_eq!(back, linear);
+        }
         Ok(())
     }
 }
