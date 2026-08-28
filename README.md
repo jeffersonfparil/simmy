@@ -3,6 +3,7 @@ Simulate genotype, phenotype, and environmental data for quantitative and popula
 
 ## Development Plan
 
+- [X] Linear algebra library
 - [ ] I/O module
     + [ ] Genomic data struct
     + [ ] Phenomic data struct

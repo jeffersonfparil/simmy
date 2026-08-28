@@ -28,9 +28,9 @@ impl GpuTensor {
             // Number of tensor dimensions.
             rank: self.shape.len() as u32,
             // Total number of logical tensor elements.
-            n_elements: n_elements,
+            n_elements,
             // Shape of the logical tensor.
-            shape: shape,
+            shape,
             // Starting element of `A` within its backing storage.
             a_offset: self.offset,
             // Storage strides of `A` per dimension.
@@ -38,7 +38,7 @@ impl GpuTensor {
             // Starting element of `C` within its backing storage.
             c_offset: 0,
             // Storage strides of `C` per dimension.
-            c_strides: c_strides,
+            c_strides,
             // Mathematical operation: op(A) -> C (see operations.rs & wgsl/opcodes.wgsl).
             op: op.unary_opcode()?,
         };
