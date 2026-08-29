@@ -18,8 +18,7 @@
 //!    allows rapid CPU-side scanning, demographic filtering, and generation masking without
 //!    the memory overhead of unpacking deeply nested structures.
 //!
-use crate::linalg::context::GpuContext;
-use crate::linalg::kernel::GpuKernel;
+
 use crate::linalg::tensor::GpuTensor;
 
 /// Represents physical genomic chromosomes, scaffolds, or contigs.

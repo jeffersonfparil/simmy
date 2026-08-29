@@ -752,7 +752,6 @@ mod tests {
             op: OP_NEG,
         });
         let c = ops.execute_kernel(params, &a, None)?;
-        
 
         let c_vec = c.to_vec_f32(&ctx)?;
         println!("c.shape: {:?}", c.shape);

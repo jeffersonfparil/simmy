@@ -103,7 +103,7 @@ fn parse_tensor_params(
     );
     let offset: u32 = offset.unwrap_or(0);
     ensure!(n > offset, "The offset must range from 0 to {}", n - 1);
-    let required_len = if (shape.len() == 0) | (shape.contains(&0)) {
+    let required_len = if shape.is_empty() | shape.contains(&0) {
         0
     } else {
         offset
@@ -291,9 +291,9 @@ impl GpuTensor {
         let mut idx = linear_idx;
         for i in (0..rank).rev() {
             coords[i] = idx % (self.shape[i] as usize);
-            idx = idx / (self.shape[i] as usize);
+            idx /= self.shape[i] as usize;
         }
-        return coords;
+        coords
     }
 
     /// Compute the linear (flattened) index inside the backing GPU buffer
@@ -341,10 +341,10 @@ impl GpuTensor {
     pub fn linear_index(&self, coords: &[usize]) -> usize {
         let rank: usize = self.shape.len();
         let mut idx = self.offset as usize;
-        for i in 0..rank {
-            idx += coords[i] * (self.strides[i] as usize);
+        for (i, coord) in coords.iter().enumerate().take(rank) {
+            idx += coord * (self.strides[i] as usize);
         }
-        return idx as usize;
+        idx
     }
 }
 
