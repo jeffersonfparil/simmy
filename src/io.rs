@@ -20,7 +20,7 @@
 //!
 
 use crate::linalg::tensor::GpuTensor;
-// use anyhow::{Result, ensure};
+use anyhow::{Result, ensure};
 
 /// Represents physical genomic chromosomes, scaffolds, or contigs.
 ///
@@ -38,25 +38,25 @@ pub struct Chromosomes {
     pub lengths: Vec<usize>,
 }
 
-// impl Chromosomes {
-//     pub fn new(n: usize, lengths: Option<Vec<usize>>) -> Result<Self> {
-//         let lengths = match lengths {
-//             Some(x) => x,
-//             None => vec![1_000_000; n],
-//         };
-//         ensure!(
-//             n == lengths.len(),
-//             "The number of names (n={}) and lengths (n={}) must match!",
-//             n,
-//             lengths.len()
-//         );
-//         let names: Vec<String> = (0..n).map(|i| format!("chr_{}", i)).collect();
-//         Ok(Self {
-//             chromosomes: names,
-//             lengths: lengths,
-//         })
-//     }
-// }
+impl Chromosomes {
+    pub fn new(n: usize, lengths: Option<Vec<usize>>) -> Result<Self> {
+        let lengths = match lengths {
+            Some(x) => x,
+            None => vec![1_000_000; n],
+        };
+        ensure!(
+            n == lengths.len(),
+            "The number of names (n={}) and lengths (n={}) must match!",
+            n,
+            lengths.len()
+        );
+        let chromosomes: Vec<String> = (0..n).map(|i| format!("chr_{}", i)).collect();
+        Ok(Self {
+            chromosomes,
+            lengths,
+        })
+    }
+}
 
 /// A global dictionary of unique allelic variant sequences or sequence states.
 ///
@@ -71,45 +71,56 @@ pub struct Alleles {
     pub names: Vec<String>,
 }
 
-// const SNPS: &[&str] = &["A", "T", "C", "G", "DEL"];
+const SNPS: &[&str] = &["A", "T", "C", "G", "DEL"];
 
-// impl Alleles {
-//     pub fn new(n: usize, names: Option<Vec<String>>) -> Result<Self> {
-//         let names = match names {
-//             Some(x) => x,
-//             None => {
-//                 let mut names: Vec<String> = Vec::with_capacity(n);
-//                 // For n <= 5: names  in vec!["A", "T", "C", "G", "DEL"]
-//                 // For 5 < n <= 10: names in vec!["AA", "AT", "AC", "AG", "ADEL", "TA", "TT", "TC", "TG", "TDEL", ...]
-//                 // For 11 < n <= 20: names in vec!["AAAA", "AAT", "AAC", "AAG", "AADEL", "TTA", "TTTT", "TTC", "TTG", "TTDEL", ...]
-//                 for i in 0..n {
-//                     let mut name_components: Vec<&str> = Vec::new();
-//                     let mut idx = i;
-//                     loop {
-//                         let snp_idx = idx % SNPS.len();
-//                         idx /= SNPS.len(); // floor of corresponding float quotients
-//                         name_components.push(SNPS[snp_idx]);
-//                         if idx == 0 {
-//                             break;
-//                         }
-//                     }
-//                     name_components.reverse();
-//                     names.push(name_components.join(""));
-//                 }
-//                 names
-//             }
-//         };
-//         ensure!(
-//             n == names.len(),
-//             "The numbe of names (n={}) and names (n={}) must match!",
-//             n,
-//             names.len()
-//         );
-//         let mut counted: Vec<bool> = vec![false; n];
-//         // for
-//         Ok(Self { names })
-//     }
-// }
+impl Alleles {
+    pub fn new(n: usize, names: Option<Vec<String>>) -> Result<Self> {
+        let names = match names {
+            Some(x) => x,
+            None => {
+                let mut names: Vec<String> = Vec::with_capacity(n);
+                // For n <= 5: names  in vec!["A", "T", "C", "G", "DEL"]
+                // For n <= 10: names in vec!["A", "T", "C", "G", "DEL", "TA", "TT", "TC", "TG", "TDEL"]
+                // For n <= 15: names in vec!["A", "T", "C", "G", "DEL", "TA", "TT", "TC", "TG", "TDEL", "CA", "CT", "CC", "CG", "CDEL"]
+                // For n <= 20: names in vec!["A", "T", "C", "G", "DEL", "TA", "TT", "TC", "TG", "TDEL", "CA", "CT", "CC", "CG", "CDEL", "GA", "GT", "GC", "GG", "GDEL"]
+                // i.e. little-endian generation because this is simpler than the big-endian
+                for i in 0..n {
+                    let mut name_components: Vec<&str> = Vec::new();
+                    let mut idx = i;
+                    loop {
+                        let snp_idx = idx % SNPS.len();
+                        idx /= SNPS.len(); // floor of corresponding float quotients
+                        name_components.push(SNPS[snp_idx]);
+                        if idx == 0 {
+                            break;
+                        }
+                    }
+                    name_components.reverse();
+                    names.push(name_components.join(""));
+                }
+                names
+            }
+        };
+        ensure!(
+            n == names.len(),
+            "The numbe of names (n={}) and names (n={}) must match!",
+            n,
+            names.len()
+        );
+        let mut perm: Vec<usize> = (0..n).collect();
+        perm.sort_by_key(|&i| names[i].to_owned());
+        for i in 1..n {
+            let idx_0 = perm[i - 1];
+            let idx_1 = perm[i];
+            ensure!(
+                names[idx_0] != names[idx_1],
+                "Duplicated allele: {}!",
+                names[idx_0]
+            );
+        }
+        Ok(Self { names })
+    }
+}
 
 /// Defines a physical genomic feature or coordinate region (locus) and its valid alleles.
 ///
@@ -242,4 +253,107 @@ pub struct PhenotypeData {
     /// Dense GPU matrix of shape `[entry_ids.len(), trait_ids.len()]` [2].
     /// Stores the phenotypic value floats (e.g., breeding estimates, observed values).
     pub data: GpuTensor,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anyhow::Result;
+
+    // -----------------------------
+    // Chromosomes::new tests
+    // -----------------------------
+
+    #[test]
+    fn chromosomes_default_lengths() -> Result<()> {
+        let chr = Chromosomes::new(3, None)?;
+        assert_eq!(chr.chromosomes, vec!["chr_0", "chr_1", "chr_2"]);
+        assert_eq!(chr.lengths, vec![1_000_000, 1_000_000, 1_000_000]);
+        Ok(())
+    }
+
+    #[test]
+    fn chromosomes_custom_lengths() -> Result<()> {
+        let chr = Chromosomes::new(3, Some(vec![10, 20, 30]))?;
+        assert_eq!(chr.chromosomes, vec!["chr_0", "chr_1", "chr_2"]);
+        assert_eq!(chr.lengths, vec![10, 20, 30]);
+        Ok(())
+    }
+
+    #[test]
+    fn chromosomes_length_mismatch_fails() {
+        let result = Chromosomes::new(3, Some(vec![10, 20]));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn chromosomes_zero_n() -> Result<()> {
+        let chr = Chromosomes::new(0, None)?;
+        assert!(chr.chromosomes.is_empty());
+        assert!(chr.lengths.is_empty());
+        Ok(())
+    }
+
+    // -----------------------------
+    // Alleles::new tests
+    // -----------------------------
+
+    #[test]
+    fn alleles_default_n_leq_5() -> Result<()> {
+        let a = Alleles::new(5, None)?;
+        assert_eq!(a.names, vec!["A", "T", "C", "G", "DEL"]);
+        Ok(())
+    }
+
+    #[test]
+    fn alleles_default_n_10() -> Result<()> {
+        let a = Alleles::new(10, None)?;
+        assert_eq!(
+            a.names,
+            vec!["A", "T", "C", "G", "DEL", "TA", "TT", "TC", "TG", "TDEL"]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn alleles_default_n_20() -> Result<()> {
+        let a = Alleles::new(20, None)?;
+        // Check first 5 and last 5 only
+        assert_eq!(&a.names[..5], &["A", "T", "C", "G", "DEL"]);
+        assert_eq!(&a.names[15..20], &["GA", "GT", "GC", "GG", "GDEL"]);
+        Ok(())
+    }
+
+    #[test]
+    fn alleles_custom_names() -> Result<()> {
+        let custom = vec!["X".into(), "Y".into(), "Z".into()];
+        let a = Alleles::new(3, Some(custom.clone()))?;
+        assert_eq!(a.names, custom);
+        Ok(())
+    }
+
+    #[test]
+    fn alleles_custom_name_length_mismatch_fails() {
+        let result = Alleles::new(3, Some(vec!["A".into(), "B".into()]));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn alleles_no_duplicates() -> Result<()> {
+        let a = Alleles::new(50, None)?;
+        let mut sorted = a.names.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), a.names.len());
+        Ok(())
+    }
+
+    #[test]
+    fn alleles_large_n() -> Result<()> {
+        let a = Alleles::new(500, None)?;
+        assert_eq!(a.names.len(), 500);
+        // Check that the last allele is multi-character
+        assert!(a.names[499].len() >= 3);
+        Ok(())
+    }
 }
