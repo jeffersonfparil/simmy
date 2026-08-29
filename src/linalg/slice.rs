@@ -55,7 +55,6 @@ impl GpuTensor {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::linalg::context::GpuContext;
     use crate::linalg::tensor::GpuTensor;
     use anyhow::Result;

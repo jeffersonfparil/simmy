@@ -210,10 +210,10 @@ mod tests {
     const OP_ABS: u32 = 0;
     const OP_NEG: u32 = 1;
     const OP_SQRT: u32 = 2;
-    const OP_EXP: u32 = 3;
-    const OP_LOG: u32 = 4;
-    const OP_SIN: u32 = 5;
-    const OP_COS: u32 = 6;
+    // const OP_EXP: u32 = 3;
+    // const OP_LOG: u32 = 4;
+    // const OP_SIN: u32 = 5;
+    // const OP_COS: u32 = 6;
 
     // Binary operations
     const OP_ADD: u32 = 0;
@@ -222,24 +222,24 @@ mod tests {
     const OP_DIV: u32 = 3;
     const OP_MIN: u32 = 4;
     const OP_MAX: u32 = 5;
-    const OP_POW: u32 = 6;
+    // const OP_POW: u32 = 6;
     const OP_ATAN2: u32 = 7;
     const OP_EQ: u32 = 8;
-    const OP_NE: u32 = 9;
-    const OP_LT: u32 = 10;
-    const OP_LE: u32 = 11;
-    const OP_GT: u32 = 12;
-    const OP_GE: u32 = 13;
+    // const OP_NE: u32 = 9;
+    // const OP_LT: u32 = 10;
+    // const OP_LE: u32 = 11;
+    // const OP_GT: u32 = 12;
+    // const OP_GE: u32 = 13;
 
     const OP_PAIR_ADD: u32 = 0;
-    const OP_PAIR_SUB: u32 = 1;
+    // const OP_PAIR_SUB: u32 = 1;
     const OP_PAIR_MUL: u32 = 2;
-    const OP_PAIR_DIV: u32 = 3;
-    const OP_PAIR_MIN: u32 = 4;
-    const OP_PAIR_MAX: u32 = 5;
+    // const OP_PAIR_DIV: u32 = 3;
+    // const OP_PAIR_MIN: u32 = 4;
+    // const OP_PAIR_MAX: u32 = 5;
 
     const OP_REDUCE_ADD: u32 = 0;
-    const OP_REDUCE_MUL: u32 = 1;
+    // const OP_REDUCE_MUL: u32 = 1;
     const OP_REDUCE_MIN: u32 = 2;
     const OP_REDUCE_MAX: u32 = 3;
 
@@ -526,9 +526,6 @@ mod tests {
     }
 
     // Tensors
-
-    const TENSOR_SHAPE_3D: &[u32] = &[2, 2, 2];
-    const TENSOR_SHAPE_4D: &[u32] = &[2, 2, 2, 2];
 
     fn unary_tensor_params(op: u32) -> Params {
         Params::UnaryTensor(UnaryTensorParams {

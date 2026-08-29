@@ -515,7 +515,7 @@ mod tests {
         // shape = [2, 2] --> 4 elements
         let data: Vec<f32> = (0..4).map(|x| x as f32).collect();
         let tensor = GpuTensor::from_f32(&ctx, &data, vec![2, 2], None, None)?;
-        let expected = vec![vec![0, 0], vec![0, 1], vec![1, 0], vec![1, 1]];
+        let expected = [vec![0, 0], vec![0, 1], vec![1, 0], vec![1, 1]];
         for (idx, exp) in expected.iter().enumerate() {
             assert_eq!(tensor.tensor_coords(idx), *exp);
         }
