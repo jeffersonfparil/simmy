@@ -20,7 +20,7 @@
 //!
 
 use crate::linalg::tensor::GpuTensor;
-use anyhow::{Result, ensure};
+// use anyhow::{Result, ensure};
 
 /// Represents physical genomic chromosomes, scaffolds, or contigs.
 ///
@@ -38,17 +38,25 @@ pub struct Chromosomes {
     pub lengths: Vec<usize>,
 }
 
-impl Chromosomes {
-    pub fn new(n: usize, lengths: Option<Vec<usize>>) -> Result<Self> {
-        let lengths = match lengths {
-            Some(x) => x,
-            None => vec![1_000_000; n]
-        };
-        ensure!(n == lengths.len(), "The number of names (n={}) and lengths (n={}) must match!", n, lengths.len());
-        let names: Vec<String> = (0..n).map(|i| format!("chr_{}", i)).collect();
-        Ok(Self {chromosomes: names, lengths: lengths})
-    }
-}
+// impl Chromosomes {
+//     pub fn new(n: usize, lengths: Option<Vec<usize>>) -> Result<Self> {
+//         let lengths = match lengths {
+//             Some(x) => x,
+//             None => vec![1_000_000; n],
+//         };
+//         ensure!(
+//             n == lengths.len(),
+//             "The number of names (n={}) and lengths (n={}) must match!",
+//             n,
+//             lengths.len()
+//         );
+//         let names: Vec<String> = (0..n).map(|i| format!("chr_{}", i)).collect();
+//         Ok(Self {
+//             chromosomes: names,
+//             lengths: lengths,
+//         })
+//     }
+// }
 
 /// A global dictionary of unique allelic variant sequences or sequence states.
 ///
@@ -63,42 +71,45 @@ pub struct Alleles {
     pub names: Vec<String>,
 }
 
-const SNPS: &[&str] = &["A", "T", "C", "G", "DEL"];
+// const SNPS: &[&str] = &["A", "T", "C", "G", "DEL"];
 
-
-impl Alleles {
-    pub fn new(n: usize, names: Option<Vec<String>>) -> Result<Self> {
-        let names = match names {
-            Some(x) => x,
-            None => {
-                let mut names: Vec<String> = Vec::with_capacity(n);
-                // For n <= 5: names  in vec!["A", "T", "C", "G", "DEL"]
-                // For 5 < n <= 10: names in vec!["AA", "AT", "AC", "AG", "ADEL", "TA", "TT", "TC", "TG", "TDEL", ...]
-                // For 11 < n <= 20: names in vec!["AAAA", "AAT", "AAC", "AAG", "AADEL", "TTA", "TTTT", "TTC", "TTG", "TTDEL", ...]
-                for i in 0..n {
-                    let mut name_components: Vec<&str> = Vec::new();
-                    let mut idx = i;
-                    loop {
-                        let snp_idx = idx % SNPS.len();
-                        idx /= SNPS.len(); // floor of corresponding float quotients
-                        name_components.push(SNPS[snp_idx]);
-                        if idx == 0 {
-                            break;
-                        }
-                    }
-                    name_components.reverse();
-                    names.push(name_components.join(""));
-                }
-                names
-            }
-        };
-        ensure!(n == names.len(), "The numbe of names (n={}) and names (n={}) must match!", n, names.len());
-        let mut counted: Vec<bool> = vec![false; n];
-        // for 
-        Ok(Self {names})
-    }
-}
-
+// impl Alleles {
+//     pub fn new(n: usize, names: Option<Vec<String>>) -> Result<Self> {
+//         let names = match names {
+//             Some(x) => x,
+//             None => {
+//                 let mut names: Vec<String> = Vec::with_capacity(n);
+//                 // For n <= 5: names  in vec!["A", "T", "C", "G", "DEL"]
+//                 // For 5 < n <= 10: names in vec!["AA", "AT", "AC", "AG", "ADEL", "TA", "TT", "TC", "TG", "TDEL", ...]
+//                 // For 11 < n <= 20: names in vec!["AAAA", "AAT", "AAC", "AAG", "AADEL", "TTA", "TTTT", "TTC", "TTG", "TTDEL", ...]
+//                 for i in 0..n {
+//                     let mut name_components: Vec<&str> = Vec::new();
+//                     let mut idx = i;
+//                     loop {
+//                         let snp_idx = idx % SNPS.len();
+//                         idx /= SNPS.len(); // floor of corresponding float quotients
+//                         name_components.push(SNPS[snp_idx]);
+//                         if idx == 0 {
+//                             break;
+//                         }
+//                     }
+//                     name_components.reverse();
+//                     names.push(name_components.join(""));
+//                 }
+//                 names
+//             }
+//         };
+//         ensure!(
+//             n == names.len(),
+//             "The numbe of names (n={}) and names (n={}) must match!",
+//             n,
+//             names.len()
+//         );
+//         let mut counted: Vec<bool> = vec![false; n];
+//         // for
+//         Ok(Self { names })
+//     }
+// }
 
 /// Defines a physical genomic feature or coordinate region (locus) and its valid alleles.
 ///
@@ -209,11 +220,11 @@ pub struct GenotypeData {
     pub data: GpuTensor,
 }
 
-impl GenotypeData {
-    pub fn new() {
-        todo!()
-    }
-}
+// impl GenotypeData {
+//     pub fn new() {
+//         todo!()
+//     }
+// }
 
 /// The observed phenotype metrics backed by high-performance GPU storage.
 ///
@@ -232,4 +243,3 @@ pub struct PhenotypeData {
     /// Stores the phenotypic value floats (e.g., breeding estimates, observed values).
     pub data: GpuTensor,
 }
-

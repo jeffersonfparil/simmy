@@ -23,11 +23,11 @@ Simulate genotype, phenotype, and environmental data for quantitative and popula
 ```shell
 cd simmy/
 cargo fmt
-cargo clippy
 cargo test
 cargo run
 # cargo test -- --show-output
 # cargo build --release
 # cargo doc --open
+cargo clippy --all-targets --all-features -- -D warnings
 cargo tree
 ```
