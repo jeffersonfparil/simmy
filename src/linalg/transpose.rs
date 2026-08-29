@@ -3,36 +3,32 @@ use anyhow::{Result, ensure};
 use std::sync::Arc;
 
 impl GpuTensor {
-    /// Transponse a tensor
+    /// Transpose the tensor in place according to a permutation of axes.
     ///
-    /// * `perm` defines the permutation of tensor axes.
-    ///   For example:
+    /// ### Tensor Engine Context
+    /// This operation reorders the logical dimensions of the tensor by
+    /// permuting both its `shape` and `strides`. Because the tensor uses a
+    /// strided storage model, transposition is performed entirely through
+    /// metadata updates without reallocating or copying GPU memory.
     ///
+    /// If `perm` is `None`, the tensor is reversed along all axes:
     /// ```text
-    /// [0, 1]    -> [1, 0]
-    /// [0, 1, 2] -> [2, 0, 1]
+    /// shape = [d0, d1, d2] → perm = [2, 1, 0]
     /// ```
     ///
-    /// If `perm` is not provided, the tensor axes are reversed:
+    /// ### Validation
+    /// * The permutation must contain exactly one entry for each axis.
+    /// * All axes must be unique and within bounds.
     ///
-    /// ```text
-    /// [0, 1]    -> [1, 0]
-    /// [0, 1, 2] -> [2, 1, 0]
-    /// ```
+    /// ### Effects
+    /// * `shape[i]` becomes `shape[perm[i]]`
+    /// * `strides[i]` becomes `strides[perm[i]]`
+    /// * `offset` and `buffer` remain unchanged
     ///
-    /// This operation does not copy any data. Instead, a new `GpuTensor`
-    /// is created with permuted `shape` and `strides` metadata while
-    /// sharing ownership of the same backing GPU buffer.
-    ///
-    /// # Returns
-    /// Returns a new tensor view with permuted axes.
-    ///
-    /// # Errors
-    /// Returns an error if:
-    /// * The permutation rank differs from the tensor rank.
-    /// * A permutation axis is out of bounds.
-    /// * A permutation axis appears more than once.
-    pub fn transpose(&self, perm: Option<Vec<usize>>) -> Result<Self> {
+    /// ### Notes
+    /// This method mutates the tensor in place. Use `transpose_view` to
+    /// create a zero‑copy transposed view instead.
+    pub fn transpose_mut(&mut self, perm: Option<Vec<usize>>) -> Result<()> {
         let perm: Vec<usize> = perm.unwrap_or_else(|| {
             let mut x = (0..self.shape.len()).collect::<Vec<usize>>();
             x.reverse();
@@ -59,14 +55,39 @@ impl GpuTensor {
             );
             seen[axis] = true;
         }
-        let new_shape: Vec<u32> = perm.iter().map(|&i| self.shape[i]).collect();
-        let new_strides: Vec<u32> = perm.iter().map(|&i| self.strides[i]).collect();
-        Ok(Self {
-            buffer: Arc::clone(&self.buffer),
-            shape: new_shape,
-            strides: new_strides,
+        self.shape = perm.iter().map(|&i| self.shape[i]).collect();
+        self.strides = perm.iter().map(|&i| self.strides[i]).collect();
+        Ok(())
+    }
+
+    /// Create a zero‑copy transposed tensor view.
+    ///
+    /// ### Tensor Engine Context
+    /// This method constructs a new `GpuTensor` that shares the same GPU
+    /// buffer as the parent tensor but whose `shape` and `strides` have
+    /// been permuted according to the provided axis order.
+    ///
+    /// The underlying GPU memory is never duplicated; only metadata is
+    /// updated. This enables efficient creation of transposed views for
+    /// slicing, contraction, and other tensor operations.
+    ///
+    /// ### Behavior
+    /// * The returned tensor has identical `offset` and `buffer`.
+    /// * `shape` and `strides` are permuted according to `perm`.
+    /// * If `perm` is `None`, axes are reversed.
+    ///
+    /// ### Notes
+    /// This method does not modify the original tensor. It is the
+    /// functional (non‑mutating) counterpart to `transpose_mut`.
+    pub fn transpose_view(&self, perm: Option<Vec<usize>>) -> Result<Self> {
+        let mut view = Self {
+            shape: self.shape.clone(),
+            strides: self.strides.clone(),
             offset: self.offset,
-        })
+            buffer: Arc::clone(&self.buffer),
+        };
+        view.transpose_mut(perm)?;
+        Ok(view)
     }
 }
 
@@ -74,88 +95,78 @@ impl GpuTensor {
 mod tests {
     use super::*;
     use crate::linalg::context::GpuContext;
+
     fn context() -> GpuContext {
         pollster::block_on(GpuContext::new()).expect("Failed to create GPU context")
     }
+
     #[test]
-    fn transpose_2d_default() -> Result<()> {
+    fn transpose_mut_reverses_axes_by_default() -> Result<()> {
         let ctx = context();
-        let tensor = GpuTensor::from_f32(
-            &ctx,
-            &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
-            vec![2, 3],
-            None,
-            None,
-        )?;
-        let t = tensor.transpose(None)?;
-        assert_eq!(t.shape, vec![3, 2]);
-        assert_eq!(t.strides, vec![1, 3]);
-        assert_eq!(t.offset, tensor.offset);
-        Ok(())
-    }
-    #[test]
-    fn transpose_3d_default() -> Result<()> {
-        let ctx = context();
-        let tensor = GpuTensor::from_f32(&ctx, &[0.0f32; 24], vec![2, 3, 4], None, None)?;
-        let t = tensor.transpose(None)?;
+        // 2×3×4 tensor
+        let data: Vec<f32> = (0..24).map(|x| x as f32).collect();
+        let mut t = GpuTensor::from_f32(&ctx, &data, vec![2, 3, 4], None, None)?;
+        t.transpose_mut(None)?;
         assert_eq!(t.shape, vec![4, 3, 2]);
-        assert_eq!(t.strides, vec![1, 4, 12]);
+        assert_eq!(t.strides, vec![1, 4, 12]); // reversed original strides
         Ok(())
     }
     #[test]
-    fn transpose_custom_permutation() -> Result<()> {
+    fn transpose_mut_applies_custom_permutation() -> Result<()> {
         let ctx = context();
-        let tensor = GpuTensor::from_f32(&ctx, &[0.0f32; 24], vec![2, 3, 4], None, None)?;
-        let t = tensor.transpose(Some(vec![2, 0, 1]))?;
-        assert_eq!(t.shape, vec![4, 2, 3]);
-        assert_eq!(t.strides, vec![1, 12, 4]);
+        // shape = [2, 3, 4]
+        let data: Vec<f32> = (0..24).map(|x| x as f32).collect();
+        let mut t = GpuTensor::from_f32(&ctx, &data, vec![2, 3, 4], None, None)?;
+        // permute axes: [1, 2, 0]
+        t.transpose_mut(Some(vec![1, 2, 0]))?;
+        assert_eq!(t.shape, vec![3, 4, 2]);
+        assert_eq!(t.strides, vec![4, 1, 12]);
         Ok(())
     }
     #[test]
-    fn transpose_preserves_offset() -> Result<()> {
+    fn transpose_mut_rejects_invalid_rank() -> Result<()> {
         let ctx = context();
-        let tensor = GpuTensor::from_f32(&ctx, &[0.0f32; 32], vec![4, 4], None, Some(8))?;
-        let t = tensor.transpose(None)?;
-        assert_eq!(t.offset, 8);
+        let data: Vec<f32> = (0..6).map(|x| x as f32).collect();
+        let mut t = GpuTensor::from_f32(&ctx, &data, vec![2, 3], None, None)?;
+        // wrong length permutation
+        assert!(t.transpose_mut(Some(vec![0, 1, 2])).is_err());
         Ok(())
     }
     #[test]
-    fn transpose_shares_buffer() -> Result<()> {
+    fn transpose_mut_rejects_duplicate_axes() -> Result<()> {
         let ctx = context();
-        let tensor = GpuTensor::from_f32(&ctx, &[1.0f32, 2.0, 3.0, 4.0], vec![2, 2], None, None)?;
-        let t = tensor.transpose(None)?;
-        assert_eq!(tensor.buffer.size(), t.buffer.size());
+        let data: Vec<f32> = (0..6).map(|x| x as f32).collect();
+        let mut t = GpuTensor::from_f32(&ctx, &data, vec![2, 3], None, None)?;
+        assert!(t.transpose_mut(Some(vec![0, 0])).is_err());
         Ok(())
     }
     #[test]
-    fn transpose_rejects_rank_mismatch() {
+    fn transpose_view_produces_correct_metadata() -> Result<()> {
         let ctx = context();
-        let tensor = GpuTensor::from_f32(&ctx, &[0.0f32; 24], vec![2, 3, 4], None, None).unwrap();
-        let result = tensor.transpose(Some(vec![1, 0]));
-        assert!(result.is_err());
+        let data: Vec<f32> = (0..6).map(|x| x as f32).collect();
+        let t = GpuTensor::from_f32(&ctx, &data, vec![2, 3], None, None)?;
+        let v = t.transpose_view(Some(vec![1, 0]))?;
+        // parent unchanged
+        assert_eq!(t.shape, vec![2, 3]);
+        assert_eq!(t.strides, vec![3, 1]);
+        // view transposed
+        assert_eq!(v.shape, vec![3, 2]);
+        assert_eq!(v.strides, vec![1, 3]);
+        // shared buffer
+        assert_eq!(t.buffer.size(), v.buffer.size());
+        Ok(())
     }
     #[test]
-    fn transpose_rejects_duplicate_axis() {
+    fn transpose_view_preserves_offset() -> Result<()> {
         let ctx = context();
-        let tensor = GpuTensor::from_f32(&ctx, &[0.0f32; 24], vec![2, 3, 4], None, None).unwrap();
-        let result = tensor.transpose(Some(vec![0, 0, 2]));
-        assert!(result.is_err());
-    }
-    #[test]
-    fn transpose_rejects_out_of_bounds_axis() {
-        let ctx = context();
-        let tensor = GpuTensor::from_f32(&ctx, &[0.0f32; 24], vec![2, 3, 4], None, None).unwrap();
-        let result = tensor.transpose(Some(vec![0, 1, 3]));
-        assert!(result.is_err());
-    }
-    #[test]
-    fn transpose_twice_returns_original_layout() -> Result<()> {
-        let ctx = context();
-        let tensor = GpuTensor::from_f32(&ctx, &[0.0f32; 24], vec![2, 3, 4], None, None)?;
-        let t1 = tensor.transpose(Some(vec![2, 1, 0]))?;
-        let t2 = t1.transpose(Some(vec![2, 1, 0]))?;
-        assert_eq!(t2.shape, tensor.shape);
-        assert_eq!(t2.strides, tensor.strides);
+        let data: Vec<f32> = (0..12).map(|x| x as f32).collect();
+        let mut t = GpuTensor::from_f32(&ctx, &data, vec![3, 4], None, None)?;
+        // slice first to create non-zero offset
+        t.slice_mut(&[(1, 3), (1, 4)])?;
+        let offset_before = t.offset;
+        let v = t.transpose_view(None)?;
+        assert_eq!(v.offset, offset_before);
+        assert_eq!(v.shape, vec![3, 2]); // reversed axes after slice
         Ok(())
     }
 }

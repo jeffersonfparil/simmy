@@ -210,10 +210,10 @@ mod tests {
     const OP_ABS: u32 = 0;
     const OP_NEG: u32 = 1;
     const OP_SQRT: u32 = 2;
-    const OP_EXP: u32 = 3;
-    const OP_LOG: u32 = 4;
-    const OP_SIN: u32 = 5;
-    const OP_COS: u32 = 6;
+    // const OP_EXP: u32 = 3;
+    // const OP_LOG: u32 = 4;
+    // const OP_SIN: u32 = 5;
+    // const OP_COS: u32 = 6;
 
     // Binary operations
     const OP_ADD: u32 = 0;
@@ -222,24 +222,24 @@ mod tests {
     const OP_DIV: u32 = 3;
     const OP_MIN: u32 = 4;
     const OP_MAX: u32 = 5;
-    const OP_POW: u32 = 6;
+    // const OP_POW: u32 = 6;
     const OP_ATAN2: u32 = 7;
     const OP_EQ: u32 = 8;
-    const OP_NE: u32 = 9;
-    const OP_LT: u32 = 10;
-    const OP_LE: u32 = 11;
-    const OP_GT: u32 = 12;
-    const OP_GE: u32 = 13;
+    // const OP_NE: u32 = 9;
+    // const OP_LT: u32 = 10;
+    // const OP_LE: u32 = 11;
+    // const OP_GT: u32 = 12;
+    // const OP_GE: u32 = 13;
 
     const OP_PAIR_ADD: u32 = 0;
-    const OP_PAIR_SUB: u32 = 1;
+    // const OP_PAIR_SUB: u32 = 1;
     const OP_PAIR_MUL: u32 = 2;
-    const OP_PAIR_DIV: u32 = 3;
-    const OP_PAIR_MIN: u32 = 4;
-    const OP_PAIR_MAX: u32 = 5;
+    // const OP_PAIR_DIV: u32 = 3;
+    // const OP_PAIR_MIN: u32 = 4;
+    // const OP_PAIR_MAX: u32 = 5;
 
     const OP_REDUCE_ADD: u32 = 0;
-    const OP_REDUCE_MUL: u32 = 1;
+    // const OP_REDUCE_MUL: u32 = 1;
     const OP_REDUCE_MIN: u32 = 2;
     const OP_REDUCE_MAX: u32 = 3;
 
@@ -396,9 +396,9 @@ mod tests {
     fn unary_sqrt() -> Result<()> {
         let ctx = context();
         let ops = ops(&ctx);
-        let a = GpuTensor::from_f32(&ctx, &[1.0, 4.0, 9.0, 16.0], vec![2, 2], None, None)?;
+        let a = GpuTensor::from_f32(&ctx, &[1.0, 4.0, 16.0, 25.0], vec![2, 2], None, None)?;
         let c = ops.execute_kernel(unary_matrix_params(OP_SQRT), &a, None)?;
-        assert_eq!(c.to_vec_f32(&ctx)?, vec![1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(c.to_vec_f32(&ctx)?, vec![1.0, 2.0, 4.0, 5.0]);
         Ok(())
     }
     #[test]
@@ -526,9 +526,6 @@ mod tests {
     }
 
     // Tensors
-
-    const TENSOR_SHAPE_3D: &[u32] = &[2, 2, 2];
-    const TENSOR_SHAPE_4D: &[u32] = &[2, 2, 2, 2];
 
     fn unary_tensor_params(op: u32) -> Params {
         Params::UnaryTensor(UnaryTensorParams {
@@ -721,6 +718,101 @@ mod tests {
             Some(&b),
         )?;
         assert_eq!(c.to_vec_f32(&ctx)?, vec![19.0, 22.0, 43.0, 50.0]);
+        Ok(())
+    }
+    // Using transposed and sliced tensors
+    #[test]
+    fn unary_tensor_neg_on_transposed_tensor() -> Result<()> {
+        let ctx = context();
+        let ops = ops(&ctx);
+        let data: Vec<f32> = (0..6).map(|x| x as f32).collect();
+        let mut a = GpuTensor::from_f32(&ctx, &data, vec![2, 3], None, None)?;
+        println!("Before transpose:");
+        println!("a.shape: {:?}", a.shape);
+        println!("a.strides: {:?}", a.strides);
+        println!("data: {:?}", data);
+
+        a.transpose_mut(None)?;
+        let data_t = a.to_vec_f32(&ctx)?;
+        println!("After transpose:");
+        println!("a.shape: {:?}", a.shape);
+        println!("a.strides: {:?}", a.strides);
+        println!("data_t: {:?}", data_t);
+        let params = Params::UnaryTensor(UnaryTensorParams {
+            rank: 2,
+            n_elements: 6,
+            shape: [a.shape[0], a.shape[1], 0, 0, 0, 0, 0, 0],
+            a_offset: a.offset,
+            a_strides: [a.strides[0], a.strides[1], 0, 0, 0, 0, 0, 0],
+            c_offset: 0,
+            c_strides: [a.shape[1], 1, 0, 0, 0, 0, 0, 0],
+            op: OP_NEG,
+        });
+        let c = ops.execute_kernel(params, &a, None)?;
+
+        let c_vec = c.to_vec_f32(&ctx)?;
+        println!("c.shape: {:?}", c.shape);
+        println!("c.strides: {:?}", c.strides);
+        println!("c_vec: {:?}", c_vec);
+
+        assert_eq!(c_vec, vec![0.0, -3.0, -1.0, -4.0, -2.0, -5.0]);
+        assert_eq!(c_vec[c.linear_index(&[0, 0])], 0.0);
+        assert_eq!(c_vec[c.linear_index(&[1, 0])], -1.0);
+        assert_eq!(c_vec[c.linear_index(&[2, 0])], -2.0);
+        assert_eq!(c_vec[c.linear_index(&[0, 1])], -3.0);
+        assert_eq!(c_vec[c.linear_index(&[1, 1])], -4.0);
+        assert_eq!(c_vec[c.linear_index(&[2, 1])], -5.0);
+        Ok(())
+    }
+
+    #[test]
+    fn binary_tensor_add_on_sliced_tensor() -> Result<()> {
+        let ctx = context();
+        let ops = ops(&ctx);
+
+        let data: Vec<f32> = (0..12).map(|x| x as f32).collect();
+        let mut a = GpuTensor::from_f32(&ctx, &data, vec![3, 4], None, None)?;
+        let mut b = GpuTensor::from_f32(&ctx, &data, vec![3, 4], None, None)?;
+
+        println!("Before slice:");
+        println!("a.shape: {:?}; a.strides: {:?}", a.shape, a.strides);
+        println!("b.shape: {:?}; b.strides: {:?}", b.shape, b.strides);
+
+        a.slice_mut(&[(1, 3), (1, 3)])?;
+        b.slice_mut(&[(1, 3), (1, 3)])?;
+
+        println!("After slice:");
+        println!("a.shape: {:?}; a.strides: {:?}", a.shape, a.strides);
+        println!("b.shape: {:?}; b.strides: {:?}", b.shape, b.strides);
+
+        let params = Params::BinaryTensor(BinaryTensorParams {
+            rank: 2,
+            n_elements: 4,
+            shape: [a.shape[0], a.shape[1], 0, 0, 0, 0, 0, 0],
+            a_offset: a.offset,
+            a_strides: [a.strides[0], a.strides[1], 0, 0, 0, 0, 0, 0],
+            b_offset: b.offset,
+            b_strides: [b.strides[0], b.strides[1], 0, 0, 0, 0, 0, 0],
+            c_offset: 0,
+            c_strides: [a.shape[1], 1, 0, 0, 0, 0, 0, 0],
+            op: OP_ADD,
+        });
+
+        let c = ops.execute_kernel(params, &a, Some(&b))?;
+
+        println!("c.shape: {:?}; c.strides: {:?}", c.shape, c.strides);
+
+        let buf = c.to_vec_f32(&ctx)?;
+
+        // logical expected:
+        // [[10, 12],
+        //  [18, 20]]
+
+        assert_eq!(buf[c.linear_index(&[0, 0])], 10.0);
+        assert_eq!(buf[c.linear_index(&[0, 1])], 12.0);
+        assert_eq!(buf[c.linear_index(&[1, 0])], 18.0);
+        assert_eq!(buf[c.linear_index(&[1, 1])], 20.0);
+
         Ok(())
     }
 }

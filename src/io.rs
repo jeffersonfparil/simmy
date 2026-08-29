@@ -10,24 +10,24 @@
 //!    recombination, crossover logic, and pedigree tracing. Meanwhile, calculating genomic
 //!    breeding values (GEBVs), selection indices, and linkage disequilibrium (LD) matrices
 //!    is delegated to massive parallel matrix algebra on the GPU [2].
-//! 2. **Support for Multi-Allelic Loci:** Real-world breeding pools contain highly variable 
-//!    multi-allelic states (e.g., microsatellites, structural variants, or multiple founder 
-//!    haplotypes). By flattening these states into a relational mapping table ([`LocusAllele`]), 
+//! 2. **Support for Multi-Allelic Loci:** Real-world breeding pools contain highly variable
+//!    multi-allelic states (e.g., microsatellites, structural variants, or multiple founder
+//!    haplotypes). By flattening these states into a relational mapping table ([`LocusAllele`]),
 //!    this design supports arbitrary allelic counts per site on a unified GPU matrix coordinate system.
-//! 3. **Struct-of-Arrays (SoA) Layout:** Storing metadata attributes in parallel vectors 
-//!    allows rapid CPU-side scanning, demographic filtering, and generation masking without 
+//! 3. **Struct-of-Arrays (SoA) Layout:** Storing metadata attributes in parallel vectors
+//!    allows rapid CPU-side scanning, demographic filtering, and generation masking without
 //!    the memory overhead of unpacking deeply nested structures.
-//! 
-use crate::linalg::context::GpuContext;
-use crate::linalg::kernel::GpuKernel;
+//!
+
 use crate::linalg::tensor::GpuTensor;
+use anyhow::{Result, ensure};
 
 /// Represents physical genomic chromosomes, scaffolds, or contigs.
 ///
 /// ### Breeding Simulation Context:
 /// Essential for simulating physical linkage, chromosomal crossover events during
-/// meiosis, and modeling genetic recombination maps. The sequence coordinates mapped 
-/// against physical chromosomal lengths enable calculation of centimorgan (cM) distances 
+/// meiosis, and modeling genetic recombination maps. The sequence coordinates mapped
+/// against physical chromosomal lengths enable calculation of centimorgan (cM) distances
 /// and crossover probabilities during simulated mating cycles.
 #[derive(Debug, Clone)]
 pub struct Chromosomes {
@@ -38,18 +38,67 @@ pub struct Chromosomes {
     pub lengths: Vec<usize>,
 }
 
+impl Chromosomes {
+    pub fn new(n: usize, lengths: Option<Vec<usize>>) -> Result<Self> {
+        let lengths = match lengths {
+            Some(x) => x,
+            None => vec![1_000_000; n]
+        };
+        ensure!(n == lengths.len(), "The number of names (n={}) and lengths (n={}) must match!", n, lengths.len());
+        let names: Vec<String> = (0..n).map(|i| format!("chr_{}", i)).collect();
+        Ok(Self {chromosomes: names, lengths: lengths})
+    }
+}
+
 /// A global dictionary of unique allelic variant sequences or sequence states.
 ///
 /// ### Breeding Simulation Context:
-/// This acts as a centralized registry for any physical allele represented in the pool—ranging 
-/// from single-nucleotide polymorphisms (SNPs) to complex insertions, deletions (DEL), 
-/// and large structural variants. It decouples descriptive string-based sequence data 
+/// This acts as a centralized registry for any physical allele represented in the pool—ranging
+/// from single-nucleotide polymorphisms (SNPs) to complex insertions, deletions (DEL),
+/// and large structural variants. It decouples descriptive string-based sequence data
 /// from the active, high-speed numeric matrices running on the GPU.
 #[derive(Debug, Clone)]
 pub struct Alleles {
     /// String representations of the allele sequences (e.g., "A", "T", "DEL", "GATGCGC").
     pub names: Vec<String>,
 }
+
+const SNPS: &[&str] = &["A", "T", "C", "G", "DEL"];
+
+
+impl Alleles {
+    pub fn new(n: usize, names: Option<Vec<String>>) -> Result<Self> {
+        let names = match names {
+            Some(x) => x,
+            None => {
+                let mut names: Vec<String> = Vec::with_capacity(n);
+                // For n <= 5: names  in vec!["A", "T", "C", "G", "DEL"]
+                // For 5 < n <= 10: names in vec!["AA", "AT", "AC", "AG", "ADEL", "TA", "TT", "TC", "TG", "TDEL", ...]
+                // For 11 < n <= 20: names in vec!["AAAA", "AAT", "AAC", "AAG", "AADEL", "TTA", "TTTT", "TTC", "TTG", "TTDEL", ...]
+                for i in 0..n {
+                    let mut name_components: Vec<&str> = Vec::new();
+                    let mut idx = i;
+                    loop {
+                        let snp_idx = idx % SNPS.len();
+                        idx /= SNPS.len(); // floor of corresponding float quotients
+                        name_components.push(SNPS[snp_idx]);
+                        if idx == 0 {
+                            break;
+                        }
+                    }
+                    name_components.reverse();
+                    names.push(name_components.join(""));
+                }
+                names
+            }
+        };
+        ensure!(n == names.len(), "The numbe of names (n={}) and names (n={}) must match!", n, names.len());
+        let mut counted: Vec<bool> = vec![false; n];
+        // for 
+        Ok(Self {names})
+    }
+}
+
 
 /// Defines a physical genomic feature or coordinate region (locus) and its valid alleles.
 ///
@@ -72,12 +121,12 @@ pub struct Locus {
 /// A key relational mapping that bridges a physical locus to a specific sequence variant.
 ///
 /// ### Why We Chose This Structure:
-/// In population simulations, alleles are variable per locus. A standard matrix representation 
-/// assuming only biallelic SNPs fails under multi-allelic states. 
+/// In population simulations, alleles are variable per locus. A standard matrix representation
+/// assuming only biallelic SNPs fails under multi-allelic states.
 ///
-/// This structure solves the problem by providing a flat relational lookup table. 
-/// Every entry represents a unique **locus-allele combination**, which directly maps to a column 
-/// index in the GPU genotype tensor. This enables the GPU compute kernels to perform rapid 
+/// This structure solves the problem by providing a flat relational lookup table.
+/// Every entry represents a unique **locus-allele combination**, which directly maps to a column
+/// index in the GPU genotype tensor. This enables the GPU compute kernels to perform rapid
 /// linear algebra on variable-allele genomes by representing them as flattened dosage columns.
 #[derive(Debug, Clone)]
 pub struct LocusAllele {
@@ -110,8 +159,8 @@ pub struct Genome {
 ///
 /// ### Breeding Simulation Context:
 /// Manages population structures, cohort generations, and pedigrees on the CPU. By separating
-/// this qualitative tracking from the dense numerical genotype tensors, you can query, slice, 
-/// and filter breeding cohorts (e.g., separating founders, generation F1, or target breeding lines) 
+/// this qualitative tracking from the dense numerical genotype tensors, you can query, slice,
+/// and filter breeding cohorts (e.g., separating founders, generation F1, or target breeding lines)
 /// cleanly on the CPU to dynamically assemble indexing vectors for GPU acceleration.
 #[derive(Debug, Clone)]
 pub struct Entries {
@@ -144,7 +193,7 @@ pub struct Traits {
 /// The primary GPU-backed genotype representation for high-throughput computing.
 ///
 /// ### Why We Chose This Structure:
-/// In quantitative genetics and breeding, the genotype matrix is the bottleneck of calculations. 
+/// In quantitative genetics and breeding, the genotype matrix is the bottleneck of calculations.
 /// Storing this as a [`GpuTensor`] on the GPU enables extremely fast, massively parallel operations:
 /// - Calculating genomic relationship matrices (GRM).
 /// - Matrix multiplication of marker effect sizes for genomic prediction ($X \beta$).
@@ -160,11 +209,17 @@ pub struct GenotypeData {
     pub data: GpuTensor,
 }
 
+impl GenotypeData {
+    pub fn new() {
+        todo!()
+    }
+}
+
 /// The observed phenotype metrics backed by high-performance GPU storage.
 ///
 /// ### Breeding Simulation Context:
-/// This holds the quantitative performance values of each individual across multiple traits. 
-/// Storing these on the GPU allows the simulation engine to perform real-time selection-index 
+/// This holds the quantitative performance values of each individual across multiple traits.
+/// Storing these on the GPU allows the simulation engine to perform real-time selection-index
 /// calculations, variance-covariance estimations, and evaluation sweeps directly in GPU memory,
 /// feeding selection decisions straight back into the next simulated mating cycle.
 #[derive(Debug)]
@@ -177,3 +232,4 @@ pub struct PhenotypeData {
     /// Stores the phenotypic value floats (e.g., breeding estimates, observed values).
     pub data: GpuTensor,
 }
+
