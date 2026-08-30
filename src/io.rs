@@ -21,6 +21,7 @@
 
 use crate::linalg::tensor::GpuTensor;
 use anyhow::{Result, ensure};
+use rand::RngExt;
 
 /// Represents physical genomic chromosomes, scaffolds, or contigs.
 ///
@@ -39,14 +40,43 @@ pub struct Chromosomes {
 }
 
 impl Chromosomes {
-    pub fn new(n: usize, lengths: Option<Vec<usize>>) -> Result<Self> {
+    /// Constructs a `Chromosomes` collection containing `n` chromosomes with
+    /// user‑provided or default lengths.
+    ///
+    /// # Overview
+    /// If `lengths` is provided, the slice is copied into an owned `Vec<usize>` and
+    /// validated to ensure its length matches `n`.
+    ///
+    /// If `lengths` is `None`, all chromosomes are assigned a default length of
+    /// `1_000_000` base pairs.
+    ///
+    /// Chromosome names are automatically generated in the form `"chr_<i>"` for
+    /// `i = 0..n`, producing deterministic identifiers such as `chr_0`, `chr_1`,
+    /// ..., `chr_{n-1}`.
+    ///
+    /// # Parameters
+    /// - `n`: Number of chromosomes to construct.
+    /// - `lengths`: Optional slice of chromosome lengths. If `None`, all lengths
+    ///   default to `1_000_000`.
+    ///
+    /// # Returns
+    /// A `Chromosomes` instance containing:
+    /// - `chromosomes`: names `"chr_0"` through `"chr_{n-1}"`,
+    /// - `lengths`: validated or default chromosome lengths.
+    ///
+    /// # Validation
+    /// - Ensures `lengths.len() == n`.
+    ///
+    /// # Errors
+    /// Returns an error if the number of provided lengths does not equal `n`.
+    pub fn new(n: usize, lengths: Option<&[usize]>) -> Result<Self> {
         let lengths = match lengths {
-            Some(x) => x,
+            Some(x) => x.to_vec(),
             None => vec![1_000_000; n],
         };
         ensure!(
             n == lengths.len(),
-            "The number of names (n={}) and lengths (n={}) must match!",
+            "The number of chromosomes (n={}) and lengths (n={}) must match!",
             n,
             lengths.len()
         );
@@ -67,22 +97,57 @@ impl Chromosomes {
 /// from the active, high-speed numeric matrices running on the GPU.
 #[derive(Debug, Clone)]
 pub struct Alleles {
-    /// String representations of the allele sequences (e.g., "A", "T", "DEL", "GATGCGC").
+    /// String representations of the allele sequences (e.g., "A", "T", "D", "GATGCGC").
     pub names: Vec<String>,
 }
 
-const SNPS: &[&str] = &["A", "T", "C", "G", "DEL"];
+const SNPS: &[&str] = &["A", "T", "C", "G", "D"];
 
 impl Alleles {
-    pub fn new(n: usize, names: Option<Vec<String>>) -> Result<Self> {
+    /// Constructs an `Alleles` registry containing `n` unique allele sequence names.
+    ///
+    /// # Overview
+    /// If `names` is provided, the constructor copies the supplied slice of `&str`
+    /// into an owned `Vec<String>` and verifies that its length matches `n`.
+    ///
+    /// If `names` is `None`, allele names are generated automatically using a
+    /// little‑endian base‑`SNPS.len()` encoding over the SNP alphabet `SNPS = ["A","T","C","G","D"]`.
+    /// This produces deterministic, unique allele strings such as:
+    ///
+    /// - `n <= 5`:     A, T, C, G, D
+    /// - `n <= 10`:    A, T, C, G, D, TA, TT, TC, TG, TDEL
+    /// - `n <= 15`:    (previous) + CA, CT, CC, CG, CDEL
+    /// - `n <= 20`:    (previous) + GA, GT, GC, GG, GDEL
+    ///
+    /// The generation rule is effectively a mixed‑radix counter over the SNP alphabet,
+    /// where the least‑significant “digit” varies fastest. Components are reversed to
+    /// yield a big‑endian human‑readable allele string.
+    ///
+    /// # Validation
+    /// - Ensures `names.len() == n`.
+    /// - Ensures all allele names are unique by lexicographically sorting indices and
+    ///   checking adjacent entries for equality.
+    ///
+    /// # Parameters
+    /// - `n`: Number of alleles to construct.
+    /// - `names`: Optional slice of allele names. If `None`, names are generated.
+    ///
+    /// # Returns
+    /// A fully validated `Alleles` instance containing `n` unique allele names.
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// - The number of provided names does not equal `n`.
+    /// - Any duplicate allele name is detected after sorting.
+    pub fn new(n: usize, names: Option<&[&str]>) -> Result<Self> {
         let names = match names {
-            Some(x) => x,
+            Some(x) => x.iter().map(|&xi| xi.to_owned()).collect::<Vec<String>>(),
             None => {
                 let mut names: Vec<String> = Vec::with_capacity(n);
-                // For n <= 5: names  in vec!["A", "T", "C", "G", "DEL"]
-                // For n <= 10: names in vec!["A", "T", "C", "G", "DEL", "TA", "TT", "TC", "TG", "TDEL"]
-                // For n <= 15: names in vec!["A", "T", "C", "G", "DEL", "TA", "TT", "TC", "TG", "TDEL", "CA", "CT", "CC", "CG", "CDEL"]
-                // For n <= 20: names in vec!["A", "T", "C", "G", "DEL", "TA", "TT", "TC", "TG", "TDEL", "CA", "CT", "CC", "CG", "CDEL", "GA", "GT", "GC", "GG", "GDEL"]
+                // For n <= 5: names  in &["A", "T", "C", "G", "D"]
+                // For n <= 10: names in &["A", "T", "C", "G", "D", "TA", "TT", "TC", "TG", "TDEL"]
+                // For n <= 15: names in &["A", "T", "C", "G", "D", "TA", "TT", "TC", "TG", "TDEL", "CA", "CT", "CC", "CG", "CDEL"]
+                // For n <= 20: names in &["A", "T", "C", "G", "D", "TA", "TT", "TC", "TG", "TDEL", "CA", "CT", "CC", "CG", "CDEL", "GA", "GT", "GC", "GG", "GDEL"]
                 // i.e. little-endian generation because this is simpler than the big-endian
                 for i in 0..n {
                     let mut name_components: Vec<&str> = Vec::new();
@@ -158,6 +223,114 @@ pub struct LocusAllele {
     pub allele_id: usize,
 }
 
+
+impl Locus {
+    /// Generates `n` loci distributed proportionally across chromosomes and
+    /// constructs both the locus list and the flattened locus‑allele mapping.
+    ///
+    /// # Overview
+    /// Loci are allocated to chromosomes in proportion to their physical lengths.
+    /// Within each chromosome, loci are placed at uniform intervals using:
+    ///
+    /// `step = chromosome_length / loci_on_chromosome`
+    ///
+    /// For each locus:
+    /// - A random number of alleles in `1..=total_alleles` is selected.
+    /// - Allele IDs are sampled uniformly from the global allele registry.
+    /// - The locus width is set to the maximum sequence length among its alleles.
+    ///
+    /// Coordinates are clamped so that `(start, end)` always lies within the
+    /// chromosome boundary. If `start + locus_length` would exceed the chromosome
+    /// length, the locus is shifted left to end exactly at the boundary.
+    ///
+    /// # Output Structures
+    /// Returns:
+    /// - `Vec<Locus>`: physical loci with clamped coordinates and allele sets.
+    /// - `Vec<LocusAllele>`: flattened `(locus_id, allele_id)` pairs suitable
+    ///   for GPU genotype tensor construction.
+    ///
+    /// # Guarantees
+    /// - Total number of loci equals `n`.
+    /// - Every locus has at least one allele.
+    /// - No locus exceeds chromosome boundaries.
+    ///
+    /// # Caveats
+    /// - Chromosomes may receive zero loci if proportional allocation rounds to zero.
+    /// - Loci may overlap if `locus_length > step`, since spacing is uniform but
+    ///   allele sequence lengths vary.
+    ///
+    /// # Parameters
+    /// - `chromosomes`: Chromosome names and lengths.
+    /// - `alleles`: Global allele registry; allele names determine sequence length.
+    /// - `n`: Total number of loci to generate.
+    ///
+    /// # Errors
+    /// Returns an error if the total genome length is insufficient to place `n`
+    /// loci of width `max_allele_length`.
+    pub fn new(chromosomes: &Chromosomes, alleles: &Alleles, n: usize) -> Result<(Vec<Locus>, Vec<LocusAllele>)> {
+        let total_length: usize = chromosomes.lengths.iter().sum();
+        let max_allele_length: usize = alleles.names.iter().map(|x| x.len()).max().unwrap_or(1);
+        ensure!(
+            total_length >= n * max_allele_length,
+            "Requested maximum length (n*max_allele_length={}bp) is greater than the total genome length (chromosomes.lengths.iter().sum()={})!",
+            n * max_allele_length,
+            total_length
+        );
+        let total_alleles: usize = alleles.names.len();
+        let n_chromosomes: usize = chromosomes.chromosomes.len();
+        let mut loci_per_chromosome: Vec<usize> = (0..n_chromosomes)
+            .map(|i| {
+                (((n * max_allele_length * chromosomes.lengths[i]) as f64) / (total_length as f64)).floor() as usize
+            })
+            .collect();
+        let m: usize = loci_per_chromosome.iter().sum();
+        loci_per_chromosome[n_chromosomes - 1] = if m < n {
+            loci_per_chromosome[n_chromosomes - 1] + (n - m)
+        } else {
+            loci_per_chromosome[n_chromosomes - 1]
+        };
+        // This may drop whole chromosomes if they are too small.
+        // Some loci may overlap due to allele sequence lengths.
+        let mut rng = rand::rng();
+        let mut out_loci: Vec<Self> = Vec::with_capacity(n);
+        let mut out_loci_alleles: Vec<LocusAllele> = Vec::with_capacity(n);
+        for i in 0..n_chromosomes {
+            let length: usize = chromosomes.lengths[i];
+            let loci: usize = loci_per_chromosome[i];
+            if loci == 0 {
+                continue;
+            }
+            let step: usize = length / loci;
+            for j in (0..length).step_by(step) {
+                let n_alleles: usize = rng.random_range(1..=total_alleles);
+                let allele_ids: Vec<usize> = (0..n_alleles)
+                    .map(|_| rng.random_range(0..total_alleles))
+                    .collect();
+                let locus_length: usize = allele_ids
+                    .iter()
+                    .map(|&i| alleles.names[i].len())
+                    .max()
+                    .unwrap_or(1);
+                let (start, end) = if (j + locus_length) < chromosomes.lengths[i] {
+                    (j, j + locus_length)
+                } else {
+                    (chromosomes.lengths[i] - locus_length, chromosomes.lengths[i])
+                };
+                out_loci.push(Self {
+                    chromosome_id: i,
+                    start,
+                    end,
+                    allele_ids: allele_ids.clone(),
+                });
+                for a in allele_ids {
+                    out_loci_alleles.push(LocusAllele { locus_id: out_loci.len() - 1, allele_id: a });
+                }
+            }
+        }
+        Ok((out_loci, out_loci_alleles))
+    }
+}
+
 /// The global blueprint of the simulation's genomic architecture.
 ///
 /// ### Breeding Simulation Context:
@@ -175,6 +348,12 @@ pub struct Genome {
     pub loci: Vec<Locus>,
     /// The relational map of all locus-allele combinations (used to decode GPU tensor column indices).
     pub loci_alleles: Vec<LocusAllele>,
+}
+
+impl Genome {
+    pub fn new() -> Result<Self> {
+        todo!()
+    }
 }
 
 /// High-level demographic metadata representing individual animals, plants, or lines.
@@ -274,15 +453,15 @@ mod tests {
 
     #[test]
     fn chromosomes_custom_lengths() -> Result<()> {
-        let chr = Chromosomes::new(3, Some(vec![10, 20, 30]))?;
-        assert_eq!(chr.chromosomes, vec!["chr_0", "chr_1", "chr_2"]);
-        assert_eq!(chr.lengths, vec![10, 20, 30]);
+        let chr = Chromosomes::new(3, Some(&[10, 20, 30]))?;
+        assert_eq!(chr.chromosomes, &["chr_0", "chr_1", "chr_2"]);
+        assert_eq!(chr.lengths, &[10, 20, 30]);
         Ok(())
     }
 
     #[test]
     fn chromosomes_length_mismatch_fails() {
-        let result = Chromosomes::new(3, Some(vec![10, 20]));
+        let result = Chromosomes::new(3, Some(&[10, 20]));
         assert!(result.is_err());
     }
 
@@ -301,7 +480,7 @@ mod tests {
     #[test]
     fn alleles_default_n_leq_5() -> Result<()> {
         let a = Alleles::new(5, None)?;
-        assert_eq!(a.names, vec!["A", "T", "C", "G", "DEL"]);
+        assert_eq!(a.names, &["A", "T", "C", "G", "D"]);
         Ok(())
     }
 
@@ -310,7 +489,7 @@ mod tests {
         let a = Alleles::new(10, None)?;
         assert_eq!(
             a.names,
-            vec!["A", "T", "C", "G", "DEL", "TA", "TT", "TC", "TG", "TDEL"]
+            &["A", "T", "C", "G", "D", "TA", "TT", "TC", "TG", "TDEL"]
         );
         Ok(())
     }
@@ -319,22 +498,22 @@ mod tests {
     fn alleles_default_n_20() -> Result<()> {
         let a = Alleles::new(20, None)?;
         // Check first 5 and last 5 only
-        assert_eq!(&a.names[..5], &["A", "T", "C", "G", "DEL"]);
+        assert_eq!(&a.names[..5], &["A", "T", "C", "G", "D"]);
         assert_eq!(&a.names[15..20], &["GA", "GT", "GC", "GG", "GDEL"]);
         Ok(())
     }
 
     #[test]
     fn alleles_custom_names() -> Result<()> {
-        let custom = vec!["X".into(), "Y".into(), "Z".into()];
-        let a = Alleles::new(3, Some(custom.clone()))?;
+        let custom = &["X".into(), "Y".into(), "Z".into()];
+        let a = Alleles::new(3, Some(custom))?;
         assert_eq!(a.names, custom);
         Ok(())
     }
 
     #[test]
     fn alleles_custom_name_length_mismatch_fails() {
-        let result = Alleles::new(3, Some(vec!["A".into(), "B".into()]));
+        let result = Alleles::new(3, Some(&["A".into(), "B".into()]));
         assert!(result.is_err());
     }
 

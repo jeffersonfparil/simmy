@@ -69,12 +69,12 @@ mod tests {
     #[test]
     fn test_slice_mut_1d() -> Result<()> {
         let ctx = context();
-        let data = vec![10.0f32, 11.0, 12.0, 13.0, 14.0];
+        let data = &[10.0f32, 11.0, 12.0, 13.0, 14.0];
         // Correct shape for 1D tensor with 5 elements
-        let mut tensor = GpuTensor::from_f32(&ctx, &data, vec![5], None, None)?;
+        let mut tensor = GpuTensor::from_f32(&ctx, data, &[5], None, None)?;
         tensor.slice_mut(&[(1, 4)])?;
-        assert_eq!(tensor.shape, vec![3]); // 4 - 1 = 3
-        assert_eq!(tensor.strides, vec![1]); // row-major 1D stride
+        assert_eq!(tensor.shape, &[3]); // 4 - 1 = 3
+        assert_eq!(tensor.strides, &[1]); // row-major 1D stride
         assert_eq!(tensor.offset, 1); // start * stride = 1 * 1
         Ok(())
     }
@@ -86,11 +86,11 @@ mod tests {
         let ctx = context();
         let data: Vec<f32> = (0..12).map(|x| x as f32).collect();
         // Correct shape: 3 rows × 4 columns
-        let mut tensor = GpuTensor::from_f32(&ctx, &data, vec![3, 4], None, None)?;
+        let mut tensor = GpuTensor::from_f32(&ctx, &data, &[3, 4], None, None)?;
         // Slice rows [1,3) and cols [1,3)
         tensor.slice_mut(&[(1, 3), (1, 3)])?;
-        assert_eq!(tensor.shape, vec![2, 2]); // (3-1, 3-1)
-        assert_eq!(tensor.strides, vec![4, 1]); // row-major: row stride = 4, col stride = 1
+        assert_eq!(tensor.shape, &[2, 2]); // (3-1, 3-1)
+        assert_eq!(tensor.strides, &[4, 1]); // row-major: row stride = 4, col stride = 1
         assert_eq!(tensor.offset, 5); // 1*4 + 1*1 = 5
         Ok(())
     }
@@ -102,11 +102,11 @@ mod tests {
         let ctx = context();
         let data: Vec<f32> = (0..24).map(|x| x as f32).collect();
         // Correct shape: 2 × 3 × 4
-        let mut tensor = GpuTensor::from_f32(&ctx, &data, vec![2, 3, 4], None, None)?;
+        let mut tensor = GpuTensor::from_f32(&ctx, &data, &[2, 3, 4], None, None)?;
         // Slice: axis0 [1,2), axis1 [0,2), axis2 [1,4)
         tensor.slice_mut(&[(1, 2), (0, 2), (1, 4)])?;
-        assert_eq!(tensor.shape, vec![1, 2, 3]); // (2-1, 2-0, 4-1)
-        assert_eq!(tensor.strides, vec![12, 4, 1]); // row-major: [3*4, 4, 1]
+        assert_eq!(tensor.shape, &[1, 2, 3]); // (2-1, 2-0, 4-1)
+        assert_eq!(tensor.strides, &[12, 4, 1]); // row-major: [3*4, 4, 1]
         // offset = 1*12 + 0*4 + 1*1 = 13
         assert_eq!(tensor.offset, 13);
         Ok(())
@@ -118,13 +118,13 @@ mod tests {
     fn test_slice_view_shares_buffer() -> Result<()> {
         let ctx = context();
         let data: Vec<f32> = (0..12).map(|x| x as f32).collect();
-        let parent = GpuTensor::from_f32(&ctx, &data, vec![3, 4], None, None)?;
+        let parent = GpuTensor::from_f32(&ctx, &data, &[3, 4], None, None)?;
         let view = parent.slice_view(&[(1, 3), (1, 3)])?;
         // Parent unchanged
-        assert_eq!(parent.shape, vec![3, 4]);
+        assert_eq!(parent.shape, &[3, 4]);
         assert_eq!(parent.offset, 0);
         // View sliced correctly
-        assert_eq!(view.shape, vec![2, 2]);
+        assert_eq!(view.shape, &[2, 2]);
         assert_eq!(view.offset, 5);
         // Shared buffer
         assert_eq!(parent.buffer.size(), view.buffer.size());
@@ -136,8 +136,8 @@ mod tests {
     #[test]
     fn test_slice_validation_checks() {
         let ctx = context();
-        let data = vec![0.0f32; 12];
-        let mut tensor = GpuTensor::from_f32(&ctx, &data, vec![3, 4], None, None).unwrap();
+        let data = &[0.0f32; 12];
+        let mut tensor = GpuTensor::from_f32(&ctx, data, &[3, 4], None, None).unwrap();
         // Rank mismatch
         assert!(tensor.slice_mut(&[(0, 2)]).is_err());
         // start > end
