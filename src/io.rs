@@ -99,7 +99,7 @@ impl Chromosomes {
 #[derive(Debug, Clone)]
 pub struct Alleles {
     /// String representations of the allele sequences (e.g., "A", "T", "D", "GATGCGC").
-    pub names: Vec<String>,
+    pub sequences: Vec<String>,
 }
 
 const SNPS: &[&str] = &["A", "T", "C", "G", "D"];
@@ -108,10 +108,10 @@ impl Alleles {
     /// Constructs an `Alleles` registry containing `n` unique allele sequence names.
     ///
     /// # Overview
-    /// If `names` is provided, the constructor copies the supplied slice of `&str`
+    /// If `sequences` is provided, the constructor copies the supplied slice of `&str`
     /// into an owned `Vec<String>` and verifies that its length matches `n`.
     ///
-    /// If `names` is `None`, allele names are generated automatically using a
+    /// If `sequences` is `None`, allele sequences are generated automatically using a
     /// little‑endian base‑`SNPS.len()` encoding over the SNP alphabet `SNPS = ["A","T","C","G","D"]`.
     /// This produces deterministic, unique allele strings such as:
     ///
@@ -125,30 +125,30 @@ impl Alleles {
     /// yield a big‑endian human‑readable allele string.
     ///
     /// # Validation
-    /// - Ensures `names.len() == n`.
-    /// - Ensures all allele names are unique by lexicographically sorting indices and
+    /// - Ensures `sequences.len() == n`.
+    /// - Ensures all allele sequences are unique by lexicographically sorting indices and
     ///   checking adjacent entries for equality.
     ///
     /// # Parameters
     /// - `n`: Number of alleles to construct.
-    /// - `names`: Optional slice of allele names. If `None`, names are generated.
+    /// - `sequences`: Optional slice of allele sequences. If `None`, sequences are generated.
     ///
     /// # Returns
-    /// A fully validated `Alleles` instance containing `n` unique allele names.
+    /// A fully validated `Alleles` instance containing `n` unique allele sequences.
     ///
     /// # Errors
     /// Returns an error if:
-    /// - The number of provided names does not equal `n`.
+    /// - The number of provided sequences does not equal `n`.
     /// - Any duplicate allele name is detected after sorting.
-    pub fn new(n: usize, names: Option<&[&str]>) -> Result<Self> {
-        let names = match names {
+    pub fn new(n: usize, sequences: Option<&[&str]>) -> Result<Self> {
+        let sequences = match sequences {
             Some(x) => x.iter().map(|&xi| xi.to_owned()).collect::<Vec<String>>(),
             None => {
-                let mut names: Vec<String> = Vec::with_capacity(n);
-                // For n <= 5: names  in &["A", "T", "C", "G", "D"]
-                // For n <= 10: names in &["A", "T", "C", "G", "D", "TA", "TT", "TC", "TG", "TD"]
-                // For n <= 15: names in &["A", "T", "C", "G", "D", "TA", "TT", "TC", "TG", "TD", "CA", "CT", "CC", "CG", "CD"]
-                // For n <= 20: names in &["A", "T", "C", "G", "D", "TA", "TT", "TC", "TG", "TD", "CA", "CT", "CC", "CG", "CD", "GA", "GT", "GC", "GG", "GD"]
+                let mut sequences: Vec<String> = Vec::with_capacity(n);
+                // For n <= 5: sequences  in &["A", "T", "C", "G", "D"]
+                // For n <= 10: sequences in &["A", "T", "C", "G", "D", "TA", "TT", "TC", "TG", "TD"]
+                // For n <= 15: sequences in &["A", "T", "C", "G", "D", "TA", "TT", "TC", "TG", "TD", "CA", "CT", "CC", "CG", "CD"]
+                // For n <= 20: sequences in &["A", "T", "C", "G", "D", "TA", "TT", "TC", "TG", "TD", "CA", "CT", "CC", "CG", "CD", "GA", "GT", "GC", "GG", "GD"]
                 // i.e. little-endian generation because this is simpler than the big-endian
                 for i in 0..n {
                     let mut name_components: Vec<&str> = Vec::new();
@@ -162,29 +162,29 @@ impl Alleles {
                         }
                     }
                     name_components.reverse();
-                    names.push(name_components.join(""));
+                    sequences.push(name_components.join(""));
                 }
-                names
+                sequences
             }
         };
         ensure!(
-            n == names.len(),
-            "The numbe of names (n={}) and names (n={}) must match!",
+            n == sequences.len(),
+            "The number of requested sequences (n={}) and sequences (sequences.len()={}) must match!",
             n,
-            names.len()
+            sequences.len()
         );
         let mut perm: Vec<usize> = (0..n).collect();
-        perm.sort_by_key(|&i| names[i].to_owned());
+        perm.sort_by_key(|&i| sequences[i].to_owned());
         for i in 1..n {
             let idx_0 = perm[i - 1];
             let idx_1 = perm[i];
             ensure!(
-                names[idx_0] != names[idx_1],
+                sequences[idx_0] != sequences[idx_1],
                 "Duplicated allele: {}!",
-                names[idx_0]
+                sequences[idx_0]
             );
         }
-        Ok(Self { names })
+        Ok(Self { sequences })
     }
 }
 
@@ -274,14 +274,14 @@ impl Locus {
         seed: usize,
     ) -> Result<(Vec<Locus>, Vec<LocusAllele>)> {
         let total_length: usize = chromosomes.lengths.iter().sum();
-        let max_allele_length: usize = alleles.names.iter().map(|x| x.len()).max().unwrap_or(1);
+        let max_allele_length: usize = alleles.sequences.iter().map(|x| x.len()).max().unwrap_or(1);
         ensure!(
             total_length >= n * max_allele_length,
             "Requested maximum length (n*max_allele_length={}bp) is greater than the total genome length (chromosomes.lengths.iter().sum()={})!",
             n * max_allele_length,
             total_length
         );
-        let total_alleles: usize = alleles.names.len();
+        let total_alleles: usize = alleles.sequences.len();
         let n_chromosomes: usize = chromosomes.chromosomes.len();
         let mut loci_per_chromosome: Vec<usize> = (0..n_chromosomes)
             .map(|i| {
@@ -318,7 +318,7 @@ impl Locus {
                     .collect();
                 let locus_length: usize = allele_ids
                     .iter()
-                    .map(|&i| alleles.names[i].len())
+                    .map(|&i| alleles.sequences[i].len())
                     .max()
                     .unwrap_or(1);
                 let (start, end) = if (j + locus_length) < chromosomes.lengths[i] {
@@ -489,14 +489,14 @@ mod tests {
     #[test]
     fn alleles_default_n_leq_5() -> Result<()> {
         let a = Alleles::new(5, None)?;
-        assert_eq!(a.names, &["A", "T", "C", "G", "D"]);
+        assert_eq!(a.sequences, &["A", "T", "C", "G", "D"]);
         Ok(())
     }
     #[test]
     fn alleles_default_n_10() -> Result<()> {
         let a = Alleles::new(10, None)?;
         assert_eq!(
-            a.names,
+            a.sequences,
             &["A", "T", "C", "G", "D", "TA", "TT", "TC", "TG", "TD"]
         );
         Ok(())
@@ -505,15 +505,15 @@ mod tests {
     fn alleles_default_n_20() -> Result<()> {
         let a = Alleles::new(20, None)?;
         // Check first 5 and last 5 only
-        assert_eq!(&a.names[..5], &["A", "T", "C", "G", "D"]);
-        assert_eq!(&a.names[15..20], &["GA", "GT", "GC", "GG", "GD"]);
+        assert_eq!(&a.sequences[..5], &["A", "T", "C", "G", "D"]);
+        assert_eq!(&a.sequences[15..20], &["GA", "GT", "GC", "GG", "GD"]);
         Ok(())
     }
     #[test]
     fn alleles_custom_names() -> Result<()> {
         let custom = &["X", "Y", "Z"];
         let a = Alleles::new(3, Some(custom))?;
-        assert_eq!(a.names, custom);
+        assert_eq!(a.sequences, custom);
         Ok(())
     }
     #[test]
@@ -524,18 +524,18 @@ mod tests {
     #[test]
     fn alleles_no_duplicates() -> Result<()> {
         let a = Alleles::new(50, None)?;
-        let mut sorted = a.names.clone();
+        let mut sorted = a.sequences.clone();
         sorted.sort();
         sorted.dedup();
-        assert_eq!(sorted.len(), a.names.len());
+        assert_eq!(sorted.len(), a.sequences.len());
         Ok(())
     }
     #[test]
     fn alleles_large_n() -> Result<()> {
         let a = Alleles::new(500, None)?;
-        assert_eq!(a.names.len(), 500);
+        assert_eq!(a.sequences.len(), 500);
         // Check that the last allele is multi-character
-        assert!(a.names[499].len() >= 3);
+        assert!(a.sequences[499].len() >= 3);
         Ok(())
     }
     //////////////////////////////
@@ -567,7 +567,7 @@ mod tests {
             let expected_len = locus
                 .allele_ids
                 .iter()
-                .map(|&i| alleles.names[i].len())
+                .map(|&i| alleles.sequences[i].len())
                 .max()
                 .unwrap();
 
@@ -583,7 +583,7 @@ mod tests {
         assert_eq!(locus_alleles.len(), expected_count);
         for la in &locus_alleles {
             assert!(la.locus_id < loci.len());
-            assert!(la.allele_id < alleles.names.len());
+            assert!(la.allele_id < alleles.sequences.len());
         }
         for (locus_id, locus) in loci.iter().enumerate() {
             let mapped: Vec<usize> = locus_alleles
