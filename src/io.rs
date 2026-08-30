@@ -48,29 +48,39 @@ impl Chromosomes {
     /// If `lengths` is provided, the slice is copied into an owned `Vec<usize>` and
     /// validated to ensure its length matches `n`.
     ///
-    /// If `lengths` is `None`, all chromosomes are assigned a default length of
-    /// `1_000_000` base pairs.
+    /// If `lengths` is `None`, all chromosomes are assigned a default physical length
+    /// of `1_000_000` base pairs.
     ///
-    /// Chromosome names are automatically generated in the form `"chr_<i>"` for
-    /// `i = 0..n`, producing deterministic identifiers such as `chr_0`, `chr_1`,
-    /// ..., `chr_{n-1}`.
+    /// Chromosome names are generated deterministically using zero‑padded numeric
+    /// formatting. The padding width is derived from `n - 1`, ensuring consistent
+    /// identifier width across all chromosomes. For example:
+    ///
+    /// - `n = 3`  → names: `"chr_0"`, `"chr_1"`, `"chr_2"`
+    /// - `n = 12` → names: `"chr_00"`, `"chr_01"`, ..., `"chr_11"`
+    ///
+    /// This padding guarantees lexicographically ordered chromosome identifiers,
+    /// which simplifies downstream metadata sorting and GPU tensor indexing.
     ///
     /// # Parameters
-    /// - `n`: Number of chromosomes to construct.
+    /// - `n`: Number of chromosomes to construct. Must be non‑zero.
     /// - `lengths`: Optional slice of chromosome lengths. If `None`, all lengths
     ///   default to `1_000_000`.
     ///
     /// # Returns
     /// A `Chromosomes` instance containing:
-    /// - `chromosomes`: names `"chr_0"` through `"chr_{n-1}"`,
+    /// - `chromosomes`: zero‑padded names `"chr_<i>"`,
     /// - `lengths`: validated or default chromosome lengths.
     ///
     /// # Validation
+    /// - Ensures `n > 0`.
     /// - Ensures `lengths.len() == n`.
     ///
     /// # Errors
-    /// Returns an error if the number of provided lengths does not equal `n`.
+    /// Returns an error if:
+    /// - `n == 0`,
+    /// - The number of provided lengths does not equal `n`.
     pub fn new(n: usize, lengths: Option<&[usize]>) -> Result<Self> {
+        ensure!(n > 0, "Number of chromosomes need to non-zero!");
         let lengths = match lengths {
             Some(x) => x.to_vec(),
             None => vec![1_000_000; n],
@@ -81,7 +91,8 @@ impl Chromosomes {
             n,
             lengths.len()
         );
-        let chromosomes: Vec<String> = (0..n).map(|i| format!("chr_{}", i)).collect();
+        let n_digits: usize = format!("{}", n - 1).len();
+        let chromosomes: Vec<String> = (0..n).map(|i| format!("chr_{:0>n_digits$}", i)).collect();
         Ok(Self {
             chromosomes,
             lengths,
@@ -138,9 +149,11 @@ impl Alleles {
     ///
     /// # Errors
     /// Returns an error if:
+    /// - `n == 0`,
     /// - The number of provided sequences does not equal `n`.
     /// - Any duplicate allele name is detected after sorting.
     pub fn new(n: usize, sequences: Option<&[&str]>) -> Result<Self> {
+        ensure!(n > 0, "Number of alleles need to non-zero!");
         let sequences = match sequences {
             Some(x) => x.iter().map(|&xi| xi.to_owned()).collect::<Vec<String>>(),
             None => {
@@ -265,14 +278,16 @@ impl Locus {
     /// - `n`: Total number of loci to generate.
     ///
     /// # Errors
-    /// Returns an error if the total genome length is insufficient to place `n`
-    /// loci of width `max_allele_length`.
+    /// Returns an error if:
+    /// - `n == 0`,
+    /// - total genome length is insufficient to place `n` loci of width `max_allele_length`.
     pub fn new(
         chromosomes: &Chromosomes,
         alleles: &Alleles,
         n: usize,
         seed: usize,
     ) -> Result<(Vec<Locus>, Vec<LocusAllele>)> {
+        ensure!(n > 0, "Number of loci need to non-zero!");
         let total_length: usize = chromosomes.lengths.iter().sum();
         let max_allele_length: usize = alleles.sequences.iter().map(|x| x.len()).max().unwrap_or(1);
         ensure!(
@@ -443,11 +458,143 @@ pub struct Entries {
     /// Taxonomic classification (e.g., species or subspecies) for multi-species scenarios.
     pub species: Vec<String>,
     /// Breeding cohort or origin group identifier (e.g., "Founder_A", "Cycle_5").
-    pub population: Vec<String>,
+    pub populations: Vec<String>,
     /// User-defined categorization, breeding tiers, or selection groups.
-    pub classification: Vec<String>,
+    pub classifications: Vec<String>,
     /// Arbitrary historical logs, pedigree descriptions, or metadata notes.
     pub notes: Vec<String>,
+}
+
+impl Entries {
+    /// Constructs an `Entries` struct containing demographic metadata for `n` individuals.
+    ///
+    /// # Overview
+    /// This constructor builds five parallel metadata vectors:
+    /// - `names`
+    /// - `species`
+    /// - `populations`
+    /// - `classifications`
+    /// - `notes`
+    ///
+    /// Each vector is guaranteed to have length `n`, ensuring strict struct‑of‑arrays
+    /// (SoA) alignment. When optional slices are provided, they are copied verbatim
+    /// into owned `Vec<String>` values.
+    ///
+    /// When a field is `None`, a deterministic, zero‑padded default is generated.
+    /// The padding width is derived from `n - 1`, ensuring consistent formatting
+    /// across all identifiers. For example:
+    ///
+    /// - `n = 3`  → `"entry_0"`, `"entry_1"`, `"entry_2"`
+    /// - `n = 12` → `"entry_00"`, `"entry_01"`, ..., `"entry_11"`
+    ///
+    /// The same padding rule applies to:
+    /// - `names`: `"entry_<i>"`
+    /// - `species`: `"species_<i>"`
+    /// - `populations`: `"population_<i>"`
+    /// - `classifications`: `"classification_<i>"`
+    ///
+    /// Notes default to empty strings.
+    ///
+    /// These defaults provide meaningful semantic labels for debugging, cohort slicing,
+    /// and metadata inspection while maintaining deterministic reproducibility.
+    ///
+    /// # Determinism
+    /// All default values are generated deterministically based on `n`. This ensures
+    /// reproducible cohort construction and stable indexing across simulation runs.
+    ///
+    /// # Parameters
+    /// - `n`: Number of entries to construct. Must be non‑zero.
+    /// - `names`: Optional slice of entry names.
+    /// - `species`: Optional slice of species identifiers.
+    /// - `populations`: Optional slice of population or cohort identifiers.
+    /// - `classifications`: Optional slice of breeding tier or category labels.
+    /// - `notes`: Optional slice of free‑form metadata notes.
+    ///
+    /// # Returns
+    /// A fully validated `Entries` struct with all five metadata vectors aligned by index.
+    ///
+    /// # Validation
+    /// - Ensures `n > 0`.
+    /// - Ensures each provided slice has length `n`.
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// - `n == 0`,
+    /// - Any provided slice does not have length `n`.
+    pub fn new(
+        n: usize,
+        names: Option<&[&str]>,
+        species: Option<&[&str]>,
+        populations: Option<&[&str]>,
+        classifications: Option<&[&str]>,
+        notes: Option<&[&str]>,
+    ) -> Result<Self> {
+        ensure!(n > 0, "Number of entries need to non-zero!");
+        let n_digits: usize = format!("{}", n - 1).len();
+        let names: Vec<String> = match names {
+            Some(x) => x.iter().map(|&x| x.to_owned()).collect(),
+            None => (0..n).map(|x| format!("entry_{:0>n_digits$}", x)).collect(),
+        };
+        let species: Vec<String> = match species {
+            Some(x) => x.iter().map(|&x| x.to_owned()).collect(),
+            None => (0..n)
+                .map(|x| format!("species_{:0>n_digits$}", x))
+                .collect(),
+        };
+        let populations: Vec<String> = match populations {
+            Some(x) => x.iter().map(|&x| x.to_owned()).collect(),
+            None => (0..n)
+                .map(|x| format!("population_{:0>n_digits$}", x))
+                .collect(),
+        };
+        let classifications: Vec<String> = match classifications {
+            Some(x) => x.iter().map(|&x| x.to_owned()).collect(),
+            None => (0..n)
+                .map(|x| format!("classification_{:0>n_digits$}", x))
+                .collect(),
+        };
+        let notes: Vec<String> = match notes {
+            Some(x) => x.iter().map(|&x| x.to_owned()).collect(),
+            None => vec!["".to_owned(); n],
+        };
+        ensure!(
+            n == names.len(),
+            "The expected number of entries (n={}) does not match the names (names.len()={})!",
+            n,
+            names.len()
+        );
+        ensure!(
+            n == species.len(),
+            "The expected number of entries (n={}) does not match the species (species.len()={})!",
+            n,
+            species.len()
+        );
+        ensure!(
+            n == populations.len(),
+            "The expected number of entries (n={}) does not match the populations (populations.len()={})!",
+            n,
+            populations.len()
+        );
+        ensure!(
+            n == classifications.len(),
+            "The expected number of entries (n={}) does not match the classifications (classifications.len()={})!",
+            n,
+            classifications.len()
+        );
+        ensure!(
+            n == notes.len(),
+            "The expected number of entries (n={}) does not match the notes (notes.len()={})!",
+            n,
+            notes.len()
+        );
+        Ok(Self {
+            names,
+            species,
+            populations,
+            classifications,
+            notes,
+        })
+    }
 }
 
 /// Metadata describing quantitative traits under selection.
@@ -462,6 +609,77 @@ pub struct Traits {
     pub names: Vec<String>,
     /// Descriptions of genetic parameters, heritabilities, or breeding objectives.
     pub notes: Vec<String>,
+}
+
+impl Traits {
+    /// Constructs a `Traits` struct containing metadata for `n` quantitative traits.
+    ///
+    /// # Overview
+    /// This constructor builds two parallel metadata vectors:
+    /// - `names`
+    /// - `notes`
+    ///
+    /// Each vector is guaranteed to have length `n`, ensuring strict struct‑of‑arrays
+    /// (SoA) alignment. When optional slices are provided, they are copied verbatim
+    /// into owned `Vec<String>` values.
+    ///
+    /// When `names` is `None`, deterministic zero‑padded identifiers are generated.
+    /// The padding width is derived from `n - 1`, ensuring consistent formatting
+    /// across all trait names. For example:
+    ///
+    /// - `n = 3`  → `"trait_0"`, `"trait_1"`, `"trait_2"`
+    /// - `n = 12` → `"trait_00"`, `"trait_01"`, ..., `"trait_11"`
+    ///
+    /// Notes default to empty strings.
+    ///
+    /// These defaults provide meaningful semantic labels for debugging, trait indexing,
+    /// and multi‑trait selection workflows while maintaining deterministic reproducibility.
+    ///
+    /// # Determinism
+    /// All default values are generated deterministically based on `n`. This ensures
+    /// reproducible trait‑set construction and stable indexing across simulation runs.
+    ///
+    /// # Parameters
+    /// - `n`: Number of traits to construct. Must be non‑zero.
+    /// - `names`: Optional slice of trait names.
+    /// - `notes`: Optional slice of trait descriptions or metadata.
+    ///
+    /// # Returns
+    /// A fully validated `Traits` struct with `names` and `notes` aligned by index.
+    ///
+    /// # Validation
+    /// - Ensures `n > 0`.
+    /// - Ensures each provided slice has length `n`.
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// - `n == 0`,
+    /// - `names` or `notes` is provided with a length different from `n`.
+    pub fn new(n: usize, names: Option<&[&str]>, notes: Option<&[&str]>) -> Result<Self> {
+        ensure!(n > 0, "Number of traits need to non-zero!");
+        let n_digits: usize = format!("{}", n - 1).len();
+        let names: Vec<String> = match names {
+            Some(x) => x.iter().map(|&x| x.to_owned()).collect(),
+            None => (0..n).map(|x| format!("trait_{:0>n_digits$}", x)).collect(),
+        };
+        let notes: Vec<String> = match notes {
+            Some(x) => x.iter().map(|&x| x.to_owned()).collect(),
+            None => vec!["".to_owned(); n],
+        };
+        ensure!(
+            n == names.len(),
+            "The expected number of traits (n={}) does not match the names (names.len()={})!",
+            n,
+            names.len()
+        );
+        ensure!(
+            n == notes.len(),
+            "The expected number of traits (n={}) does not match the notes (notes.len()={})!",
+            n,
+            notes.len()
+        );
+        Ok(Self { names, notes })
+    }
 }
 
 /// The primary GPU-backed genotype representation for high-throughput computing.
@@ -535,9 +753,8 @@ mod tests {
     }
     #[test]
     fn chromosomes_zero_n() -> Result<()> {
-        let chr = Chromosomes::new(0, None)?;
-        assert!(chr.chromosomes.is_empty());
-        assert!(chr.lengths.is_empty());
+        let result = Chromosomes::new(0, None);
+        assert!(result.is_err());
         Ok(())
     }
     //////////////////////////////
@@ -705,5 +922,224 @@ mod tests {
             assert!(la.allele_id < genome.alleles.sequences.len());
             assert!(genome.loci[la.locus_id].allele_ids.contains(&la.allele_id));
         }
+    }
+    #[test]
+    fn test_genome_invariants() {
+        let genome = Genome::new(4, Some(&[150, 250, 350, 450]), 12, None, 20, 999).unwrap();
+        // Invariant 1: All loci reference valid chromosomes
+        for locus in &genome.loci {
+            assert!(locus.chromosome_id < genome.chromosomes.chromosomes.len());
+        }
+        // Invariant 2: No locus has zero alleles
+        for locus in &genome.loci {
+            assert!(!locus.allele_ids.is_empty());
+        }
+        // Invariant 3: No locus exceeds chromosome boundaries
+        for locus in &genome.loci {
+            let chr_len = genome.chromosomes.lengths[locus.chromosome_id];
+            assert!(locus.start < chr_len);
+            assert!(locus.end <= chr_len);
+        }
+        // Invariant 4: Flattened mapping is complete
+        let expected_flat: usize = genome.loci.iter().map(|l| l.allele_ids.len()).sum();
+        assert_eq!(genome.loci_alleles.len(), expected_flat);
+    }
+    #[test]
+    fn test_genome_regression_snapshot() {
+        let genome = Genome::new(3, Some(&[100, 200, 300]), 5, None, 10, 42).unwrap();
+        // Snapshot: chromosome lengths
+        assert_eq!(genome.chromosomes.lengths, vec![100, 200, 300]);
+        // Snapshot: first locus
+        let first = &genome.loci[0];
+        assert_eq!(first.chromosome_id, 0);
+        assert_eq!(first.start, 0);
+        assert_eq!(
+            first.end,
+            first
+                .allele_ids
+                .iter()
+                .map(|&i| genome.alleles.sequences[i].len())
+                .max()
+                .unwrap()
+        );
+        // Snapshot: first locus allele IDs
+        assert_eq!(first.allele_ids, vec![3, 0]); // deterministic under seed 12345
+    }
+    //////////////////////////////
+    // Entries
+    //////////////////////////////
+    #[test]
+    fn test_entries_new_defaults() {
+        let entries = Entries::new(11, None, None, None, None, None).unwrap();
+        // n = 11 → n_digits = len("10") = 2 → 00, 01, ..., 10
+        assert_eq!(
+            entries.names,
+            vec![
+                "entry_00", "entry_01", "entry_02", "entry_03", "entry_04", "entry_05", "entry_06",
+                "entry_07", "entry_08", "entry_09", "entry_10"
+            ]
+        );
+        assert_eq!(
+            entries.species,
+            vec![
+                "species_00",
+                "species_01",
+                "species_02",
+                "species_03",
+                "species_04",
+                "species_05",
+                "species_06",
+                "species_07",
+                "species_08",
+                "species_09",
+                "species_10"
+            ]
+        );
+        assert_eq!(
+            entries.populations,
+            vec![
+                "population_00",
+                "population_01",
+                "population_02",
+                "population_03",
+                "population_04",
+                "population_05",
+                "population_06",
+                "population_07",
+                "population_08",
+                "population_09",
+                "population_10"
+            ]
+        );
+        assert_eq!(
+            entries.classifications,
+            vec![
+                "classification_00",
+                "classification_01",
+                "classification_02",
+                "classification_03",
+                "classification_04",
+                "classification_05",
+                "classification_06",
+                "classification_07",
+                "classification_08",
+                "classification_09",
+                "classification_10"
+            ]
+        );
+        assert_eq!(entries.notes, vec![""; 11]);
+    }
+    #[test]
+    fn test_entries_new_with_provided_fields() {
+        let names = ["A", "B", "C"];
+        let species = ["dog", "cat", "horse"];
+        let populations = ["founder", "F1", "F2"];
+        let classifications = ["elite", "candidate", "discard"];
+        let notes = ["note1", "note2", "note3"];
+        let entries = Entries::new(
+            3,
+            Some(&names),
+            Some(&species),
+            Some(&populations),
+            Some(&classifications),
+            Some(&notes),
+        )
+        .unwrap();
+        assert_eq!(entries.names, vec!["A", "B", "C"]);
+        assert_eq!(entries.species, vec!["dog", "cat", "horse"]);
+        assert_eq!(entries.populations, vec!["founder", "F1", "F2"]);
+        assert_eq!(
+            entries.classifications,
+            vec!["elite", "candidate", "discard"]
+        );
+        assert_eq!(entries.notes, vec!["note1", "note2", "note3"]);
+    }
+    #[test]
+    fn test_entries_new_mixed_fields() {
+        let names = ["X", "Y"];
+        let notes = ["alpha", "beta"];
+        let entries = Entries::new(2, Some(&names), None, None, None, Some(&notes)).unwrap();
+        assert_eq!(entries.names, vec!["X", "Y"]);
+        assert_eq!(entries.species, vec!["species_0", "species_1"]);
+        assert_eq!(entries.populations, vec!["population_0", "population_1"]);
+        assert_eq!(
+            entries.classifications,
+            vec!["classification_0", "classification_1"]
+        );
+        assert_eq!(entries.notes, vec!["alpha", "beta"]);
+    }
+    #[test]
+    fn test_entries_new_length_mismatch() {
+        let names = ["A", "B", "C"]; // length 3
+        let err = Entries::new(
+            2,            // n = 2
+            Some(&names), // length mismatch
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(err.is_err());
+    }
+    #[test]
+    fn test_entries_new_default_formatting() {
+        let entries = Entries::new(12, None, None, None, None, None).unwrap();
+        // 12 → n_digits = 2
+        assert_eq!(entries.names[0], "entry_00");
+        assert_eq!(entries.names[11], "entry_11");
+        assert_eq!(entries.species[11], "species_11");
+        assert_eq!(entries.populations[11], "population_11");
+        assert_eq!(entries.classifications[11], "classification_11");
+    }
+    //////////////////////////////
+    // Traits
+    //////////////////////////////
+    #[test]
+    fn test_traits_new_defaults() {
+        // n = 11 → n_digits = len("10") = 2 → 00..10
+        let traits = Traits::new(11, None, None).unwrap();
+        assert_eq!(
+            traits.names,
+            vec![
+                "trait_00", "trait_01", "trait_02", "trait_03", "trait_04", "trait_05", "trait_06",
+                "trait_07", "trait_08", "trait_09", "trait_10"
+            ]
+        );
+        assert_eq!(traits.notes, vec![""; 11]);
+    }
+    #[test]
+    fn test_traits_new_with_provided_fields() {
+        let names = ["yield", "height", "protein"];
+        let notes = ["kg/ha", "cm", "percent"];
+        let traits = Traits::new(3, Some(&names), Some(&notes)).unwrap();
+        assert_eq!(traits.names, vec!["yield", "height", "protein"]);
+        assert_eq!(traits.notes, vec!["kg/ha", "cm", "percent"]);
+    }
+    #[test]
+    fn test_traits_new_mixed_fields() {
+        let names = ["traitA", "traitB"];
+        let traits = Traits::new(2, Some(&names), None).unwrap();
+        assert_eq!(traits.names, vec!["traitA", "traitB"]);
+        assert_eq!(traits.notes, vec!["", ""]);
+    }
+    #[test]
+    fn test_traits_new_length_mismatch() {
+        let names = ["A", "B", "C"]; // length 3
+        let result = Traits::new(2, Some(&names), None);
+        assert!(result.is_err());
+    }
+    #[test]
+    fn test_traits_new_zero_n() {
+        let result = Traits::new(0, None, None);
+        assert!(result.is_err());
+    }
+    #[test]
+    fn test_traits_new_padding_width() {
+        // n = 100 → n_digits = len("99") = 2 → trait_00..trait_99
+        let traits = Traits::new(100, None, None).unwrap();
+        assert_eq!(traits.names[0], "trait_00");
+        assert_eq!(traits.names[9], "trait_09");
+        assert_eq!(traits.names[10], "trait_10");
+        assert_eq!(traits.names[99], "trait_99");
     }
 }
