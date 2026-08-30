@@ -92,7 +92,7 @@ impl Chromosomes {
 ///
 /// ### Breeding Simulation Context:
 /// This acts as a centralized registry for any physical allele represented in the pool—ranging
-/// from single-nucleotide polymorphisms (SNPs) to complex insertions, deletions (DEL),
+/// from single-nucleotide polymorphisms (SNPs) to complex insertions, deletions (D),
 /// and large structural variants. It decouples descriptive string-based sequence data
 /// from the active, high-speed numeric matrices running on the GPU.
 #[derive(Debug, Clone)]
@@ -115,9 +115,9 @@ impl Alleles {
     /// This produces deterministic, unique allele strings such as:
     ///
     /// - `n <= 5`:     A, T, C, G, D
-    /// - `n <= 10`:    A, T, C, G, D, TA, TT, TC, TG, TDEL
-    /// - `n <= 15`:    (previous) + CA, CT, CC, CG, CDEL
-    /// - `n <= 20`:    (previous) + GA, GT, GC, GG, GDEL
+    /// - `n <= 10`:    A, T, C, G, D, TA, TT, TC, TG, TD
+    /// - `n <= 15`:    (previous) + CA, CT, CC, CG, CD
+    /// - `n <= 20`:    (previous) + GA, GT, GC, GG, GD
     ///
     /// The generation rule is effectively a mixed‑radix counter over the SNP alphabet,
     /// where the least‑significant “digit” varies fastest. Components are reversed to
@@ -145,9 +145,9 @@ impl Alleles {
             None => {
                 let mut names: Vec<String> = Vec::with_capacity(n);
                 // For n <= 5: names  in &["A", "T", "C", "G", "D"]
-                // For n <= 10: names in &["A", "T", "C", "G", "D", "TA", "TT", "TC", "TG", "TDEL"]
-                // For n <= 15: names in &["A", "T", "C", "G", "D", "TA", "TT", "TC", "TG", "TDEL", "CA", "CT", "CC", "CG", "CDEL"]
-                // For n <= 20: names in &["A", "T", "C", "G", "D", "TA", "TT", "TC", "TG", "TDEL", "CA", "CT", "CC", "CG", "CDEL", "GA", "GT", "GC", "GG", "GDEL"]
+                // For n <= 10: names in &["A", "T", "C", "G", "D", "TA", "TT", "TC", "TG", "TD"]
+                // For n <= 15: names in &["A", "T", "C", "G", "D", "TA", "TT", "TC", "TG", "TD", "CA", "CT", "CC", "CG", "CD"]
+                // For n <= 20: names in &["A", "T", "C", "G", "D", "TA", "TT", "TC", "TG", "TD", "CA", "CT", "CC", "CG", "CD", "GA", "GT", "GC", "GG", "GD"]
                 // i.e. little-endian generation because this is simpler than the big-endian
                 for i in 0..n {
                     let mut name_components: Vec<&str> = Vec::new();
@@ -223,7 +223,6 @@ pub struct LocusAllele {
     pub allele_id: usize,
 }
 
-
 impl Locus {
     /// Generates `n` loci distributed proportionally across chromosomes and
     /// constructs both the locus list and the flattened locus‑allele mapping.
@@ -267,7 +266,11 @@ impl Locus {
     /// # Errors
     /// Returns an error if the total genome length is insufficient to place `n`
     /// loci of width `max_allele_length`.
-    pub fn new(chromosomes: &Chromosomes, alleles: &Alleles, n: usize) -> Result<(Vec<Locus>, Vec<LocusAllele>)> {
+    pub fn new(
+        chromosomes: &Chromosomes,
+        alleles: &Alleles,
+        n: usize,
+    ) -> Result<(Vec<Locus>, Vec<LocusAllele>)> {
         let total_length: usize = chromosomes.lengths.iter().sum();
         let max_allele_length: usize = alleles.names.iter().map(|x| x.len()).max().unwrap_or(1);
         ensure!(
@@ -280,7 +283,8 @@ impl Locus {
         let n_chromosomes: usize = chromosomes.chromosomes.len();
         let mut loci_per_chromosome: Vec<usize> = (0..n_chromosomes)
             .map(|i| {
-                (((n * max_allele_length * chromosomes.lengths[i]) as f64) / (total_length as f64)).floor() as usize
+                (((n * max_allele_length * chromosomes.lengths[i]) as f64) / (total_length as f64))
+                    .floor() as usize
             })
             .collect();
         let m: usize = loci_per_chromosome.iter().sum();
@@ -294,9 +298,8 @@ impl Locus {
         let mut rng = rand::rng();
         let mut out_loci: Vec<Self> = Vec::with_capacity(n);
         let mut out_loci_alleles: Vec<LocusAllele> = Vec::with_capacity(n);
-        for i in 0..n_chromosomes {
+        for (i, &loci) in loci_per_chromosome.iter().enumerate().take(n_chromosomes) {
             let length: usize = chromosomes.lengths[i];
-            let loci: usize = loci_per_chromosome[i];
             if loci == 0 {
                 continue;
             }
@@ -314,7 +317,10 @@ impl Locus {
                 let (start, end) = if (j + locus_length) < chromosomes.lengths[i] {
                     (j, j + locus_length)
                 } else {
-                    (chromosomes.lengths[i] - locus_length, chromosomes.lengths[i])
+                    (
+                        chromosomes.lengths[i] - locus_length,
+                        chromosomes.lengths[i],
+                    )
                 };
                 out_loci.push(Self {
                     chromosome_id: i,
@@ -323,7 +329,10 @@ impl Locus {
                     allele_ids: allele_ids.clone(),
                 });
                 for a in allele_ids {
-                    out_loci_alleles.push(LocusAllele { locus_id: out_loci.len() - 1, allele_id: a });
+                    out_loci_alleles.push(LocusAllele {
+                        locus_id: out_loci.len() - 1,
+                        allele_id: a,
+                    });
                 }
             }
         }
@@ -489,7 +498,7 @@ mod tests {
         let a = Alleles::new(10, None)?;
         assert_eq!(
             a.names,
-            &["A", "T", "C", "G", "D", "TA", "TT", "TC", "TG", "TDEL"]
+            &["A", "T", "C", "G", "D", "TA", "TT", "TC", "TG", "TD"]
         );
         Ok(())
     }
@@ -499,13 +508,13 @@ mod tests {
         let a = Alleles::new(20, None)?;
         // Check first 5 and last 5 only
         assert_eq!(&a.names[..5], &["A", "T", "C", "G", "D"]);
-        assert_eq!(&a.names[15..20], &["GA", "GT", "GC", "GG", "GDEL"]);
+        assert_eq!(&a.names[15..20], &["GA", "GT", "GC", "GG", "GD"]);
         Ok(())
     }
 
     #[test]
     fn alleles_custom_names() -> Result<()> {
-        let custom = &["X".into(), "Y".into(), "Z".into()];
+        let custom = &["X", "Y", "Z"];
         let a = Alleles::new(3, Some(custom))?;
         assert_eq!(a.names, custom);
         Ok(())
@@ -513,7 +522,7 @@ mod tests {
 
     #[test]
     fn alleles_custom_name_length_mismatch_fails() {
-        let result = Alleles::new(3, Some(&["A".into(), "B".into()]));
+        let result = Alleles::new(3, Some(&["A", "B"]));
         assert!(result.is_err());
     }
 
