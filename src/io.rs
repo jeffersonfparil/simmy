@@ -21,7 +21,8 @@
 
 use crate::linalg::tensor::GpuTensor;
 use anyhow::{Result, ensure};
-use rand::RngExt;
+use rand::prelude::*;
+use rand_chacha::{ChaCha8Rng, rand_core::SeedableRng};
 
 /// Represents physical genomic chromosomes, scaffolds, or contigs.
 ///
@@ -270,6 +271,7 @@ impl Locus {
         chromosomes: &Chromosomes,
         alleles: &Alleles,
         n: usize,
+        seed: usize,
     ) -> Result<(Vec<Locus>, Vec<LocusAllele>)> {
         let total_length: usize = chromosomes.lengths.iter().sum();
         let max_allele_length: usize = alleles.names.iter().map(|x| x.len()).max().unwrap_or(1);
@@ -295,7 +297,7 @@ impl Locus {
         };
         // This may drop whole chromosomes if they are too small.
         // Some loci may overlap due to allele sequence lengths.
-        let mut rng = rand::rng();
+        let mut rng = ChaCha8Rng::seed_from_u64(seed as u64);
         let mut out_loci: Vec<Self> = Vec::with_capacity(n);
         let mut out_loci_alleles: Vec<LocusAllele> = Vec::with_capacity(n);
         for (i, &loci) in loci_per_chromosome.iter().enumerate().take(n_chromosomes) {
@@ -303,8 +305,13 @@ impl Locus {
             if loci == 0 {
                 continue;
             }
+            let mut loci_counter: usize = 0;
             let step: usize = length / loci;
             for j in (0..length).step_by(step) {
+                loci_counter += 1;
+                if loci_counter > loci {
+                    break;
+                }
                 let n_alleles: usize = rng.random_range(1..=total_alleles);
                 let allele_ids: Vec<usize> = (0..n_alleles)
                     .map(|_| rng.random_range(0..total_alleles))
@@ -447,11 +454,9 @@ pub struct PhenotypeData {
 mod tests {
     use super::*;
     use anyhow::Result;
-
-    // -----------------------------
+    //////////////////////////////
     // Chromosomes::new tests
-    // -----------------------------
-
+    //////////////////////////////
     #[test]
     fn chromosomes_default_lengths() -> Result<()> {
         let chr = Chromosomes::new(3, None)?;
@@ -459,7 +464,6 @@ mod tests {
         assert_eq!(chr.lengths, vec![1_000_000, 1_000_000, 1_000_000]);
         Ok(())
     }
-
     #[test]
     fn chromosomes_custom_lengths() -> Result<()> {
         let chr = Chromosomes::new(3, Some(&[10, 20, 30]))?;
@@ -467,13 +471,11 @@ mod tests {
         assert_eq!(chr.lengths, &[10, 20, 30]);
         Ok(())
     }
-
     #[test]
     fn chromosomes_length_mismatch_fails() {
         let result = Chromosomes::new(3, Some(&[10, 20]));
         assert!(result.is_err());
     }
-
     #[test]
     fn chromosomes_zero_n() -> Result<()> {
         let chr = Chromosomes::new(0, None)?;
@@ -481,18 +483,15 @@ mod tests {
         assert!(chr.lengths.is_empty());
         Ok(())
     }
-
-    // -----------------------------
+    //////////////////////////////
     // Alleles::new tests
-    // -----------------------------
-
+    //////////////////////////////
     #[test]
     fn alleles_default_n_leq_5() -> Result<()> {
         let a = Alleles::new(5, None)?;
         assert_eq!(a.names, &["A", "T", "C", "G", "D"]);
         Ok(())
     }
-
     #[test]
     fn alleles_default_n_10() -> Result<()> {
         let a = Alleles::new(10, None)?;
@@ -502,7 +501,6 @@ mod tests {
         );
         Ok(())
     }
-
     #[test]
     fn alleles_default_n_20() -> Result<()> {
         let a = Alleles::new(20, None)?;
@@ -511,7 +509,6 @@ mod tests {
         assert_eq!(&a.names[15..20], &["GA", "GT", "GC", "GG", "GD"]);
         Ok(())
     }
-
     #[test]
     fn alleles_custom_names() -> Result<()> {
         let custom = &["X", "Y", "Z"];
@@ -519,13 +516,11 @@ mod tests {
         assert_eq!(a.names, custom);
         Ok(())
     }
-
     #[test]
     fn alleles_custom_name_length_mismatch_fails() {
         let result = Alleles::new(3, Some(&["A", "B"]));
         assert!(result.is_err());
     }
-
     #[test]
     fn alleles_no_duplicates() -> Result<()> {
         let a = Alleles::new(50, None)?;
@@ -535,7 +530,6 @@ mod tests {
         assert_eq!(sorted.len(), a.names.len());
         Ok(())
     }
-
     #[test]
     fn alleles_large_n() -> Result<()> {
         let a = Alleles::new(500, None)?;
@@ -543,5 +537,64 @@ mod tests {
         // Check that the last allele is multi-character
         assert!(a.names[499].len() >= 3);
         Ok(())
+    }
+    //////////////////////////////
+    // Locus and LocusAllele
+    //////////////////////////////
+    #[test]
+    fn test_locus_new_basic() {
+        let chromosomes = Chromosomes::new(3, Some(&[100, 200, 300])).unwrap();
+        let alleles = Alleles::new(5, None).unwrap();
+        let (loci, locus_alleles) = Locus::new(&chromosomes, &alleles, 10, 42).unwrap();
+        println!("loci: {:?}", loci);
+        assert_eq!(loci.len(), 10);
+        for locus in &loci {
+            assert!(!locus.allele_ids.is_empty());
+            assert!(locus.chromosome_id < chromosomes.chromosomes.len());
+        }
+        let expected_count: usize = loci.iter().map(|l| l.allele_ids.len()).sum();
+        assert_eq!(locus_alleles.len(), expected_count);
+    }
+    #[test]
+    fn test_locus_coordinates_and_width() {
+        let chromosomes = Chromosomes::new(1, Some(&[50])).unwrap();
+        let alleles = Alleles::new(5, None).unwrap();
+        let (loci, _) = Locus::new(&chromosomes, &alleles, 5, 42).unwrap();
+        for locus in &loci {
+            assert!(locus.start < 50);
+            assert!(locus.end <= 50);
+            assert!(locus.start < locus.end);
+            let expected_len = locus
+                .allele_ids
+                .iter()
+                .map(|&i| alleles.names[i].len())
+                .max()
+                .unwrap();
+
+            assert_eq!(locus.end - locus.start, expected_len);
+        }
+    }
+    #[test]
+    fn test_locus_allele_mapping_correctness() {
+        let chromosomes = Chromosomes::new(2, Some(&[100, 100])).unwrap();
+        let alleles = Alleles::new(4, None).unwrap();
+        let (loci, locus_alleles) = Locus::new(&chromosomes, &alleles, 6, 42).unwrap();
+        let expected_count: usize = loci.iter().map(|l| l.allele_ids.len()).sum();
+        assert_eq!(locus_alleles.len(), expected_count);
+        for la in &locus_alleles {
+            assert!(la.locus_id < loci.len());
+            assert!(la.allele_id < alleles.names.len());
+        }
+        for (locus_id, locus) in loci.iter().enumerate() {
+            let mapped: Vec<usize> = locus_alleles
+                .iter()
+                .filter(|la| la.locus_id == locus_id)
+                .map(|la| la.allele_id)
+                .collect();
+            assert_eq!(mapped.len(), locus.allele_ids.len());
+            for a in &mapped {
+                assert!(locus.allele_ids.contains(a));
+            }
+        }
     }
 }
