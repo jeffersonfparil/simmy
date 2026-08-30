@@ -367,8 +367,65 @@ pub struct Genome {
 }
 
 impl Genome {
-    pub fn new() -> Result<Self> {
-        todo!()
+    /// Constructs a fully validated `Genome` containing chromosomes, allele
+    /// definitions, physical loci, and the flattened locus‑allele relational map.
+    ///
+    /// # Overview
+    /// This initializer composes the three foundational genomic structures:
+    ///
+    /// - [`Chromosomes`]: physical linkage groups with validated lengths.
+    /// - [`Alleles`]: global registry of unique allele sequences.
+    /// - [`Locus`]: physical loci placed proportionally across chromosomes,
+    ///   each with a random multi‑allelic state determined by `seed`.
+    ///
+    /// The resulting `Genome` acts as the CPU‑side blueprint for downstream
+    /// GPU genotype tensor construction, recombination simulation, and
+    /// breeding‑value computation.
+    ///
+    /// # Determinism
+    /// Locus generation is fully deterministic under the supplied `seed`.
+    /// All allele sampling and locus coordinate placement are reproducible.
+    ///
+    /// # Parameters
+    /// - `n_chromosomes`: Number of chromosomes to construct.
+    /// - `chromosome_lengths`: Optional slice of physical chromosome lengths.
+    ///   If `None`, all chromosomes default to 1,000,000 bp.
+    /// - `n_max_alleles`: Number of unique allele sequences to generate or import.
+    /// - `allele_sequences`: Optional slice of allele names. If `None`, names
+    ///   are generated using mixed‑radix SNP encoding.
+    /// - `n_loci`: Total number of loci to distribute proportionally across chromosomes.
+    /// - `seed`: RNG seed controlling allele sampling and locus placement.
+    ///
+    /// # Returns
+    /// A fully validated `Genome` containing:
+    /// - `chromosomes`: physical linkage groups,
+    /// - `alleles`: global allele registry,
+    /// - `loci`: physical loci with clamped coordinates and allele sets,
+    /// - `loci_alleles`: flattened `(locus_id, allele_id)` mapping.
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// - Chromosome lengths do not match `n_chromosomes`,
+    /// - Allele sequence count does not match `n_max_alleles`,
+    /// - Duplicate allele sequences are detected,
+    /// - The genome is too small to place `n_loci` loci of maximum allele width.
+    pub fn new(
+        n_chromosomes: usize,
+        chromosome_lengths: Option<&[usize]>,
+        n_max_alleles: usize,
+        allele_sequences: Option<&[&str]>,
+        n_loci: usize,
+        seed: usize,
+    ) -> Result<Self> {
+        let chromosomes = Chromosomes::new(n_chromosomes, chromosome_lengths)?;
+        let alleles = Alleles::new(n_max_alleles, allele_sequences)?;
+        let (loci, loci_alleles) = Locus::new(&chromosomes, &alleles, n_loci, seed)?;
+        Ok(Self {
+            chromosomes,
+            alleles,
+            loci,
+            loci_alleles,
+        })
     }
 }
 
@@ -595,6 +652,58 @@ mod tests {
             for a in &mapped {
                 assert!(locus.allele_ids.contains(a));
             }
+        }
+    }
+    //////////////////////////////
+    // Genome
+    //////////////////////////////
+    #[test]
+    fn test_genome_new_basic() {
+        // Simple 3‑chromosome genome
+        let n_chromosomes = 3;
+        let chromosome_lengths = vec![100usize, 200, 300];
+        // 5 alleles using automatic SNP‑based generation
+        let n_max_alleles = 5;
+        let allele_sequences = None;
+        // 10 loci distributed proportionally
+        let n_loci = 10;
+        // Deterministic seed
+        let seed = 12345;
+        let genome = Genome::new(
+            n_chromosomes,
+            Some(&chromosome_lengths),
+            n_max_alleles,
+            allele_sequences,
+            n_loci,
+            seed,
+        )
+        .unwrap();
+        // Chromosome validation
+        assert_eq!(genome.chromosomes.chromosomes.len(), 3);
+        assert_eq!(genome.chromosomes.lengths, vec![100, 200, 300]);
+        // Allele validation
+        assert_eq!(genome.alleles.sequences.len(), 5);
+        // Locus count must match n_loci
+        assert_eq!(genome.loci.len(), n_loci);
+        // All loci must reference valid chromosomes
+        for locus in &genome.loci {
+            assert!(locus.chromosome_id < n_chromosomes);
+        }
+        // Coordinates must be valid and clamped
+        for locus in &genome.loci {
+            let chr_len = genome.chromosomes.lengths[locus.chromosome_id];
+            assert!(locus.start < chr_len);
+            assert!(locus.end <= chr_len);
+            assert!(locus.start < locus.end);
+        }
+        // Flattened mapping must match sum of allele counts
+        let expected_flat_count: usize = genome.loci.iter().map(|l| l.allele_ids.len()).sum();
+        assert_eq!(genome.loci_alleles.len(), expected_flat_count);
+        // Mapping must be consistent
+        for la in &genome.loci_alleles {
+            assert!(la.locus_id < genome.loci.len());
+            assert!(la.allele_id < genome.alleles.sequences.len());
+            assert!(genome.loci[la.locus_id].allele_ids.contains(&la.allele_id));
         }
     }
 }
