@@ -19,10 +19,12 @@
 //!    the memory overhead of unpacking deeply nested structures.
 //!
 
+use crate::linalg::context::GpuContext;
 use crate::linalg::tensor::GpuTensor;
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use rand::prelude::*;
 use rand_chacha::{ChaCha8Rng, rand_core::SeedableRng};
+use rand_distr::{Beta, Distribution};
 
 /// Represents physical genomic chromosomes, scaffolds, or contigs.
 ///
@@ -701,11 +703,37 @@ pub struct GenotypeData {
     pub data: GpuTensor,
 }
 
-// impl GenotypeData {
-//     pub fn new() {
-//         todo!()
-//     }
-// }
+// TODO....
+impl GenotypeData {
+    pub fn new(ctx: &GpuContext, genome: &Genome, entries: &Entries, seed: usize) -> Result<Self> {
+        let n_entries: usize = entries.names.len();
+        let n_loci_alleles: usize = genome.loci_alleles.len();
+        ensure!(n_entries > 0, "Number of entries need to non-zero!");
+        ensure!(
+            n_loci_alleles > 0,
+            "Number of loci-alleles need to non-zero!"
+        );
+        let mut rng = ChaCha8Rng::seed_from_u64(seed as u64);
+        let beta = Beta::new(0.5, 0.5)
+            .context("Failed to initialize Beta distribution: parameters must be greater than 0")?;
+        let mut data_tmp: Vec<f32> = Vec::with_capacity(n_entries * n_loci_alleles);
+        for _ in 0..(n_entries * n_loci_alleles) {
+            data_tmp.push(beta.sample(&mut rng));
+        }
+        let data: GpuTensor = GpuTensor::from_f32(
+            ctx,
+            &data_tmp,
+            &[n_entries as u32, n_loci_alleles as u32],
+            None,
+            None,
+        )?;
+        Ok(Self {
+            entry_ids: (0..n_entries).collect(),
+            locus_allele_ids: (0..n_loci_alleles).collect(),
+            data,
+        })
+    }
+}
 
 /// The observed phenotype metrics backed by high-performance GPU storage.
 ///
