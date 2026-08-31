@@ -19,6 +19,8 @@
 //!    the memory overhead of unpacking deeply nested structures.
 //!
 
+use std::range::Range;
+
 use crate::linalg::context::GpuContext;
 use crate::linalg::tensor::GpuTensor;
 use anyhow::{Context, Result, ensure};
@@ -40,6 +42,81 @@ pub struct Chromosomes {
     /// Physical sizes (lengths in base pairs) corresponding to each chromosome.
     /// Used for validating recombination crossover boundaries.
     pub lengths: Vec<usize>,
+    // Strength of linkage from 0.0 to 1.0 per region per base-range per chromosome
+    pub linkages: Vec<Linkage>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Linkage {
+    // Assuming the LD decay model:
+    // r^2(d) = r^2(0)exp(-d/L)
+    // where:
+    //  - r^2 is the LD, i.e. 1.0 == completely linkage and 0.0 == no linkage
+    //  - r^2(0) is the LD at d == 0 which is set to 1.0
+    //  - d is the distance in bp
+    //  - L is the characteristic distance of decay in bp
+    // ID of the chromosome
+    pub chromosome_id: usize,
+    // Region in the chromosome where the linkage characteristics apply
+    pub regions: Vec<Range<usize>>,
+    // Distance (in bp) between pairs of bases where the linkage falls to 0.368
+    pub decay_distances: Vec<usize>,
+}
+
+impl Linkage {
+    pub fn new(
+        chromosome_id: usize,
+        chromosome_length: usize,
+        regions: Option<&[Range<usize>]>,
+        decay_distances: Option<&[usize]>,
+    ) -> Result<Self> {
+        ensure!(
+            chromosome_length > 0,
+            "Chromosome length should be greater than zero!"
+        );
+        let regions: Vec<Range<usize>> = match regions {
+            Some(x) => x.to_vec(),
+            None => {
+                vec![(0..chromosome_length).into()]
+            }
+        };
+        ensure!(!regions.is_empty(), "The regions must be non-empty!");
+        let mut sorted_regions: Vec<Range<usize>> = regions.clone();
+        sorted_regions.sort_by_key(|r| r.start);
+        ensure!(
+            sorted_regions.iter().all(|w| w.start < w.end),
+            "Region start must be less than region end!"
+        );
+        ensure!(
+            sorted_regions.iter().all(|w| w.end <= chromosome_length),
+            "The regions are out-of-bounds!"
+        );
+        ensure!(
+            sorted_regions.windows(2).all(|w| w[0].end <= w[1].start),
+            "The regions must not overlap!"
+        );
+        let decay_distances: Vec<usize> = match decay_distances {
+            Some(x) => x.to_vec(),
+            None => {
+                vec![2_000; regions.len()]
+            }
+        };
+        ensure!(
+            decay_distances.iter().all(|&d| d > 0),
+            "Decay distances must be greater than zero!"
+        );
+        ensure!(
+            regions.len() == decay_distances.len(),
+            "The number of regions (regions.len()={}) does not match the decay distances (decay_distances.len()={})!",
+            regions.len(),
+            decay_distances.len()
+        );
+        Ok(Self {
+            chromosome_id,
+            regions,
+            decay_distances,
+        })
+    }
 }
 
 impl Chromosomes {
@@ -81,7 +158,11 @@ impl Chromosomes {
     /// Returns an error if:
     /// - `n == 0`,
     /// - The number of provided lengths does not equal `n`.
-    pub fn new(n: usize, lengths: Option<&[usize]>) -> Result<Self> {
+    pub fn new(
+        n: usize,
+        lengths: Option<&[usize]>,
+        linkages: Option<Vec<Linkage>>,
+    ) -> Result<Self> {
         ensure!(n > 0, "Number of chromosomes need to non-zero!");
         let lengths = match lengths {
             Some(x) => x.to_vec(),
@@ -93,11 +174,28 @@ impl Chromosomes {
             n,
             lengths.len()
         );
+        let linkages = match linkages {
+            Some(x) => x,
+            None => {
+                let mut linkages: Vec<Linkage> = Vec::with_capacity(n);
+                for i in 0..n {
+                    linkages.push(Linkage::new(i, lengths[i], None, None)?);
+                }
+                linkages
+            }
+        };
+        ensure!(
+            n == linkages.len(),
+            "The number of chromosomes (n={}) and linkages (n={}) must match!",
+            n,
+            linkages.len()
+        );
         let n_digits: usize = format!("{}", n - 1).len();
         let chromosomes: Vec<String> = (0..n).map(|i| format!("chr_{:0>n_digits$}", i)).collect();
         Ok(Self {
             chromosomes,
             lengths,
+            linkages,
         })
     }
 }
@@ -287,7 +385,7 @@ impl Locus {
         chromosomes: &Chromosomes,
         alleles: &Alleles,
         n: usize,
-        seed: usize,
+        seed: u64,
     ) -> Result<(Vec<Locus>, Vec<LocusAllele>)> {
         ensure!(n > 0, "Number of loci need to non-zero!");
         let total_length: usize = chromosomes.lengths.iter().sum();
@@ -314,7 +412,7 @@ impl Locus {
         };
         // This may drop whole chromosomes if they are too small.
         // Some loci may overlap due to allele sequence lengths.
-        let mut rng = ChaCha8Rng::seed_from_u64(seed as u64);
+        let mut rng = ChaCha8Rng::seed_from_u64(seed);
         let mut out_loci: Vec<Self> = Vec::with_capacity(n);
         let mut out_loci_alleles: Vec<LocusAllele> = Vec::with_capacity(n);
         for (i, &loci) in loci_per_chromosome.iter().enumerate().take(n_chromosomes) {
@@ -429,12 +527,13 @@ impl Genome {
     pub fn new(
         n_chromosomes: usize,
         chromosome_lengths: Option<&[usize]>,
+        linkages: Option<Vec<Linkage>>,
         n_max_alleles: usize,
         allele_sequences: Option<&[&str]>,
         n_loci: usize,
-        seed: usize,
+        seed: u64,
     ) -> Result<Self> {
-        let chromosomes = Chromosomes::new(n_chromosomes, chromosome_lengths)?;
+        let chromosomes = Chromosomes::new(n_chromosomes, chromosome_lengths, linkages)?;
         let alleles = Alleles::new(n_max_alleles, allele_sequences)?;
         let (loci, loci_alleles) = Locus::new(&chromosomes, &alleles, n_loci, seed)?;
         Ok(Self {
@@ -703,37 +802,55 @@ pub struct GenotypeData {
     pub data: GpuTensor,
 }
 
-// TODO....
-impl GenotypeData {
-    pub fn new(ctx: &GpuContext, genome: &Genome, entries: &Entries, seed: usize) -> Result<Self> {
-        let n_entries: usize = entries.names.len();
-        let n_loci_alleles: usize = genome.loci_alleles.len();
-        ensure!(n_entries > 0, "Number of entries need to non-zero!");
-        ensure!(
-            n_loci_alleles > 0,
-            "Number of loci-alleles need to non-zero!"
-        );
-        let mut rng = ChaCha8Rng::seed_from_u64(seed as u64);
-        let beta = Beta::new(0.5, 0.5)
-            .context("Failed to initialize Beta distribution: parameters must be greater than 0")?;
-        let mut data_tmp: Vec<f32> = Vec::with_capacity(n_entries * n_loci_alleles);
-        for _ in 0..(n_entries * n_loci_alleles) {
-            data_tmp.push(beta.sample(&mut rng));
-        }
-        let data: GpuTensor = GpuTensor::from_f32(
-            ctx,
-            &data_tmp,
-            &[n_entries as u32, n_loci_alleles as u32],
-            None,
-            None,
-        )?;
-        Ok(Self {
-            entry_ids: (0..n_entries).collect(),
-            locus_allele_ids: (0..n_loci_alleles).collect(),
-            data,
-        })
-    }
-}
+// pub fn founders(ctx: &GpuContext, n: usize, p: usize, q: f32, seed: u64) -> Result<GpuTensor> {
+//     ensure!(n > 1, "The number of founders need to be at least 2!");
+//     ensure!(p > 0, "The number of loci need to be non-zero!");
+//     ensure!(q > 0.0, "The allele fixation parameter, i.e. shape parameters of the Beta distribution (a1 & a2) should be greater than zero!");
+//     // The q parameter determines the shape of the allele frequency spectrum, where:
+//     //  - lower values mean alleles are close to fixation, e.g. 0.75 and below
+//     //  - higher values mean alleles are closer to intermediate values, i.e. 0.5
+//     let mut rng = ChaCha8Rng::seed_from_u64(seed);
+//     let beta = Beta::new(q, q)
+//             .context("Failed to initialize Beta distribution: parameters must be greater than 0")?;
+//     let mut freqs: Vec<f32> = Vec::with_capacity(n);
+//     for _ in 0..(n*p) {
+//         freqs.push(beta.sample(&mut rng));
+//     }
+//     let out = GpuTensor::from_f32(ctx, &freqs, &[n as u32, p as u32], None, None)?;
+//     Ok(out)
+// }
+
+// // TODO....
+// impl GenotypeData {
+//     pub fn new(ctx: &GpuContext, genome: &Genome, entries: &Entries, seed: u64) -> Result<Self> {
+//         let n_entries: usize = entries.names.len();
+//         let n_loci_alleles: usize = genome.loci_alleles.len();
+//         ensure!(n_entries > 0, "Number of entries need to non-zero!");
+//         ensure!(
+//             n_loci_alleles > 0,
+//             "Number of loci-alleles need to non-zero!"
+//         );
+//         let mut rng = ChaCha8Rng::seed_from_u64(seed);
+//         let beta = Beta::new(0.5, 0.5)
+//             .context("Failed to initialize Beta distribution: parameters must be greater than 0")?;
+//         let mut data_tmp: Vec<f32> = Vec::with_capacity(n_entries * n_loci_alleles);
+//         for _ in 0..(n_entries * n_loci_alleles) {
+//             data_tmp.push(beta.sample(&mut rng));
+//         }
+//         let data: GpuTensor = GpuTensor::from_f32(
+//             ctx,
+//             &data_tmp,
+//             &[n_entries as u32, n_loci_alleles as u32],
+//             None,
+//             None,
+//         )?;
+//         Ok(Self {
+//             entry_ids: (0..n_entries).collect(),
+//             locus_allele_ids: (0..n_loci_alleles).collect(),
+//             data,
+//         })
+//     }
+// }
 
 /// The observed phenotype metrics backed by high-performance GPU storage.
 ///
@@ -762,26 +879,26 @@ mod tests {
     //////////////////////////////
     #[test]
     fn chromosomes_default_lengths() -> Result<()> {
-        let chr = Chromosomes::new(3, None)?;
+        let chr = Chromosomes::new(3, None, None)?;
         assert_eq!(chr.chromosomes, vec!["chr_0", "chr_1", "chr_2"]);
         assert_eq!(chr.lengths, vec![1_000_000, 1_000_000, 1_000_000]);
         Ok(())
     }
     #[test]
     fn chromosomes_custom_lengths() -> Result<()> {
-        let chr = Chromosomes::new(3, Some(&[10, 20, 30]))?;
+        let chr = Chromosomes::new(3, Some(&[10, 20, 30]), None)?;
         assert_eq!(chr.chromosomes, &["chr_0", "chr_1", "chr_2"]);
         assert_eq!(chr.lengths, &[10, 20, 30]);
         Ok(())
     }
     #[test]
     fn chromosomes_length_mismatch_fails() {
-        let result = Chromosomes::new(3, Some(&[10, 20]));
+        let result = Chromosomes::new(3, Some(&[10, 20]), None);
         assert!(result.is_err());
     }
     #[test]
     fn chromosomes_zero_n() -> Result<()> {
-        let result = Chromosomes::new(0, None);
+        let result = Chromosomes::new(0, None, None);
         assert!(result.is_err());
         Ok(())
     }
@@ -845,7 +962,7 @@ mod tests {
     //////////////////////////////
     #[test]
     fn test_locus_new_basic() {
-        let chromosomes = Chromosomes::new(3, Some(&[100, 200, 300])).unwrap();
+        let chromosomes = Chromosomes::new(3, Some(&[100, 200, 300]), None).unwrap();
         let alleles = Alleles::new(5, None).unwrap();
         let (loci, locus_alleles) = Locus::new(&chromosomes, &alleles, 10, 42).unwrap();
         println!("loci: {:?}", loci);
@@ -859,7 +976,7 @@ mod tests {
     }
     #[test]
     fn test_locus_coordinates_and_width() {
-        let chromosomes = Chromosomes::new(1, Some(&[50])).unwrap();
+        let chromosomes = Chromosomes::new(1, Some(&[50]), None).unwrap();
         let alleles = Alleles::new(5, None).unwrap();
         let (loci, _) = Locus::new(&chromosomes, &alleles, 5, 42).unwrap();
         for locus in &loci {
@@ -878,7 +995,7 @@ mod tests {
     }
     #[test]
     fn test_locus_allele_mapping_correctness() {
-        let chromosomes = Chromosomes::new(2, Some(&[100, 100])).unwrap();
+        let chromosomes = Chromosomes::new(2, Some(&[100, 100]), None).unwrap();
         let alleles = Alleles::new(4, None).unwrap();
         let (loci, locus_alleles) = Locus::new(&chromosomes, &alleles, 6, 42).unwrap();
         let expected_count: usize = loci.iter().map(|l| l.allele_ids.len()).sum();
@@ -917,6 +1034,7 @@ mod tests {
         let genome = Genome::new(
             n_chromosomes,
             Some(&chromosome_lengths),
+            None,
             n_max_alleles,
             allele_sequences,
             n_loci,
@@ -953,7 +1071,7 @@ mod tests {
     }
     #[test]
     fn test_genome_invariants() {
-        let genome = Genome::new(4, Some(&[150, 250, 350, 450]), 12, None, 20, 999).unwrap();
+        let genome = Genome::new(4, Some(&[150, 250, 350, 450]), None, 12, None, 20, 999).unwrap();
         // Invariant 1: All loci reference valid chromosomes
         for locus in &genome.loci {
             assert!(locus.chromosome_id < genome.chromosomes.chromosomes.len());
@@ -974,7 +1092,7 @@ mod tests {
     }
     #[test]
     fn test_genome_regression_snapshot() {
-        let genome = Genome::new(3, Some(&[100, 200, 300]), 5, None, 10, 42).unwrap();
+        let genome = Genome::new(3, Some(&[100, 200, 300]), None, 5, None, 10, 42).unwrap();
         // Snapshot: chromosome lengths
         assert_eq!(genome.chromosomes.lengths, vec![100, 200, 300]);
         // Snapshot: first locus
