@@ -182,7 +182,22 @@ impl GpuContext {
             })
             .await
             .context("No adapter")?;
-        let (device, queue) = adapter.request_device(&Default::default()).await?;
+        // let (device, queue) = adapter.request_device(&Default::default()).await?;
+        let supported = adapter.limits();
+        let required_limits = wgpu::Limits {
+            max_color_attachments: supported.max_color_attachments,
+            ..wgpu::Limits::downlevel_defaults()
+        };
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("device"),
+                required_features: wgpu::Features::empty(),
+                required_limits,
+                memory_hints: wgpu::MemoryHints::Performance,
+                experimental_features: wgpu::ExperimentalFeatures::disabled(),
+                trace: wgpu::Trace::default(),
+            })
+            .await?;
         let opcode_source: &str = include_str!("wgsl/opcodes.wgsl");
         let kernel_sources: Vec<&str> = vec![
             include_str!("wgsl/unary_matrix.wgsl"),
