@@ -42,126 +42,121 @@ pub struct Chromosomes {
     /// Physical sizes (lengths in base pairs) corresponding to each chromosome.
     /// Used for validating recombination crossover boundaries.
     pub lengths: Vec<usize>,
-    // Strength of linkage from 0.0 to 1.0 per region per base-range per chromosome
-    pub linkages: Vec<Linkage>,
-}
-
-#[derive(Debug, Clone)]
-pub struct Linkage {
-    // Assuming the LD decay model:
-    // r^2(d) = r^2(0)exp(-d/L)
-    // where:
-    //  - r^2 is the LD, i.e. 1.0 == completely linkage and 0.0 == no linkage
-    //  - r^2(0) is the LD at d == 0 which is set to 1.0
-    //  - d is the distance in bp
-    //  - L is the characteristic distance of decay in bp
-    // ID of the chromosome
-    pub chromosome_id: usize,
-    // Region in the chromosome where the linkage characteristics apply
-    pub regions: Vec<Range<usize>>,
-    // Distance (in bp) between pairs of bases where the linkage falls to 0.368
-    pub decay_distances: Vec<usize>,
-}
-
-impl Linkage {
-    pub fn new(
-        chromosome_id: usize,
-        chromosome_length: usize,
-        regions: Option<&[Range<usize>]>,
-        decay_distances: Option<&[usize]>,
-    ) -> Result<Self> {
-        ensure!(
-            chromosome_length > 0,
-            "Chromosome length should be greater than zero!"
-        );
-        let regions: Vec<Range<usize>> = match regions {
-            Some(x) => x.to_vec(),
-            None => {
-                vec![(0..chromosome_length).into()]
-            }
-        };
-        ensure!(!regions.is_empty(), "The regions must be non-empty!");
-        let mut sorted_regions: Vec<Range<usize>> = regions.clone();
-        sorted_regions.sort_by_key(|r| r.start);
-        ensure!(
-            sorted_regions.iter().all(|w| w.start < w.end),
-            "Region start must be less than region end!"
-        );
-        ensure!(
-            sorted_regions.iter().all(|w| w.end <= chromosome_length),
-            "The regions are out-of-bounds!"
-        );
-        ensure!(
-            sorted_regions.windows(2).all(|w| w[0].end <= w[1].start),
-            "The regions must not overlap!"
-        );
-        let decay_distances: Vec<usize> = match decay_distances {
-            Some(x) => x.to_vec(),
-            None => {
-                vec![2_000; regions.len()]
-            }
-        };
-        ensure!(
-            decay_distances.iter().all(|&d| d > 0),
-            "Decay distances must be greater than zero!"
-        );
-        ensure!(
-            regions.len() == decay_distances.len(),
-            "The number of regions (regions.len()={}) does not match the decay distances (decay_distances.len()={})!",
-            regions.len(),
-            decay_distances.len()
-        );
-        Ok(Self {
-            chromosome_id,
-            regions,
-            decay_distances,
-        })
-    }
+    // Distances in bp (L) between pairs of bases where the linkage (r²) falls to around 0.368, where:
+    /// r²(d) = exp(-d / L), and d is the distance between 2 loci in bp
+    pub ld_decay_distances: Vec<usize>,
 }
 
 impl Chromosomes {
     /// Constructs a `Chromosomes` collection containing `n` chromosomes with
-    /// user‑provided or default lengths.
+    /// user-provided or default lengths and LD decay distances.
     ///
     /// # Overview
-    /// If `lengths` is provided, the slice is copied into an owned `Vec<usize>` and
-    /// validated to ensure its length matches `n`.
     ///
-    /// If `lengths` is `None`, all chromosomes are assigned a default physical length
-    /// of `1_000_000` base pairs.
+    /// If `lengths` is provided, the slice is copied into an owned
+    /// `Vec<usize>` and validated to ensure its length matches `n`.
     ///
-    /// Chromosome names are generated deterministically using zero‑padded numeric
-    /// formatting. The padding width is derived from `n - 1`, ensuring consistent
-    /// identifier width across all chromosomes. For example:
+    /// If `lengths` is `None`, all chromosomes are assigned a default
+    /// physical length of `1_000_000` base pairs.
     ///
-    /// - `n = 3`  → names: `"chr_0"`, `"chr_1"`, `"chr_2"`
-    /// - `n = 12` → names: `"chr_00"`, `"chr_01"`, ..., `"chr_11"`
+    /// If `ld_decay_distances` is provided, the values are copied into an
+    /// owned `Vec<usize>` and validated to ensure:
     ///
-    /// This padding guarantees lexicographically ordered chromosome identifiers,
-    /// which simplifies downstream metadata sorting and GPU tensor indexing.
+    /// * The number of decay distances equals `n`.
+    /// * Every decay distance is greater than zero.
+    ///
+    /// If `ld_decay_distances` is `None`, all chromosomes are assigned a
+    /// default LD decay distance of `2_000` bp.
+    ///
+    /// Chromosome names are generated deterministically using zero-padded
+    /// numeric formatting. The padding width is derived from `n - 1`,
+    /// ensuring consistent identifier width across all chromosomes. For
+    /// example:
+    ///
+    /// ```text
+    /// n = 3
+    ///     chr_0
+    ///     chr_1
+    ///     chr_2
+    ///
+    /// n = 12
+    ///     chr_00
+    ///     chr_01
+    ///     ...
+    ///     chr_11
+    /// ```
+    ///
+    /// This padding guarantees lexicographically ordered chromosome
+    /// identifiers, simplifying metadata management and downstream tensor
+    /// indexing.
+    ///
+    /// # LD Decay Model
+    ///
+    /// Each chromosome is assigned a characteristic LD decay distance `L`
+    /// (in base pairs). Simmy assumes:
+    ///
+    /// ```text
+    /// r²(d) = r²(0) exp(-d / L)
+    /// ```
+    ///
+    /// where:
+    ///
+    /// * `r²(d)` is the expected linkage disequilibrium between two loci
+    ///   separated by distance `d`.
+    /// * `r²(0)` is assumed to be `1.0`.
+    /// * `d` is the physical distance between loci in base pairs.
+    /// * `L` is the chromosome-specific LD decay distance.
+    ///
+    /// Consequently, when:
+    ///
+    /// ```text
+    /// d = L
+    /// ```
+    ///
+    /// the expected LD falls to:
+    ///
+    /// ```text
+    /// r²(L) = exp(-1) ≈ 0.368
+    /// ```
+    ///
+    /// Larger values of `L` imply longer-range haplotype structure and
+    /// slower LD decay. Smaller values imply shorter haplotype blocks and
+    /// more rapid LD decay.
     ///
     /// # Parameters
-    /// - `n`: Number of chromosomes to construct. Must be non‑zero.
-    /// - `lengths`: Optional slice of chromosome lengths. If `None`, all lengths
-    ///   default to `1_000_000`.
+    ///
+    /// * `n` - Number of chromosomes to construct. Must be non-zero.
+    /// * `lengths` - Optional chromosome lengths in base pairs.
+    /// * `ld_decay_distances` - Optional chromosome-specific LD decay
+    ///   distances in base pairs.
     ///
     /// # Returns
-    /// A `Chromosomes` instance containing:
-    /// - `chromosomes`: zero‑padded names `"chr_<i>"`,
-    /// - `lengths`: validated or default chromosome lengths.
+    ///
+    /// A validated `Chromosomes` instance containing:
+    ///
+    /// * `chromosomes` - zero-padded chromosome identifiers.
+    /// * `lengths` - physical chromosome lengths.
+    /// * `ld_decay_distances` - chromosome-specific LD decay distances.
     ///
     /// # Validation
-    /// - Ensures `n > 0`.
-    /// - Ensures `lengths.len() == n`.
+    ///
+    /// * Ensures `n > 0`.
+    /// * Ensures `lengths.len() == n`.
+    /// * Ensures `ld_decay_distances.len() == n`.
+    /// * Ensures all LD decay distances are greater than zero.
     ///
     /// # Errors
+    ///
     /// Returns an error if:
-    /// - `n == 0`,
-    /// - The number of provided lengths does not equal `n`.
+    ///
+    /// * `n == 0`.
+    /// * The number of supplied chromosome lengths does not equal `n`.
+    /// * The number of supplied LD decay distances does not equal `n`.
+    /// * Any LD decay distance is zero.
     pub fn new(
         n: usize,
         lengths: Option<&[usize]>,
-        linkages: Option<Vec<Linkage>>,
+        ld_decay_distances: Option<&[usize]>,
     ) -> Result<Self> {
         ensure!(n > 0, "Number of chromosomes need to non-zero!");
         let lengths = match lengths {
@@ -174,28 +169,28 @@ impl Chromosomes {
             n,
             lengths.len()
         );
-        let linkages = match linkages {
-            Some(x) => x,
+        let ld_decay_distances: Vec<usize> = match ld_decay_distances {
+            Some(x) => x.to_vec(),
             None => {
-                let mut linkages: Vec<Linkage> = Vec::with_capacity(n);
-                for i in 0..n {
-                    linkages.push(Linkage::new(i, lengths[i], None, None)?);
-                }
-                linkages
+                vec![2_000; n]
             }
         };
         ensure!(
-            n == linkages.len(),
-            "The number of chromosomes (n={}) and linkages (n={}) must match!",
+            ld_decay_distances.iter().all(|&d| d > 0),
+            "Decay distances must be greater than zero!"
+        );
+        ensure!(
+            n == ld_decay_distances.len(),
+            "The number of chromosomes (n={}) and ld_decay_distances (n={}) must match!",
             n,
-            linkages.len()
+            ld_decay_distances.len()
         );
         let n_digits: usize = format!("{}", n - 1).len();
         let chromosomes: Vec<String> = (0..n).map(|i| format!("chr_{:0>n_digits$}", i)).collect();
         Ok(Self {
             chromosomes,
             lengths,
-            linkages,
+            ld_decay_distances,
         })
     }
 }
@@ -486,25 +481,64 @@ impl Genome {
     /// definitions, physical loci, and the flattened locus‑allele relational map.
     ///
     /// # Overview
+    ///
     /// This initializer composes the three foundational genomic structures:
     ///
-    /// - [`Chromosomes`]: physical linkage groups with validated lengths.
+    /// - [`Chromosomes`]: physical linkage groups with validated lengths and
+    ///   chromosome‑specific LD decay distances.
     /// - [`Alleles`]: global registry of unique allele sequences.
     /// - [`Locus`]: physical loci placed proportionally across chromosomes,
     ///   each with a random multi‑allelic state determined by `seed`.
     ///
     /// The resulting `Genome` acts as the CPU‑side blueprint for downstream
-    /// GPU genotype tensor construction, recombination simulation, and
-    /// breeding‑value computation.
+    /// GPU genotype tensor construction, founder haplotype generation,
+    /// recombination simulation, and breeding‑value computation.
+    ///
+    /// # Linkage Disequilibrium Model
+    ///
+    /// Each chromosome is assigned a characteristic LD decay distance `L`
+    /// (in base pairs). Simmy assumes the exponential LD decay model:
+    ///
+    /// ```text
+    /// r²(d) = r²(0) exp(-d / L)
+    /// ```
+    ///
+    /// where:
+    ///
+    /// - `r²(d)` is the expected linkage disequilibrium between two loci
+    ///   separated by distance `d`.
+    /// - `r²(0)` is assumed to be `1.0`.
+    /// - `d` is the physical distance between loci in base pairs.
+    /// - `L` is the chromosome‑specific LD decay distance.
+    ///
+    /// Consequently:
+    ///
+    /// ```text
+    /// d = L
+    /// ```
+    ///
+    /// implies:
+    ///
+    /// ```text
+    /// r²(L) = exp(-1) ≈ 0.368
+    /// ```
+    ///
+    /// Larger LD decay distances imply longer haplotype blocks and slower
+    /// LD decay. Smaller LD decay distances imply weaker long‑range linkage
+    /// and more rapid LD decay.
     ///
     /// # Determinism
+    ///
     /// Locus generation is fully deterministic under the supplied `seed`.
     /// All allele sampling and locus coordinate placement are reproducible.
     ///
     /// # Parameters
+    ///
     /// - `n_chromosomes`: Number of chromosomes to construct.
-    /// - `chromosome_lengths`: Optional slice of physical chromosome lengths.
-    ///   If `None`, all chromosomes default to 1,000,000 bp.
+    /// - `chromosome_lengths`: Optional slice of chromosome lengths in base pairs.
+    ///   If `None`, all chromosomes default to `1_000_000` bp.
+    /// - `ld_decay_distances`: Optional slice of chromosome‑specific LD decay
+    ///   distances. If `None`, all chromosomes default to `2_000` bp.
     /// - `n_max_alleles`: Number of unique allele sequences to generate or import.
     /// - `allele_sequences`: Optional slice of allele names. If `None`, names
     ///   are generated using mixed‑radix SNP encoding.
@@ -512,28 +546,37 @@ impl Genome {
     /// - `seed`: RNG seed controlling allele sampling and locus placement.
     ///
     /// # Returns
+    ///
     /// A fully validated `Genome` containing:
-    /// - `chromosomes`: physical linkage groups,
-    /// - `alleles`: global allele registry,
-    /// - `loci`: physical loci with clamped coordinates and allele sets,
-    /// - `loci_alleles`: flattened `(locus_id, allele_id)` mapping.
+    ///
+    /// - `chromosomes`: physical chromosomes with chromosome lengths and
+    ///   LD decay parameters.
+    /// - `alleles`: global allele registry.
+    /// - `loci`: physical loci with chromosome assignments, coordinates,
+    ///   and valid allele states.
+    /// - `loci_alleles`: flattened `(locus_id, allele_id)` mapping suitable
+    ///   for GPU genotype tensor construction.
     ///
     /// # Errors
+    ///
     /// Returns an error if:
-    /// - Chromosome lengths do not match `n_chromosomes`,
-    /// - Allele sequence count does not match `n_max_alleles`,
-    /// - Duplicate allele sequences are detected,
+    ///
+    /// - Chromosome lengths do not match `n_chromosomes`.
+    /// - LD decay distances do not match `n_chromosomes`.
+    /// - Any LD decay distance is zero.
+    /// - Allele sequence count does not match `n_max_alleles`.
+    /// - Duplicate allele sequences are detected.
     /// - The genome is too small to place `n_loci` loci of maximum allele width.
     pub fn new(
         n_chromosomes: usize,
         chromosome_lengths: Option<&[usize]>,
-        linkages: Option<Vec<Linkage>>,
+        ld_decay_distances: Option<&[usize]>,
         n_max_alleles: usize,
         allele_sequences: Option<&[&str]>,
         n_loci: usize,
         seed: u64,
     ) -> Result<Self> {
-        let chromosomes = Chromosomes::new(n_chromosomes, chromosome_lengths, linkages)?;
+        let chromosomes = Chromosomes::new(n_chromosomes, chromosome_lengths, ld_decay_distances)?;
         let alleles = Alleles::new(n_max_alleles, allele_sequences)?;
         let (loci, loci_alleles) = Locus::new(&chromosomes, &alleles, n_loci, seed)?;
         Ok(Self {
@@ -802,55 +845,30 @@ pub struct GenotypeData {
     pub data: GpuTensor,
 }
 
-// pub fn founders(ctx: &GpuContext, n: usize, p: usize, q: f32, seed: u64) -> Result<GpuTensor> {
-//     ensure!(n > 1, "The number of founders need to be at least 2!");
-//     ensure!(p > 0, "The number of loci need to be non-zero!");
-//     ensure!(q > 0.0, "The allele fixation parameter, i.e. shape parameters of the Beta distribution (a1 & a2) should be greater than zero!");
-//     // The q parameter determines the shape of the allele frequency spectrum, where:
-//     //  - lower values mean alleles are close to fixation, e.g. 0.75 and below
-//     //  - higher values mean alleles are closer to intermediate values, i.e. 0.5
-//     let mut rng = ChaCha8Rng::seed_from_u64(seed);
-//     let beta = Beta::new(q, q)
-//             .context("Failed to initialize Beta distribution: parameters must be greater than 0")?;
-//     let mut freqs: Vec<f32> = Vec::with_capacity(n);
-//     for _ in 0..(n*p) {
-//         freqs.push(beta.sample(&mut rng));
-//     }
-//     let out = GpuTensor::from_f32(ctx, &freqs, &[n as u32, p as u32], None, None)?;
-//     Ok(out)
-// }
 
-// // TODO....
-// impl GenotypeData {
-//     pub fn new(ctx: &GpuContext, genome: &Genome, entries: &Entries, seed: u64) -> Result<Self> {
-//         let n_entries: usize = entries.names.len();
-//         let n_loci_alleles: usize = genome.loci_alleles.len();
-//         ensure!(n_entries > 0, "Number of entries need to non-zero!");
-//         ensure!(
-//             n_loci_alleles > 0,
-//             "Number of loci-alleles need to non-zero!"
-//         );
-//         let mut rng = ChaCha8Rng::seed_from_u64(seed);
-//         let beta = Beta::new(0.5, 0.5)
-//             .context("Failed to initialize Beta distribution: parameters must be greater than 0")?;
-//         let mut data_tmp: Vec<f32> = Vec::with_capacity(n_entries * n_loci_alleles);
-//         for _ in 0..(n_entries * n_loci_alleles) {
-//             data_tmp.push(beta.sample(&mut rng));
-//         }
-//         let data: GpuTensor = GpuTensor::from_f32(
-//             ctx,
-//             &data_tmp,
-//             &[n_entries as u32, n_loci_alleles as u32],
-//             None,
-//             None,
-//         )?;
-//         Ok(Self {
-//             entry_ids: (0..n_entries).collect(),
-//             locus_allele_ids: (0..n_loci_alleles).collect(),
-//             data,
-//         })
-//     }
-// }
+impl GenotypeData {
+    pub fn founders(ctx: &GpuContext, genome: &Genome, founder_entries: &Entries, af_shape: f32, seed: u64) -> Result<Self> {
+        let n: usize = founder_entries.names.len();
+        let p: usize = genome.loci_alleles.len();
+        ensure!(n > 0, "Number of founders need to non-zero!");
+        ensure!(
+            p > 0,
+            "Number of loci-alleles need to non-zero!"
+        );
+        let mut rng = ChaCha8Rng::seed_from_u64(seed);
+        let beta = Beta::new(af_shape, af_shape).context("Failed to initialize Beta distribution: parameters must be greater than 0")?;
+        let mut data_tmp: Vec<f32> = Vec::with_capacity(n*p);
+        for _ in 0..(n*p) {
+            data_tmp.push(beta.sample(&mut rng));
+        }
+        let data = GpuTensor::from_f32(ctx, &data_tmp, &[n as u32, p as u32], None, None)?;
+        Ok(Self { entry_ids: (0..n).collect(), locus_allele_ids: (0..p).collect(), data })
+    }
+    pub fn new() {
+        // Account for LD decay here to generate a population from the founder genotypes...
+        todo!()
+    }
+}
 
 /// The observed phenotype metrics backed by high-performance GPU storage.
 ///
