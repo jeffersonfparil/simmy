@@ -19,8 +19,6 @@
 //!    the memory overhead of unpacking deeply nested structures.
 //!
 
-use std::range::Range;
-
 use crate::linalg::context::GpuContext;
 use crate::linalg::tensor::GpuTensor;
 use anyhow::{Context, Result, ensure};
@@ -845,26 +843,33 @@ pub struct GenotypeData {
     pub data: GpuTensor,
 }
 
-
 impl GenotypeData {
-    pub fn founders(ctx: &GpuContext, genome: &Genome, founder_entries: &Entries, af_shape: f32, seed: u64) -> Result<Self> {
+    pub fn founders(
+        ctx: &GpuContext,
+        genome: &Genome,
+        founder_entries: &Entries,
+        af_shape: f32,
+        seed: u64,
+    ) -> Result<Self> {
         let n: usize = founder_entries.names.len();
         let p: usize = genome.loci_alleles.len();
         ensure!(n > 0, "Number of founders need to non-zero!");
-        ensure!(
-            p > 0,
-            "Number of loci-alleles need to non-zero!"
-        );
+        ensure!(p > 0, "Number of loci-alleles need to non-zero!");
         let mut rng = ChaCha8Rng::seed_from_u64(seed);
-        let beta = Beta::new(af_shape, af_shape).context("Failed to initialize Beta distribution: parameters must be greater than 0")?;
-        let mut data_tmp: Vec<f32> = Vec::with_capacity(n*p);
-        for _ in 0..(n*p) {
+        let beta = Beta::new(af_shape, af_shape)
+            .context("Failed to initialize Beta distribution: parameters must be greater than 0")?;
+        let mut data_tmp: Vec<f32> = Vec::with_capacity(n * p);
+        for _ in 0..(n * p) {
             data_tmp.push(beta.sample(&mut rng));
         }
         let data = GpuTensor::from_f32(ctx, &data_tmp, &[n as u32, p as u32], None, None)?;
-        Ok(Self { entry_ids: (0..n).collect(), locus_allele_ids: (0..p).collect(), data })
+        Ok(Self {
+            entry_ids: (0..n).collect(),
+            locus_allele_ids: (0..p).collect(),
+            data,
+        })
     }
-    pub fn new() {
+    pub fn new() -> Result<Self> {
         // Account for LD decay here to generate a population from the founder genotypes...
         todo!()
     }
