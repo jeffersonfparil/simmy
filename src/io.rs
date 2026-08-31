@@ -593,10 +593,19 @@ impl Genome {
 /// this qualitative tracking from the dense numerical genotype tensors, you can query, slice,
 /// and filter breeding cohorts (e.g., separating founders, generation F1, or target breeding lines)
 /// cleanly on the CPU to dynamically assemble indexing vectors for GPU acceleration.
+///
+/// Each entry may represent:
+/// * A single individual.
+/// * An inbred line.
+/// * A clone.
+/// * A pooled sample.
+/// * A population aggregate.
 #[derive(Debug, Clone)]
 pub struct Entries {
     /// Names or unique identifiers of each individual or line in the dataset.
     pub names: Vec<String>,
+    /// Number of haploid genomes per entry, e.g. 2 for diploid individuals, 4 for tetraploid individuals, 84 for a pool of 42 individual diploids, and usize::MAX for an arbitrarily large population of diploid or poplyploid individuals
+    pub ploidies: Vec<usize>,
     /// Taxonomic classification (e.g., species or subspecies) for multi-species scenarios.
     pub species: Vec<String>,
     /// Breeding cohort or origin group identifier (e.g., "Founder_A", "Cycle_5").
@@ -608,64 +617,100 @@ pub struct Entries {
 }
 
 impl Entries {
-    /// Constructs an `Entries` struct containing demographic metadata for `n` individuals.
+    /// Constructs an `Entries` collection containing demographic metadata
+    /// for `n` entries.
     ///
     /// # Overview
-    /// This constructor builds five parallel metadata vectors:
-    /// - `names`
-    /// - `species`
-    /// - `populations`
-    /// - `classifications`
-    /// - `notes`
     ///
-    /// Each vector is guaranteed to have length `n`, ensuring strict struct‑of‑arrays
-    /// (SoA) alignment. When optional slices are provided, they are copied verbatim
-    /// into owned `Vec<String>` values.
+    /// This constructor builds six parallel metadata vectors:
     ///
-    /// When a field is `None`, a deterministic, zero‑padded default is generated.
-    /// The padding width is derived from `n - 1`, ensuring consistent formatting
-    /// across all identifiers. For example:
+    /// * `names`
+    /// * `ploidies`
+    /// * `species`
+    /// * `populations`
+    /// * `classifications`
+    /// * `notes`
     ///
-    /// - `n = 3`  → `"entry_0"`, `"entry_1"`, `"entry_2"`
-    /// - `n = 12` → `"entry_00"`, `"entry_01"`, ..., `"entry_11"`
+    /// Each vector is guaranteed to have length `n`, ensuring strict
+    /// structure-of-arrays (SoA) alignment. Entry `i` in every vector
+    /// describes the same biological entity.
     ///
-    /// The same padding rule applies to:
-    /// - `names`: `"entry_<i>"`
-    /// - `species`: `"species_<i>"`
-    /// - `populations`: `"population_<i>"`
-    /// - `classifications`: `"classification_<i>"`
+    /// When optional values are supplied they are copied into owned vectors.
+    /// Otherwise deterministic defaults are generated.
     ///
-    /// Notes default to empty strings.
+    /// # Default Values
     ///
-    /// These defaults provide meaningful semantic labels for debugging, cohort slicing,
-    /// and metadata inspection while maintaining deterministic reproducibility.
+    /// Names, species, populations, and classifications are generated using
+    /// zero-padded deterministic identifiers.
+    ///
+    /// Examples:
+    ///
+    /// ```text
+    /// n = 3
+    ///
+    /// entry_0
+    /// entry_1
+    /// entry_2
+    ///
+    /// n = 12
+    ///
+    /// entry_00
+    /// entry_01
+    /// ...
+    /// entry_11
+    /// ```
+    ///
+    /// Default values:
+    ///
+    /// ```text
+    /// names            -> entry_<i>
+    /// ploidies         -> 2
+    /// species          -> species_<i>
+    /// populations      -> population_<i>
+    /// classifications  -> classification_<i>
+    /// notes            -> ""
+    /// ```
+    ///
+    /// The default ploidy of 2 represents diploid individuals, which are the
+    /// most common case in breeding and quantitative genetics applications.
     ///
     /// # Determinism
-    /// All default values are generated deterministically based on `n`. This ensures
-    /// reproducible cohort construction and stable indexing across simulation runs.
+    ///
+    /// All generated defaults depend only on `n`, ensuring reproducible
+    /// metadata construction and stable indexing across simulation runs.
     ///
     /// # Parameters
-    /// - `n`: Number of entries to construct. Must be non‑zero.
-    /// - `names`: Optional slice of entry names.
-    /// - `species`: Optional slice of species identifiers.
-    /// - `populations`: Optional slice of population or cohort identifiers.
-    /// - `classifications`: Optional slice of breeding tier or category labels.
-    /// - `notes`: Optional slice of free‑form metadata notes.
+    ///
+    /// * `n` - Number of entries to construct. Must be greater than zero.
+    /// * `names` - Optional entry identifiers.
+    /// * `ploidies` - Optional numbers of haploid genomes represented by
+    ///   each entry.
+    /// * `species` - Optional species identifiers.
+    /// * `populations` - Optional cohort or population identifiers.
+    /// * `classifications` - Optional user-defined grouping labels.
+    /// * `notes` - Optional free-form metadata.
     ///
     /// # Returns
-    /// A fully validated `Entries` struct with all five metadata vectors aligned by index.
+    ///
+    /// A validated `Entries` object with six aligned metadata vectors.
     ///
     /// # Validation
-    /// - Ensures `n > 0`.
-    /// - Ensures each provided slice has length `n`.
+    ///
+    /// * Ensures `n > 0`.
+    /// * Ensures each supplied vector has length `n`.
+    /// * Ensures every ploidy is greater than zero.
     ///
     /// # Errors
+    ///
     /// Returns an error if:
-    /// - `n == 0`,
-    /// - Any provided slice does not have length `n`.
+    ///
+    /// * `n == 0`.
+    /// * Any supplied metadata vector does not have length `n`.
+    /// * Any supplied ploidy is zero.
     pub fn new(
         n: usize,
         names: Option<&[&str]>,
+        ploidies: Option<&[usize]>,
         species: Option<&[&str]>,
         populations: Option<&[&str]>,
         classifications: Option<&[&str]>,
@@ -676,6 +721,10 @@ impl Entries {
         let names: Vec<String> = match names {
             Some(x) => x.iter().map(|&x| x.to_owned()).collect(),
             None => (0..n).map(|x| format!("entry_{:0>n_digits$}", x)).collect(),
+        };
+        let ploidies: Vec<usize> = match ploidies {
+            Some(x) => x.to_vec(),
+            None => vec![2; n],
         };
         let species: Vec<String> = match species {
             Some(x) => x.iter().map(|&x| x.to_owned()).collect(),
@@ -706,6 +755,16 @@ impl Entries {
             names.len()
         );
         ensure!(
+            n == ploidies.len(),
+            "The expected number of entries (n={}) does not match the ploidies (ploidies.len()={})!",
+            n,
+            ploidies.len()
+        );
+        ensure!(
+            ploidies.iter().all(|&p| p > 0),
+            "Ploidies must be greater than zero!"
+        );
+        ensure!(
             n == species.len(),
             "The expected number of entries (n={}) does not match the species (species.len()={})!",
             n,
@@ -731,6 +790,7 @@ impl Entries {
         );
         Ok(Self {
             names,
+            ploidies,
             species,
             populations,
             classifications,
@@ -839,7 +899,9 @@ pub struct GenotypeData {
     /// Columns of the genotype matrix: indices mapping to physical alleles via [`LocusAllele`].
     pub locus_allele_ids: Vec<usize>,
     /// Dense GPU matrix of shape `[entry_ids.len(), locus_allele_ids.len()]` [2].
-    /// Represents allelic dosages (e.g., count, probability, or state of the allele).
+    /// Represents allele frequencies for each locus-allele combination.
+    /// The set of attainable frequencies is constrained by the ploidy
+    /// of the corresponding entry.
     pub data: GpuTensor,
 }
 
@@ -855,12 +917,21 @@ impl GenotypeData {
         let p: usize = genome.loci_alleles.len();
         ensure!(n > 0, "Number of founders need to non-zero!");
         ensure!(p > 0, "Number of loci-alleles need to non-zero!");
+        ensure!(
+            af_shape > 0.0,
+            "The shape of the allele frequency spectrum (Beta distribution shape parameters) need to be greater than zero!"
+        );
         let mut rng = ChaCha8Rng::seed_from_u64(seed);
         let beta = Beta::new(af_shape, af_shape)
             .context("Failed to initialize Beta distribution: parameters must be greater than 0")?;
         let mut data_tmp: Vec<f32> = Vec::with_capacity(n * p);
-        for _ in 0..(n * p) {
-            data_tmp.push(beta.sample(&mut rng));
+        for i in 0..n {
+            let ploidy = founder_entries.ploidies[i] as f32;
+            for _ in 0..p {
+                let q: f32 = beta.sample(&mut rng);
+                let g: f32 = (q * ploidy).round() / ploidy;
+                data_tmp.push(g);
+            }
         }
         let data = GpuTensor::from_f32(ctx, &data_tmp, &[n as u32, p as u32], None, None)?;
         Ok(Self {
@@ -1139,7 +1210,7 @@ mod tests {
     //////////////////////////////
     #[test]
     fn test_entries_new_defaults() {
-        let entries = Entries::new(11, None, None, None, None, None).unwrap();
+        let entries = Entries::new(11, None, None, None, None, None, None).unwrap();
         // n = 11 → n_digits = len("10") = 2 → 00, 01, ..., 10
         assert_eq!(
             entries.names,
@@ -1201,6 +1272,7 @@ mod tests {
     #[test]
     fn test_entries_new_with_provided_fields() {
         let names = ["A", "B", "C"];
+        let ploidies = [2; 3];
         let species = ["dog", "cat", "horse"];
         let populations = ["founder", "F1", "F2"];
         let classifications = ["elite", "candidate", "discard"];
@@ -1208,6 +1280,7 @@ mod tests {
         let entries = Entries::new(
             3,
             Some(&names),
+            Some(&ploidies),
             Some(&species),
             Some(&populations),
             Some(&classifications),
@@ -1227,7 +1300,7 @@ mod tests {
     fn test_entries_new_mixed_fields() {
         let names = ["X", "Y"];
         let notes = ["alpha", "beta"];
-        let entries = Entries::new(2, Some(&names), None, None, None, Some(&notes)).unwrap();
+        let entries = Entries::new(2, Some(&names), None, None, None, None, Some(&notes)).unwrap();
         assert_eq!(entries.names, vec!["X", "Y"]);
         assert_eq!(entries.species, vec!["species_0", "species_1"]);
         assert_eq!(entries.populations, vec!["population_0", "population_1"]);
@@ -1247,12 +1320,13 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         assert!(err.is_err());
     }
     #[test]
     fn test_entries_new_default_formatting() {
-        let entries = Entries::new(12, None, None, None, None, None).unwrap();
+        let entries = Entries::new(12, None, None, None, None, None, None).unwrap();
         // 12 → n_digits = 2
         assert_eq!(entries.names[0], "entry_00");
         assert_eq!(entries.names[11], "entry_11");
