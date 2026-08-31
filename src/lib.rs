@@ -15,7 +15,7 @@ pub async fn run() -> Result<()> {
     let a = GpuTensor::from_f32(
         &ctx,
         &(0..6).map(|x| x as f32).collect::<Vec<f32>>(),
-        vec![2, 3],
+        &[2, 3],
         None,
         None,
     )?;
@@ -23,7 +23,7 @@ pub async fn run() -> Result<()> {
     let b = GpuTensor::from_f32(
         &ctx,
         &(0..12).map(|x| x as f32).collect::<Vec<f32>>(),
-        vec![3, 4],
+        &[3, 4],
         None,
         None,
     )?;

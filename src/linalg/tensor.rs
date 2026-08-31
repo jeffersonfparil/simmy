@@ -82,21 +82,24 @@ pub struct GpuTensor {
 /// * The backing storage is too small for the specified layout
 fn parse_tensor_params(
     n: u32,
-    shape: Vec<u32>,
-    strides: Option<Vec<u32>>,
+    shape: &[u32],
+    strides: Option<&[u32]>,
     offset: Option<u32>,
 ) -> Result<(Vec<u32>, Vec<u32>, u32)> {
     let n = n.max(1);
-    let strides: Vec<u32> = strides.unwrap_or_else(|| {
-        let mut products: Vec<u32> = Vec::with_capacity(shape.len());
-        let mut stride = 1;
-        for &d in shape.iter().rev() {
-            products.push(stride);
-            stride *= d;
+    let strides: Vec<u32> = match strides {
+        Some(x) => x.to_vec(),
+        None => {
+            let mut products: Vec<u32> = Vec::with_capacity(shape.len());
+            let mut stride = 1;
+            for &d in shape.iter().rev() {
+                products.push(stride);
+                stride *= d;
+            }
+            products.reverse();
+            products
         }
-        products.reverse();
-        products
-    });
+    };
     ensure!(
         shape.len() == strides.len(),
         "The shape and strides are incompatible!"
@@ -119,7 +122,7 @@ fn parse_tensor_params(
         n >= required_len,
         "The shape and strides are incompatible with the data!"
     );
-    Ok((shape, strides, offset))
+    Ok((shape.to_vec(), strides, offset))
 }
 
 impl GpuTensor {
@@ -144,8 +147,8 @@ impl GpuTensor {
     pub fn from_f32(
         ctx: &GpuContext,
         data: &[f32],
-        shape: Vec<u32>,
-        strides: Option<Vec<u32>>,
+        shape: &[u32],
+        strides: Option<&[u32]>,
         offset: Option<u32>,
     ) -> Result<Self> {
         let (shape, strides, offset) =
@@ -186,8 +189,8 @@ impl GpuTensor {
     /// * The offset falls outside the buffer.
     pub fn from_buffer(
         buffer: Arc<Buffer>,
-        shape: Vec<u32>,
-        strides: Option<Vec<u32>>,
+        shape: &[u32],
+        strides: Option<&[u32]>,
         offset: Option<u32>,
     ) -> Result<Self> {
         let n: u32 = ((buffer.size() as usize) / std::mem::size_of::<f32>()) as u32;
@@ -373,9 +376,9 @@ mod tests {
     #[test]
     fn creates_1d_tensor() -> Result<()> {
         let ctx = context();
-        let tensor = GpuTensor::from_f32(&ctx, &[1.0f32, 2.0, 3.0, 4.0], vec![4], None, None)?;
+        let tensor = GpuTensor::from_f32(&ctx, &[1.0f32, 2.0, 3.0, 4.0], &[4], None, None)?;
         println!("tensor: {}", tensor);
-        assert_eq!(tensor.shape, vec![4]);
+        assert_eq!(tensor.shape, &[4]);
         assert_eq!(
             tensor.buffer.size(),
             (4 * std::mem::size_of::<f32>()) as u64
@@ -388,11 +391,11 @@ mod tests {
         let tensor = GpuTensor::from_f32(
             &ctx,
             &[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0],
-            vec![2, 3],
+            &[2, 3],
             None,
             None,
         )?;
-        assert_eq!(tensor.shape, vec![2, 3]);
+        assert_eq!(tensor.shape, &[2, 3]);
         assert_eq!(
             tensor.buffer.size(),
             (6 * std::mem::size_of::<f32>()) as u64
@@ -402,8 +405,8 @@ mod tests {
     #[test]
     fn creates_3d_tensor() -> Result<()> {
         let ctx = context();
-        let tensor = GpuTensor::from_f32(&ctx, &[0.0f32; 24], vec![2, 3, 4], None, None)?;
-        assert_eq!(tensor.shape, vec![2, 3, 4]);
+        let tensor = GpuTensor::from_f32(&ctx, &[0.0f32; 24], &[2, 3, 4], None, None)?;
+        assert_eq!(tensor.shape, &[2, 3, 4]);
         assert_eq!(
             tensor.buffer.size(),
             (24 * std::mem::size_of::<f32>()) as u64
@@ -413,68 +416,67 @@ mod tests {
     #[test]
     fn creates_empty_tensor() -> Result<()> {
         let ctx = context();
-        let tensor = GpuTensor::from_f32(&ctx, &[], vec![0], None, None)?;
-        assert_eq!(tensor.shape, vec![0]);
+        let tensor = GpuTensor::from_f32(&ctx, &[], &[0], None, None)?;
+        assert_eq!(tensor.shape, &[0]);
         assert_eq!(tensor.buffer.size(), 0);
         Ok(())
     }
     #[test]
     fn creates_tensor_from_buffer() -> Result<()> {
         let ctx = context();
-        let original = vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0];
-        let source = GpuTensor::from_f32(&ctx, &original, vec![2, 3], None, None)?;
-        let tensor = GpuTensor::from_buffer(source.buffer, vec![2, 3], None, None)?;
-        assert_eq!(tensor.shape, vec![2, 3]);
-        assert_eq!(tensor.strides, vec![3, 1]);
+        let original = &[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let source = GpuTensor::from_f32(&ctx, original, &[2, 3], None, None)?;
+        let tensor = GpuTensor::from_buffer(source.buffer, &[2, 3], None, None)?;
+        assert_eq!(tensor.shape, &[2, 3]);
+        assert_eq!(tensor.strides, &[3, 1]);
         assert_eq!(tensor.offset, 0);
         Ok(())
     }
     #[test]
     fn from_buffer_preserves_custom_strides() -> Result<()> {
         let ctx = context();
-        let source = GpuTensor::from_f32(&ctx, &[0.0f32; 24], vec![2, 3, 4], None, None)?;
+        let source = GpuTensor::from_f32(&ctx, &[0.0f32; 24], &[2, 3, 4], None, None)?;
 
-        let tensor =
-            GpuTensor::from_buffer(source.buffer, vec![2, 3, 4], Some(vec![12, 4, 1]), None)?;
-        assert_eq!(tensor.shape, vec![2, 3, 4]);
-        assert_eq!(tensor.strides, vec![12, 4, 1]);
+        let tensor = GpuTensor::from_buffer(source.buffer, &[2, 3, 4], Some(&[12, 4, 1]), None)?;
+        assert_eq!(tensor.shape, &[2, 3, 4]);
+        assert_eq!(tensor.strides, &[12, 4, 1]);
         Ok(())
     }
     #[test]
     fn from_buffer_preserves_offset() -> Result<()> {
         let ctx = context();
-        let source = GpuTensor::from_f32(&ctx, &[0.0f32; 32], vec![32], None, None)?;
-        let tensor = GpuTensor::from_buffer(source.buffer, vec![4], None, Some(8))?;
+        let source = GpuTensor::from_f32(&ctx, &[0.0f32; 32], &[32], None, None)?;
+        let tensor = GpuTensor::from_buffer(source.buffer, &[4], None, Some(8))?;
         assert_eq!(tensor.offset, 8);
         Ok(())
     }
     #[test]
     fn from_buffer_generates_default_strides() -> Result<()> {
         let ctx = context();
-        let source = GpuTensor::from_f32(&ctx, &[0.0f32; 24], vec![2, 3, 4], None, None)?;
-        let tensor = GpuTensor::from_buffer(source.buffer, vec![2, 3, 4], None, None)?;
-        assert_eq!(tensor.strides, vec![12, 4, 1]);
+        let source = GpuTensor::from_f32(&ctx, &[0.0f32; 24], &[2, 3, 4], None, None)?;
+        let tensor = GpuTensor::from_buffer(source.buffer, &[2, 3, 4], None, None)?;
+        assert_eq!(tensor.strides, &[12, 4, 1]);
         Ok(())
     }
     #[test]
     fn from_buffer_rejects_shape_stride_rank_mismatch() {
         let ctx = context();
-        let source = GpuTensor::from_f32(&ctx, &[0.0f32; 24], vec![2, 3, 4], None, None).unwrap();
-        let result = GpuTensor::from_buffer(source.buffer, vec![2, 3, 4], Some(vec![12, 4]), None);
+        let source = GpuTensor::from_f32(&ctx, &[0.0f32; 24], &[2, 3, 4], None, None).unwrap();
+        let result = GpuTensor::from_buffer(source.buffer, &[2, 3, 4], Some(&[12, 4]), None);
         assert!(result.is_err());
     }
     #[test]
     fn from_buffer_rejects_excessive_offset() {
         let ctx = context();
-        let source = GpuTensor::from_f32(&ctx, &[0.0f32; 16], vec![16], None, None).unwrap();
-        let result = GpuTensor::from_buffer(source.buffer, vec![4], None, Some(100));
+        let source = GpuTensor::from_f32(&ctx, &[0.0f32; 16], &[16], None, None).unwrap();
+        let result = GpuTensor::from_buffer(source.buffer, &[4], None, Some(100));
         assert!(result.is_err());
     }
     #[test]
     fn round_trip_tensor_data() -> Result<()> {
         let ctx = context();
-        let original = vec![1.0f32, 2.0, 3.0, 4.0];
-        let tensor = GpuTensor::from_f32(&ctx, &original, vec![4], None, None)?;
+        let original = &[1.0f32, 2.0, 3.0, 4.0];
+        let tensor = GpuTensor::from_f32(&ctx, original, &[4], None, None)?;
         let extracted = tensor.to_vec_f32(&ctx)?;
         assert_eq!(extracted, original);
         Ok(())
@@ -483,8 +485,8 @@ mod tests {
     fn from_buffer_round_trip_data() -> Result<()> {
         let ctx = context();
         let original: Vec<f32> = (0..32).map(|x| x as f32).collect();
-        let source = GpuTensor::from_f32(&ctx, &original, vec![32], None, None)?;
-        let tensor = GpuTensor::from_buffer(source.buffer, vec![32], None, None)?;
+        let source = GpuTensor::from_f32(&ctx, &original, &[32], None, None)?;
+        let tensor = GpuTensor::from_buffer(source.buffer, &[32], None, None)?;
         let extracted = tensor.to_vec_f32(&ctx)?;
         assert_eq!(extracted, original);
         Ok(())
@@ -494,17 +496,17 @@ mod tests {
         let ctx = context();
         // shape = [2, 3, 4] --> 24 elements
         let data: Vec<f32> = (0..24).map(|x| x as f32).collect();
-        let tensor = GpuTensor::from_f32(&ctx, &data, vec![2, 3, 4], None, None)?;
+        let tensor = GpuTensor::from_f32(&ctx, &data, &[2, 3, 4], None, None)?;
         // linear_idx = 17 --> coords = [1, 1, 1]
         let coords = tensor.tensor_coords(17);
-        assert_eq!(coords, vec![1, 1, 1]);
+        assert_eq!(coords, &[1, 1, 1]);
         Ok(())
     }
     #[test]
     fn test_tensor_coords_zero_rank() -> Result<()> {
         let ctx = context();
         // Rank‑0 tensor
-        let tensor = GpuTensor::from_f32(&ctx, &[], vec![], None, None)?;
+        let tensor = GpuTensor::from_f32(&ctx, &[], &[], None, None)?;
         let coords = tensor.tensor_coords(0);
         assert_eq!(coords.len(), 0);
         Ok(())
@@ -514,8 +516,8 @@ mod tests {
         let ctx = context();
         // shape = [2, 2] --> 4 elements
         let data: Vec<f32> = (0..4).map(|x| x as f32).collect();
-        let tensor = GpuTensor::from_f32(&ctx, &data, vec![2, 2], None, None)?;
-        let expected = [vec![0, 0], vec![0, 1], vec![1, 0], vec![1, 1]];
+        let tensor = GpuTensor::from_f32(&ctx, &data, &[2, 2], None, None)?;
+        let expected = [&[0, 0], &[0, 1], &[1, 0], &[1, 1]];
         for (idx, exp) in expected.iter().enumerate() {
             assert_eq!(tensor.tensor_coords(idx), *exp);
         }
@@ -526,7 +528,7 @@ mod tests {
         let ctx = context();
         // shape = [2, 3, 4]
         let data: Vec<f32> = (0..24).map(|x| x as f32).collect();
-        let tensor = GpuTensor::from_f32(&ctx, &data, vec![2, 3, 4], None, None)?;
+        let tensor = GpuTensor::from_f32(&ctx, &data, &[2, 3, 4], None, None)?;
         // coords = [1, 1, 1] --> 1*12 + 1*4 + 1*1 = 17
         let idx = tensor.linear_index(&[1, 1, 1]);
         assert_eq!(idx, 17);
@@ -537,7 +539,7 @@ mod tests {
         let ctx = context();
         // shape = [3], offset = 10
         let data: Vec<f32> = (0..13).map(|x| x as f32).collect();
-        let tensor = GpuTensor::from_f32(&ctx, &data, vec![3], None, Some(10))?;
+        let tensor = GpuTensor::from_f32(&ctx, &data, &[3], None, Some(10))?;
         // coords = [2] --> offset + 2*1 = 12
         let idx = tensor.linear_index(&[2]);
         assert_eq!(idx, 12);
@@ -548,7 +550,7 @@ mod tests {
         let ctx = context();
         // shape = [2, 3, 4]
         let data: Vec<f32> = (0..24).map(|x| x as f32).collect();
-        let tensor = GpuTensor::from_f32(&ctx, &data, vec![2, 3, 4], None, None)?;
+        let tensor = GpuTensor::from_f32(&ctx, &data, &[2, 3, 4], None, None)?;
         // For every linear index, tensor_coords --> linear_index must round‑trip
         for linear in 0..24 {
             let coords = tensor.tensor_coords(linear);
