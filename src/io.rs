@@ -7,7 +7,7 @@ use rand_distr::{Beta, Distribution};
 
 #[derive(Debug, Clone)]
 pub struct Chromosomes {
-    pub chromosomes: Vec<String>, // autosomal chromosomes
+    pub chromosomes: Vec<String>,                  // autosomal chromosomes
     pub sex_chromosomes: Option<(String, String)>, // names of each sex chromosome in the pair, i.e. in addition to the autosomal chromosomes above, which we set to None for autogamous species or populations
     /// Physical sizes (lengths in base pairs) corresponding to each chromosome including the sex chromosomes.
     /// Used for validating recombination crossover boundaries.
@@ -157,13 +157,14 @@ impl Chromosomes {
             n,
             ld_decay_distances.len()
         );
-        if sex_chromosomes.is_none() {
-            ensure!(n >= 2, "The number of chromosomes need to be at least 2 when sex chromosomes are included (i.e. at least 1 pair of autosomal and 1 pair of sex chromosomes)!");
+        if !sex_chromosomes.is_none() {
+            ensure!(
+                n >= 2,
+                "The number of chromosomes need to be at least 2 when sex chromosomes are included (i.e. at least 1 pair of autosomal and 1 pair of sex chromosomes)!"
+            );
         };
-        let sex_chromosomes: Option<(String, String)> = match sex_chromosomes {
-            Some(x) => Some((x.0.to_owned(), x.1.to_owned())),
-            None => None,
-        };
+        let sex_chromosomes: Option<(String, String)> =
+            sex_chromosomes.map(|x| (x.0.to_owned(), x.1.to_owned()));
         let n_digits: usize = format!("{}", n - 1).len();
         let chromosomes: Vec<String> = (0..n).map(|i| format!("chr_{:0>n_digits$}", i)).collect();
         Ok(Self {
@@ -548,6 +549,7 @@ impl Genome {
     /// - Allele sequence count does not match `n_max_alleles`.
     /// - Duplicate allele sequences are detected.
     /// - The genome is too small to place `n_loci` loci of maximum allele width.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         n_chromosomes: usize,
         chromosome_lengths: Option<&[usize]>,
@@ -558,7 +560,12 @@ impl Genome {
         n_loci: usize,
         seed: u64,
     ) -> Result<Self> {
-        let chromosomes = Chromosomes::new(n_chromosomes, chromosome_lengths, ld_decay_distances, sex_chromosomes)?;
+        let chromosomes = Chromosomes::new(
+            n_chromosomes,
+            chromosome_lengths,
+            ld_decay_distances,
+            sex_chromosomes,
+        )?;
         let alleles = Alleles::new(n_max_alleles, allele_sequences)?;
         let (loci, loci_alleles) = Locus::new(&chromosomes, &alleles, n_loci, seed)?;
         Ok(Self {
@@ -920,16 +927,21 @@ impl GenotypeData {
                 data_tmp.push(g);
             }
         }
-        ensure!(genome.chromosomes.sex_chromosomes.is_none() && freq_sex_chrom_homozygotes.is_none(), "If there are no sex chromosomes then there should also be no frequency of sex chromosome homopzygotes!");
-        let n_sex_chrom_homozygotes: usize = (n * freq_sex_chrom_homozygotes).round() as usize;
+        ensure!(
+            genome.chromosomes.sex_chromosomes.is_none() && freq_sex_chrom_homozygotes.is_none(),
+            "If there are no sex chromosomes then there should also be no frequency of sex chromosome homopzygotes!"
+        );
+        let freq_sex_chrom_homozygotes: f32 = freq_sex_chrom_homozygotes.unwrap_or(0.0);
+        let n_sex_chrom_homozygotes: usize =
+            ((n as f32) * freq_sex_chrom_homozygotes).round() as usize;
         let n_sex_chrom_heterozygotes: usize = n - n_sex_chrom_homozygotes;
-        let mut sex_chromosome_ids: Vec<(usize, usize)>> = Vec::with_capacity(n);
+        let mut sex_chromosome_ids: Vec<(usize, usize)> = Vec::with_capacity(n);
         if !genome.chromosomes.sex_chromosomes.is_none() {
-            for i in 0..n_sex_chrom_homozygotes {
-                sex_chromosome_ids[i] = (0, 0); // (0,0) represents XX or ZZ
+            for _ in 0..n_sex_chrom_homozygotes {
+                sex_chromosome_ids.push((0, 0)); // (0,0) represents XX or ZZ
             }
-            for i in 0..n_sex_chrom_heterozygotes {
-                sex_chromosome_ids[i] = (0, 1); // (0,1) represents XY or ZY sexes
+            for _ in 0..n_sex_chrom_heterozygotes {
+                sex_chromosome_ids.push((0, 1)); // (0,1) represents XY or ZY sexes
             }
         }
         let data = GpuTensor::from_f32(ctx, &data_tmp, &[n as u32, p as u32], None, None)?;
@@ -941,17 +953,17 @@ impl GenotypeData {
         })
     }
     pub fn sample_mating_pairs(
-        genome: &Genome,
+        _genome: &Genome,
         genotype_data: &Self,
-        n: usize, 
+        n: usize,
         seed: u64,
     ) -> Result<(Vec<usize>, Vec<usize>)> {
         let n_parents: usize = genotype_data.entry_ids.len();
         let mut rng = ChaCha8Rng::seed_from_u64(seed);
-        // First sample the pairs which will generate the 
+        // First sample the pairs which will generate the
         let mut parents_1: Vec<usize> = Vec::with_capacity(n);
         let mut parents_2: Vec<usize> = Vec::with_capacity(n);
-        if genotype_data.sex_chromosome_ids[0].is_none() {
+        if genotype_data.sex_chromosome_ids.is_none() {
             for _ in 0..n {
                 parents_1.push(rng.random_range(0..n_parents));
                 parents_2.push(rng.random_range(0..n_parents));
@@ -960,18 +972,24 @@ impl GenotypeData {
             let mut homozygotes: Vec<usize> = vec![];
             let mut heterozygotes: Vec<usize> = vec![];
             for i in 0..n_parents {
-                let sex_genotype = match genotype_data.sex_chromosome_ids[i] {
-                    Some(x) => x,
-                    None => (2,2), 
+                let sex_genotype: (usize, usize) = match &genotype_data.sex_chromosome_ids {
+                    Some(x) => x[i],
+                    None => (2, 2),
                 };
-                ensure!(sex_genotype != (2, 2), "We expect sex genotypes to be not None!");
+                ensure!(
+                    sex_genotype != (2, 2),
+                    "We expect sex genotypes to be not None!"
+                );
                 if sex_genotype.0 == sex_genotype.1 {
                     homozygotes.push(i);
                 } else {
                     heterozygotes.push(i);
                 }
             }
-            ensure!((homozygotes.len() >= 1) && (heterozygotes.len() >= 1), "We expect at least 1 homozygote and 1 heterozygote sex genotypes, i.e. a male and a female founder!");
+            ensure!(
+                !homozygotes.is_empty() && !heterozygotes.is_empty(),
+                "We expect at least 1 homozygote and 1 heterozygote sex genotypes, i.e. a male and a female founder!"
+            );
             for _ in 0..n {
                 if let Some(&x) = homozygotes.choose(&mut rng) {
                     parents_1.push(x)
@@ -983,13 +1001,12 @@ impl GenotypeData {
         }
         Ok((parents_1, parents_2))
     }
-    
-    
+
     // pub fn mate(
     //     ctx: &GpuContext,
     //     genome: &Genome,
     //     founders: &Self,
-    //     n: usize, 
+    //     n: usize,
     //     seed: u64
     // ) -> Result<Self> {
     //     let parents_1, parents_2 = id_mating_pairs(genome, founders, n  seed)?;
@@ -1025,26 +1042,26 @@ mod tests {
     //////////////////////////////
     #[test]
     fn chromosomes_default_lengths() -> Result<()> {
-        let chr = Chromosomes::new(3, None, None)?;
+        let chr = Chromosomes::new(3, None, None, None)?;
         assert_eq!(chr.chromosomes, vec!["chr_0", "chr_1", "chr_2"]);
         assert_eq!(chr.lengths, vec![1_000_000, 1_000_000, 1_000_000]);
         Ok(())
     }
     #[test]
     fn chromosomes_custom_lengths() -> Result<()> {
-        let chr = Chromosomes::new(3, Some(&[10, 20, 30]), None)?;
+        let chr = Chromosomes::new(3, Some(&[10, 20, 30]), None, None)?;
         assert_eq!(chr.chromosomes, &["chr_0", "chr_1", "chr_2"]);
         assert_eq!(chr.lengths, &[10, 20, 30]);
         Ok(())
     }
     #[test]
     fn chromosomes_length_mismatch_fails() {
-        let result = Chromosomes::new(3, Some(&[10, 20]), None);
+        let result = Chromosomes::new(3, Some(&[10, 20]), None, None);
         assert!(result.is_err());
     }
     #[test]
     fn chromosomes_zero_n() -> Result<()> {
-        let result = Chromosomes::new(0, None, None);
+        let result = Chromosomes::new(0, None, None, None);
         assert!(result.is_err());
         Ok(())
     }
@@ -1108,7 +1125,7 @@ mod tests {
     //////////////////////////////
     #[test]
     fn test_locus_new_basic() {
-        let chromosomes = Chromosomes::new(3, Some(&[100, 200, 300]), None).unwrap();
+        let chromosomes = Chromosomes::new(3, Some(&[100, 200, 300]), None, None).unwrap();
         let alleles = Alleles::new(5, None).unwrap();
         let (loci, locus_alleles) = Locus::new(&chromosomes, &alleles, 10, 42).unwrap();
         println!("loci: {:?}", loci);
@@ -1122,7 +1139,7 @@ mod tests {
     }
     #[test]
     fn test_locus_coordinates_and_width() {
-        let chromosomes = Chromosomes::new(1, Some(&[50]), None).unwrap();
+        let chromosomes = Chromosomes::new(1, Some(&[50]), None, None).unwrap();
         let alleles = Alleles::new(5, None).unwrap();
         let (loci, _) = Locus::new(&chromosomes, &alleles, 5, 42).unwrap();
         for locus in &loci {
@@ -1141,7 +1158,7 @@ mod tests {
     }
     #[test]
     fn test_locus_allele_mapping_correctness() {
-        let chromosomes = Chromosomes::new(2, Some(&[100, 100]), None).unwrap();
+        let chromosomes = Chromosomes::new(2, Some(&[100, 100]), None, None).unwrap();
         let alleles = Alleles::new(4, None).unwrap();
         let (loci, locus_alleles) = Locus::new(&chromosomes, &alleles, 6, 42).unwrap();
         let expected_count: usize = loci.iter().map(|l| l.allele_ids.len()).sum();
@@ -1181,6 +1198,7 @@ mod tests {
             n_chromosomes,
             Some(&chromosome_lengths),
             None,
+            None,
             n_max_alleles,
             allele_sequences,
             n_loci,
@@ -1217,7 +1235,17 @@ mod tests {
     }
     #[test]
     fn test_genome_invariants() {
-        let genome = Genome::new(4, Some(&[150, 250, 350, 450]), None, 12, None, 20, 999).unwrap();
+        let genome = Genome::new(
+            4,
+            Some(&[150, 250, 350, 450]),
+            None,
+            None,
+            12,
+            None,
+            20,
+            999,
+        )
+        .unwrap();
         // Invariant 1: All loci reference valid chromosomes
         for locus in &genome.loci {
             assert!(locus.chromosome_id < genome.chromosomes.chromosomes.len());
@@ -1238,7 +1266,7 @@ mod tests {
     }
     #[test]
     fn test_genome_regression_snapshot() {
-        let genome = Genome::new(3, Some(&[100, 200, 300]), None, 5, None, 10, 42).unwrap();
+        let genome = Genome::new(3, Some(&[100, 200, 300]), None, None, 5, None, 10, 42).unwrap();
         // Snapshot: chromosome lengths
         assert_eq!(genome.chromosomes.lengths, vec![100, 200, 300]);
         // Snapshot: first locus
