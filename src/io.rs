@@ -1,24 +1,3 @@
-//! # Genomic and Phenotypic Data Structures for Breeding Simulations
-//!
-//! This module defines the CPU-side relational metadata and structural foundations
-//! of the simulation engine. The primary design goal is to cleanly decouple heavy,
-//! text-based biological metadata (which resides on the CPU) from raw, highly
-//! optimized numerical arrays (which reside on the GPU as [`GpuTensor`] instances) [1, 2].
-//!
-//! ### Why This Architecture is Optimized for Breeding Simulations:
-//! 1. **GPU/CPU Modularity:** Simulating cohorts over generations involves complex CPU-bound
-//!    recombination, crossover logic, and pedigree tracing. Meanwhile, calculating genomic
-//!    breeding values (GEBVs), selection indices, and linkage disequilibrium (LD) matrices
-//!    is delegated to massive parallel matrix algebra on the GPU [2].
-//! 2. **Support for Multi-Allelic Loci:** Real-world breeding pools contain highly variable
-//!    multi-allelic states (e.g., microsatellites, structural variants, or multiple founder
-//!    haplotypes). By flattening these states into a relational mapping table ([`LocusAllele`]),
-//!    this design supports arbitrary allelic counts per site on a unified GPU matrix coordinate system.
-//! 3. **Struct-of-Arrays (SoA) Layout:** Storing metadata attributes in parallel vectors
-//!    allows rapid CPU-side scanning, demographic filtering, and generation masking without
-//!    the memory overhead of unpacking deeply nested structures.
-//!
-
 use crate::linalg::context::GpuContext;
 use crate::linalg::tensor::GpuTensor;
 use anyhow::{Context, Result, ensure};
@@ -26,20 +5,14 @@ use rand::prelude::*;
 use rand_chacha::{ChaCha8Rng, rand_core::SeedableRng};
 use rand_distr::{Beta, Distribution};
 
-/// Represents physical genomic chromosomes, scaffolds, or contigs.
-///
-/// ### Breeding Simulation Context:
-/// Essential for simulating physical linkage, chromosomal crossover events during
-/// meiosis, and modeling genetic recombination maps. The sequence coordinates mapped
-/// against physical chromosomal lengths enable calculation of centimorgan (cM) distances
-/// and crossover probabilities during simulated mating cycles.
 #[derive(Debug, Clone)]
 pub struct Chromosomes {
-    /// Unique names/identifiers for each chromosome, scaffold, or contig.
-    pub chromosomes: Vec<String>,
-    /// Physical sizes (lengths in base pairs) corresponding to each chromosome.
+    pub chromosomes: Vec<String>, // autosomal chromosomes
+    pub sex_chromosomes: Option<(String, String)>, // names of each sex chromosome in the pair, i.e. in addition to the autosomal chromosomes above, which we set to None for autogamous species or populations
+    /// Physical sizes (lengths in base pairs) corresponding to each chromosome including the sex chromosomes.
     /// Used for validating recombination crossover boundaries.
-    pub lengths: Vec<usize>,
+    /// If sex chromosomes exists then the last elements is the lengths of largest sex chromosome in the pair.
+    pub lengths: Vec<usize>, // lengths of chromosomes including the sex chromosomes if they exist, i.e. the last element is the length of the larger sex chromosome
     // Distances in bp (L) between pairs of bases where the linkage (r²) falls to around 0.368, where:
     /// r²(d) = exp(-d / L), and d is the distance between 2 loci in bp
     pub ld_decay_distances: Vec<usize>,
@@ -155,6 +128,7 @@ impl Chromosomes {
         n: usize,
         lengths: Option<&[usize]>,
         ld_decay_distances: Option<&[usize]>,
+        sex_chromosomes: Option<(&str, &str)>, // Names of the sex chromosomes, which are included in the `n` and `lengths` which are represented as the last 2 lengths. Set to None is autogamous species or population.
     ) -> Result<Self> {
         ensure!(n > 0, "Number of chromosomes need to non-zero!");
         let lengths = match lengths {
@@ -183,10 +157,18 @@ impl Chromosomes {
             n,
             ld_decay_distances.len()
         );
+        if sex_chromosomes.is_none() {
+            ensure!(n >= 2, "The number of chromosomes need to be at least 2 when sex chromosomes are included (i.e. at least 1 pair of autosomal and 1 pair of sex chromosomes)!");
+        };
+        let sex_chromosomes: Option<(String, String)> = match sex_chromosomes {
+            Some(x) => Some((x.0.to_owned(), x.1.to_owned())),
+            None => None,
+        };
         let n_digits: usize = format!("{}", n - 1).len();
         let chromosomes: Vec<String> = (0..n).map(|i| format!("chr_{:0>n_digits$}", i)).collect();
         Ok(Self {
             chromosomes,
+            sex_chromosomes,
             lengths,
             ld_decay_distances,
         })
@@ -246,6 +228,7 @@ impl Alleles {
     /// - The number of provided sequences does not equal `n`.
     /// - Any duplicate allele name is detected after sorting.
     pub fn new(n: usize, sequences: Option<&[&str]>) -> Result<Self> {
+        // TODO: in the future, probably add a parementer where we can have sex chromosomes with different lengths resulting in a lot of deletions in the heterozygous genotypes in the sex chromosomes
         ensure!(n > 0, "Number of alleles need to non-zero!");
         let sequences = match sequences {
             Some(x) => x.iter().map(|&xi| xi.to_owned()).collect::<Vec<String>>(),
@@ -569,12 +552,13 @@ impl Genome {
         n_chromosomes: usize,
         chromosome_lengths: Option<&[usize]>,
         ld_decay_distances: Option<&[usize]>,
+        sex_chromosomes: Option<(&str, &str)>,
         n_max_alleles: usize,
         allele_sequences: Option<&[&str]>,
         n_loci: usize,
         seed: u64,
     ) -> Result<Self> {
-        let chromosomes = Chromosomes::new(n_chromosomes, chromosome_lengths, ld_decay_distances)?;
+        let chromosomes = Chromosomes::new(n_chromosomes, chromosome_lengths, ld_decay_distances, sex_chromosomes)?;
         let alleles = Alleles::new(n_max_alleles, allele_sequences)?;
         let (loci, loci_alleles) = Locus::new(&chromosomes, &alleles, n_loci, seed)?;
         Ok(Self {
@@ -898,6 +882,8 @@ pub struct GenotypeData {
     pub entry_ids: Vec<usize>,
     /// Columns of the genotype matrix: indices mapping to physical alleles via [`LocusAllele`].
     pub locus_allele_ids: Vec<usize>,
+    /// Sex genotype which points to the name of the sex chromosomes if they exists, None otherwise, i.e. (0,0), (0,1), and None, where (0,0) can represent XX, or ZZ, (0,1) can represent XY or ZY, and None represent autogamous individuals
+    pub sex_chromosome_ids: Option<Vec<(usize, usize)>>,
     /// Dense GPU matrix of shape `[entry_ids.len(), locus_allele_ids.len()]` [2].
     /// Represents allele frequencies for each locus-allele combination.
     /// The set of attainable frequencies is constrained by the ploidy
@@ -906,16 +892,17 @@ pub struct GenotypeData {
 }
 
 impl GenotypeData {
-    pub fn founders(
+    pub fn new(
         ctx: &GpuContext,
         genome: &Genome,
-        founder_entries: &Entries,
+        entries: &Entries,
         af_shape: f32,
+        freq_sex_chrom_homozygotes: Option<f32>,
         seed: u64,
     ) -> Result<Self> {
-        let n: usize = founder_entries.names.len();
+        let n: usize = entries.names.len();
         let p: usize = genome.loci_alleles.len();
-        ensure!(n > 0, "Number of founders need to non-zero!");
+        ensure!(n > 0, "Number of entries need to non-zero!");
         ensure!(p > 0, "Number of loci-alleles need to non-zero!");
         ensure!(
             af_shape > 0.0,
@@ -926,24 +913,89 @@ impl GenotypeData {
             .context("Failed to initialize Beta distribution: parameters must be greater than 0")?;
         let mut data_tmp: Vec<f32> = Vec::with_capacity(n * p);
         for i in 0..n {
-            let ploidy = founder_entries.ploidies[i] as f32;
+            let ploidy = entries.ploidies[i] as f32;
             for _ in 0..p {
                 let q: f32 = beta.sample(&mut rng);
                 let g: f32 = (q * ploidy).round() / ploidy;
                 data_tmp.push(g);
             }
         }
+        ensure!(genome.chromosomes.sex_chromosomes.is_none() && freq_sex_chrom_homozygotes.is_none(), "If there are no sex chromosomes then there should also be no frequency of sex chromosome homopzygotes!");
+        let n_sex_chrom_homozygotes: usize = (n * freq_sex_chrom_homozygotes).round() as usize;
+        let n_sex_chrom_heterozygotes: usize = n - n_sex_chrom_homozygotes;
+        let mut sex_chromosome_ids: Vec<(usize, usize)>> = Vec::with_capacity(n);
+        if !genome.chromosomes.sex_chromosomes.is_none() {
+            for i in 0..n_sex_chrom_homozygotes {
+                sex_chromosome_ids[i] = (0, 0); // (0,0) represents XX or ZZ
+            }
+            for i in 0..n_sex_chrom_heterozygotes {
+                sex_chromosome_ids[i] = (0, 1); // (0,1) represents XY or ZY sexes
+            }
+        }
         let data = GpuTensor::from_f32(ctx, &data_tmp, &[n as u32, p as u32], None, None)?;
         Ok(Self {
             entry_ids: (0..n).collect(),
             locus_allele_ids: (0..p).collect(),
+            sex_chromosome_ids: Some(sex_chromosome_ids),
             data,
         })
     }
-    pub fn new() -> Result<Self> {
-        // Account for LD decay here to generate a population from the founder genotypes...
-        todo!()
+    pub fn sample_mating_pairs(
+        genome: &Genome,
+        genotype_data: &Self,
+        n: usize, 
+        seed: u64,
+    ) -> Result<(Vec<usize>, Vec<usize>)> {
+        let n_parents: usize = genotype_data.entry_ids.len();
+        let mut rng = ChaCha8Rng::seed_from_u64(seed);
+        // First sample the pairs which will generate the 
+        let mut parents_1: Vec<usize> = Vec::with_capacity(n);
+        let mut parents_2: Vec<usize> = Vec::with_capacity(n);
+        if genotype_data.sex_chromosome_ids[0].is_none() {
+            for _ in 0..n {
+                parents_1.push(rng.random_range(0..n_parents));
+                parents_2.push(rng.random_range(0..n_parents));
+            }
+        } else {
+            let mut homozygotes: Vec<usize> = vec![];
+            let mut heterozygotes: Vec<usize> = vec![];
+            for i in 0..n_parents {
+                let sex_genotype = match genotype_data.sex_chromosome_ids[i] {
+                    Some(x) => x,
+                    None => (2,2), 
+                };
+                ensure!(sex_genotype != (2, 2), "We expect sex genotypes to be not None!");
+                if sex_genotype.0 == sex_genotype.1 {
+                    homozygotes.push(i);
+                } else {
+                    heterozygotes.push(i);
+                }
+            }
+            ensure!((homozygotes.len() >= 1) && (heterozygotes.len() >= 1), "We expect at least 1 homozygote and 1 heterozygote sex genotypes, i.e. a male and a female founder!");
+            for _ in 0..n {
+                if let Some(&x) = homozygotes.choose(&mut rng) {
+                    parents_1.push(x)
+                };
+                if let Some(&y) = heterozygotes.choose(&mut rng) {
+                    parents_2.push(y)
+                };
+            }
+        }
+        Ok((parents_1, parents_2))
     }
+    
+    
+    // pub fn mate(
+    //     ctx: &GpuContext,
+    //     genome: &Genome,
+    //     founders: &Self,
+    //     n: usize, 
+    //     seed: u64
+    // ) -> Result<Self> {
+    //     let parents_1, parents_2 = id_mating_pairs(genome, founders, n  seed)?;
+    //     // Account for LD decay here to generate a population from the founder genotypes...
+    //     todo!()
+    // }
 }
 
 /// The observed phenotype metrics backed by high-performance GPU storage.
