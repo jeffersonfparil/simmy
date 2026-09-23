@@ -877,24 +877,34 @@ impl Traits {
 
 /// The primary GPU-backed genotype representation for high-throughput computing.
 ///
-/// ### Why We Chose This Structure:
-/// In quantitative genetics and breeding, the genotype matrix is the bottleneck of calculations.
-/// Storing this as a [`GpuTensor`] on the GPU enables extremely fast, massively parallel operations:
-/// - Calculating genomic relationship matrices (GRM).
-/// - Matrix multiplication of marker effect sizes for genomic prediction ($X \beta$).
-/// - Slicing and selecting specific subgroups using zero-copy stride manipulations [2, 3].
+/// ### Architectural Principles
+/// - Store large numerical genotype data on the GPU for efficient linear algebra.
+/// - Maintain biological metadata as lightweight CPU-side index mappings.
+/// - Support zero-copy tensor views through shape, stride, and offset manipulation.
+/// - Represent genotype states in a format compatible with genomic prediction,
+///   relationship matrix calculation, and other dense tensor operations.
 #[derive(Debug)]
 pub struct GenotypeData {
-    /// Rows of the genotype matrix: indices pointing to the evaluated individuals in [`Entries`].
+    /// Indices mapping tensor rows to entries in [`Entries`].
     pub entry_ids: Vec<usize>,
-    /// Columns of the genotype matrix: indices mapping to physical alleles via [`LocusAllele`].
+    /// Indices mapping tensor columns to locus-alleles in [`LocusAllele`].
     pub locus_allele_ids: Vec<usize>,
-    /// Sex genotype which points to the name of the sex chromosomes if they exists, None otherwise, i.e. (0,0), (0,1), and None, where (0,0) can represent XX, or ZZ, (0,1) can represent XY or ZY, and None represent autogamous individuals
+    /// Optional sex chromosome genotype assignments for each entry.
+    /// - `(0, 0)` representing homogametic individuals (e.g. XX or ZZ).
+    /// - `(0, 1)` representing heterogametic individuals (e.g. XY or ZW).
     pub sex_chromosome_ids: Option<Vec<(usize, usize)>>,
-    /// Dense GPU matrix of shape `[entry_ids.len(), locus_allele_ids.len()]` [2].
-    /// Represents allele frequencies for each locus-allele combination.
-    /// The set of attainable frequencies is constrained by the ploidy
-    /// of the corresponding entry.
+
+    /// Dense GPU tensor of shape
+    /// `[entry_ids.len(), locus_allele_ids.len(), 2]`.
+    ///
+    /// Dimensions correspond to:
+    /// - Entry.
+    /// - Locus-allele.
+    /// - Homologous chromosome copy.
+    ///
+    /// Values represent allele-state proportions for each homologous chromosome.
+    /// The attainable values are constrained by the ploidy of the corresponding
+    /// entry. For each entry and locus-allele, the two values sum to one.
     pub data: GpuTensor,
 }
 
@@ -907,6 +917,11 @@ impl GenotypeData {
         freq_sex_chrom_homozygotes: Option<f32>,
         seed: u64,
     ) -> Result<Self> {
+        // TODO:
+        // Add some mechanism to allow for uneven sex chromosome lengths.
+        // This should yield to a lot of deletions (D alleles)
+        // in the presence of one of the sex chromosomes,
+        // e.g. Y chromosome is shorter than the X chromosome in humans
         let n: usize = entries.names.len();
         let p: usize = genome.loci_alleles.len();
         ensure!(n > 0, "Number of entries need to non-zero!");
@@ -918,55 +933,63 @@ impl GenotypeData {
         let mut rng = ChaCha8Rng::seed_from_u64(seed);
         let beta = Beta::new(af_shape, af_shape)
             .context("Failed to initialize Beta distribution: parameters must be greater than 0")?;
-        let mut data_tmp: Vec<f32> = Vec::with_capacity(n * p);
+        let mut data_tmp: Vec<f32> = Vec::with_capacity(n * p * 2); // n entries x 2p loci-alleles where 2 represents each homologous chromosome from each parent
         for i in 0..n {
             let ploidy = entries.ploidies[i] as f32;
             for _ in 0..p {
                 let q: f32 = beta.sample(&mut rng);
                 let g: f32 = (q * ploidy).round() / ploidy;
                 data_tmp.push(g);
+                data_tmp.push(1.00 - g);
             }
         }
-        ensure!(
-            genome.chromosomes.sex_chromosomes.is_none() && freq_sex_chrom_homozygotes.is_none(),
-            "If there are no sex chromosomes then there should also be no frequency of sex chromosome homopzygotes!"
-        );
+        let data = GpuTensor::from_f32(ctx, &data_tmp, &[n as u32, p as u32, 2], None, None)?;
+        if genome.chromosomes.sex_chromosomes.is_none() {
+            ensure!(
+                freq_sex_chrom_homozygotes.is_none(),
+                "If there are no sex chromosomes then there should also be no frequency of sex chromosome homopzygotes!"
+            );
+        }
         let freq_sex_chrom_homozygotes: f32 = freq_sex_chrom_homozygotes.unwrap_or(0.0);
+        ensure!((freq_sex_chrom_homozygotes >= 0.0) && (freq_sex_chrom_homozygotes <= 1.0), "The frequency of sex chromosome homozygotes need to range from 0.0 to 1.0!");
         let n_sex_chrom_homozygotes: usize =
             ((n as f32) * freq_sex_chrom_homozygotes).round() as usize;
         let n_sex_chrom_heterozygotes: usize = n - n_sex_chrom_homozygotes;
-        let mut sex_chromosome_ids: Vec<(usize, usize)> = Vec::with_capacity(n);
-        if !genome.chromosomes.sex_chromosomes.is_none() {
+        let sex_chromosome_ids = if genome.chromosomes.sex_chromosomes.is_none() {
+            None
+        } else {
+            let mut sex_chromosome_ids: Vec<(usize, usize)> = Vec::with_capacity(n);
             for _ in 0..n_sex_chrom_homozygotes {
                 sex_chromosome_ids.push((0, 0)); // (0,0) represents XX or ZZ
             }
             for _ in 0..n_sex_chrom_heterozygotes {
                 sex_chromosome_ids.push((0, 1)); // (0,1) represents XY or ZY sexes
             }
-        }
-        let data = GpuTensor::from_f32(ctx, &data_tmp, &[n as u32, p as u32], None, None)?;
+            Some(sex_chromosome_ids)
+        };
         Ok(Self {
             entry_ids: (0..n).collect(),
             locus_allele_ids: (0..p).collect(),
-            sex_chromosome_ids: Some(sex_chromosome_ids),
+            sex_chromosome_ids,
             data,
         })
     }
     pub fn sample_mating_pairs(
-        _genome: &Genome,
         genotype_data: &Self,
         n: usize,
         seed: u64,
-    ) -> Result<(Vec<usize>, Vec<usize>)> {
+    ) -> Result<Vec<(usize, usize)>> {
         let n_parents: usize = genotype_data.entry_ids.len();
         let mut rng = ChaCha8Rng::seed_from_u64(seed);
         // First sample the pairs which will generate the
-        let mut parents_1: Vec<usize> = Vec::with_capacity(n);
-        let mut parents_2: Vec<usize> = Vec::with_capacity(n);
+        let mut mating_pairs: Vec<(usize, usize)> = Vec::with_capacity(n);
         if genotype_data.sex_chromosome_ids.is_none() {
             for _ in 0..n {
-                parents_1.push(rng.random_range(0..n_parents));
-                parents_2.push(rng.random_range(0..n_parents));
+                let pair = (
+                    rng.random_range(0..n_parents),
+                    rng.random_range(0..n_parents),
+                );
+                mating_pairs.push(pair);
             }
         } else {
             let mut homozygotes: Vec<usize> = vec![];
@@ -991,26 +1014,67 @@ impl GenotypeData {
                 "We expect at least 1 homozygote and 1 heterozygote sex genotypes, i.e. a male and a female founder!"
             );
             for _ in 0..n {
-                if let Some(&x) = homozygotes.choose(&mut rng) {
-                    parents_1.push(x)
-                };
-                if let Some(&y) = heterozygotes.choose(&mut rng) {
-                    parents_2.push(y)
+                if let (Some(&x), Some(&y)) =
+                    (homozygotes.choose(&mut rng), heterozygotes.choose(&mut rng))
+                {
+                    mating_pairs.push((x, y))
                 };
             }
         }
-        Ok((parents_1, parents_2))
+        Ok(mating_pairs)
     }
-
+    // /// # Linkage Disequilibrium Model
+    // ///
+    // /// Each chromosome is assigned a characteristic LD decay distance `L`
+    // /// (in base pairs). Simmy assumes the exponential LD decay model:
+    // ///
+    // /// ```text
+    // /// r²(d) = r²(0) exp(-d / L)
+    // /// ```
+    // ///
+    // /// where:
+    // ///
+    // /// - `r²(d)` is the expected linkage disequilibrium between two loci
+    // ///   separated by distance `d`.
+    // /// - `r²(0)` is assumed to be `1.0`.
+    // /// - `d` is the physical distance between loci in base pairs.
+    // /// - `L` is the chromosome‑specific LD decay distance.
+    // ///
+    // /// Consequently:
+    // ///
+    // /// ```text
+    // /// d = L
+    // /// ```
+    // ///
+    // /// implies:
+    // ///
+    // /// ```text
+    // /// r²(L) = exp(-1) ≈ 0.368
+    // /// ```
+    // ///
+    // /// Larger LD decay distances imply longer haplotype blocks and slower
+    // /// LD decay. Smaller LD decay distances imply weaker long‑range linkage
+    // /// and more rapid LD decay.
     // pub fn mate(
+    //     genotype_data: &Self,
+    //     mating_pairs: Vec<(usize, usize)>,
     //     ctx: &GpuContext,
     //     genome: &Genome,
-    //     founders: &Self,
-    //     n: usize,
     //     seed: u64
     // ) -> Result<Self> {
-    //     let parents_1, parents_2 = id_mating_pairs(genome, founders, n  seed)?;
     //     // Account for LD decay here to generate a population from the founder genotypes...
+
+    //     let n_entries: usize = genotype_data.data.shape[0] as usize;
+    //     let n_loci_alleles: usize = genotype_data.data.shape[1] as usize;
+    //     let ld_decay_distances_per_chrom: Vec<usize> = genome.chromosomes.ld_decay_distances.clone();
+    //     let n_chromosomes: usize = ld_decay_distances_per_chrom.len();
+
+    //     for (i, j) in mating_pairs {
+    //         println!("i: {}; j: {}", i, j);
+    //         let parent_1 = genotype_data.data.slice_view(&vec![(i, i+1), (0, n_loci_alleles)])?;
+    //         let parent_2 = genotype_data.data.slice_view(&vec![(j, j+1), (0, n_loci_alleles)])?;
+    //     }
+
     //     todo!()
     // }
 }
