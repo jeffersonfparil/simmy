@@ -3,7 +3,7 @@ use crate::linalg::tensor::GpuTensor;
 use anyhow::{Context, Result, ensure};
 use rand::prelude::*;
 use rand_chacha::{ChaCha8Rng, rand_core::SeedableRng};
-use rand_distr::{Beta, Distribution};
+use rand_distr::{Beta, Distribution, Uniform};
 
 #[derive(Debug, Clone)]
 pub struct Chromosomes {
@@ -235,7 +235,7 @@ impl Alleles {
             Some(x) => x.iter().map(|&xi| xi.to_owned()).collect::<Vec<String>>(),
             None => {
                 let mut sequences: Vec<String> = Vec::with_capacity(n);
-                // For n <= 5: sequences  in &["A", "T", "C", "G", "D"]
+                // For n <= 5: sequences in &["A", "T", "C", "G", "D"]
                 // For n <= 10: sequences in &["A", "T", "C", "G", "D", "TA", "TT", "TC", "TG", "TD"]
                 // For n <= 15: sequences in &["A", "T", "C", "G", "D", "TA", "TT", "TC", "TG", "TD", "CA", "CT", "CC", "CG", "CD"]
                 // For n <= 20: sequences in &["A", "T", "C", "G", "D", "TA", "TT", "TC", "TG", "TD", "CA", "CT", "CC", "CG", "CD", "GA", "GT", "GC", "GG", "GD"]
@@ -574,6 +574,33 @@ impl Genome {
             loci,
             loci_alleles,
         })
+    }
+
+    pub fn get_locus_info(&self, idx: usize) -> Result<(String, usize, usize, String, usize)> {
+        ensure!(
+            idx < self.loci_alleles.len(),
+            format!(
+                "The locus index should range from 0 to {}.",
+                self.loci_alleles.len() - 1
+            )
+        );
+        let locus_id: usize = self.loci_alleles[idx].locus_id;
+        let allele_id: usize = self.loci_alleles[idx].allele_id;
+        let chromosome_id: usize = self.loci[locus_id].chromosome_id;
+        let start: usize = self.loci[locus_id].start;
+        let end: usize = self.loci[locus_id].end;
+        let chromosome: String = self.chromosomes.chromosomes[chromosome_id].to_owned();
+        let ld_decay_distance: usize = self.chromosomes.ld_decay_distances[chromosome_id];
+        let position: usize = start;
+        let allele: String = self.alleles.sequences[allele_id].to_owned();
+        let locus_length: usize = end - start;
+        Ok((
+            chromosome,
+            ld_decay_distance,
+            position,
+            allele,
+            locus_length,
+        ))
     }
 }
 
@@ -918,10 +945,10 @@ impl GenotypeData {
         seed: u64,
     ) -> Result<Self> {
         // TODO:
-        // Add some mechanism to allow for uneven sex chromosome lengths.
+        // Conbsider adding some mechanism to allow for uneven sex chromosome lengths.
         // This should yield to a lot of deletions (D alleles)
-        // in the presence of one of the sex chromosomes,
-        // e.g. Y chromosome is shorter than the X chromosome in humans
+        // in the presence of the smaller of the 2 sex chromosomes,
+        // e.g. Y chromosome is shorter than the X chromosome in humans.
         let n: usize = entries.names.len();
         let p: usize = genome.loci_alleles.len();
         ensure!(n > 0, "Number of entries need to non-zero!");
@@ -930,10 +957,11 @@ impl GenotypeData {
             af_shape > 0.0,
             "The shape of the allele frequency spectrum (Beta distribution shape parameters) need to be greater than zero!"
         );
+        ensure!(entries.ploidies.iter().all(|&p| p > 0));
         let mut rng = ChaCha8Rng::seed_from_u64(seed);
         let beta = Beta::new(af_shape, af_shape)
             .context("Failed to initialize Beta distribution: parameters must be greater than 0")?;
-        let mut data_tmp: Vec<f32> = Vec::with_capacity(n * p * 2); // n entries x 2p loci-alleles where 2 represents each homologous chromosome from each parent
+        let mut data_tmp: Vec<f32> = Vec::with_capacity(n * p * 2); // n entries x 2p loci-alleles where 2 represents each homologous chromosome from each parent; where for pools, the 1-g values simply represent the allele frequencies of the other allele/s
         for i in 0..n {
             let ploidy = entries.ploidies[i] as f32;
             for _ in 0..p {
@@ -951,7 +979,10 @@ impl GenotypeData {
             );
         }
         let freq_sex_chrom_homozygotes: f32 = freq_sex_chrom_homozygotes.unwrap_or(0.0);
-        ensure!((freq_sex_chrom_homozygotes >= 0.0) && (freq_sex_chrom_homozygotes <= 1.0), "The frequency of sex chromosome homozygotes need to range from 0.0 to 1.0!");
+        ensure!(
+            (0.0..=1.0).contains(&freq_sex_chrom_homozygotes),
+            "The frequency of sex chromosome homozygotes need to range from 0.0 to 1.0!"
+        );
         let n_sex_chrom_homozygotes: usize =
             ((n as f32) * freq_sex_chrom_homozygotes).round() as usize;
         let n_sex_chrom_heterozygotes: usize = n - n_sex_chrom_homozygotes;
@@ -963,7 +994,7 @@ impl GenotypeData {
                 sex_chromosome_ids.push((0, 0)); // (0,0) represents XX or ZZ
             }
             for _ in 0..n_sex_chrom_heterozygotes {
-                sex_chromosome_ids.push((0, 1)); // (0,1) represents XY or ZY sexes
+                sex_chromosome_ids.push((0, 1)); // (0,1) represents XY or ZW sexes
             }
             Some(sex_chromosome_ids)
         };
@@ -974,16 +1005,12 @@ impl GenotypeData {
             data,
         })
     }
-    pub fn sample_mating_pairs(
-        genotype_data: &Self,
-        n: usize,
-        seed: u64,
-    ) -> Result<Vec<(usize, usize)>> {
-        let n_parents: usize = genotype_data.entry_ids.len();
+    pub fn sample_mating_pairs(&self, n: usize, seed: u64) -> Result<Vec<(usize, usize)>> {
+        let n_parents: usize = self.entry_ids.len();
         let mut rng = ChaCha8Rng::seed_from_u64(seed);
         // First sample the pairs which will generate the
         let mut mating_pairs: Vec<(usize, usize)> = Vec::with_capacity(n);
-        if genotype_data.sex_chromosome_ids.is_none() {
+        if self.sex_chromosome_ids.is_none() {
             for _ in 0..n {
                 let pair = (
                     rng.random_range(0..n_parents),
@@ -995,7 +1022,7 @@ impl GenotypeData {
             let mut homozygotes: Vec<usize> = vec![];
             let mut heterozygotes: Vec<usize> = vec![];
             for i in 0..n_parents {
-                let sex_genotype: (usize, usize) = match &genotype_data.sex_chromosome_ids {
+                let sex_genotype: (usize, usize) = match &self.sex_chromosome_ids {
                     Some(x) => x[i],
                     None => (2, 2),
                 };
@@ -1023,60 +1050,118 @@ impl GenotypeData {
         }
         Ok(mating_pairs)
     }
-    // /// # Linkage Disequilibrium Model
-    // ///
-    // /// Each chromosome is assigned a characteristic LD decay distance `L`
-    // /// (in base pairs). Simmy assumes the exponential LD decay model:
-    // ///
-    // /// ```text
-    // /// r²(d) = r²(0) exp(-d / L)
-    // /// ```
-    // ///
-    // /// where:
-    // ///
-    // /// - `r²(d)` is the expected linkage disequilibrium between two loci
-    // ///   separated by distance `d`.
-    // /// - `r²(0)` is assumed to be `1.0`.
-    // /// - `d` is the physical distance between loci in base pairs.
-    // /// - `L` is the chromosome‑specific LD decay distance.
-    // ///
-    // /// Consequently:
-    // ///
-    // /// ```text
-    // /// d = L
-    // /// ```
-    // ///
-    // /// implies:
-    // ///
-    // /// ```text
-    // /// r²(L) = exp(-1) ≈ 0.368
-    // /// ```
-    // ///
-    // /// Larger LD decay distances imply longer haplotype blocks and slower
-    // /// LD decay. Smaller LD decay distances imply weaker long‑range linkage
-    // /// and more rapid LD decay.
-    // pub fn mate(
-    //     genotype_data: &Self,
-    //     mating_pairs: Vec<(usize, usize)>,
-    //     ctx: &GpuContext,
-    //     genome: &Genome,
-    //     seed: u64
-    // ) -> Result<Self> {
-    //     // Account for LD decay here to generate a population from the founder genotypes...
+    pub fn mate(
+        &self,
+        mating_pairs: Vec<(usize, usize)>,
+        ctx: &GpuContext,
+        genome: &Genome,
+        seed: u64,
+    ) -> Result<Self> {
+        let n_loci_alleles: usize = self.data.shape[1] as usize;
+        let n_offsprings: usize = mating_pairs.len();
 
-    //     let n_entries: usize = genotype_data.data.shape[0] as usize;
-    //     let n_loci_alleles: usize = genotype_data.data.shape[1] as usize;
-    //     let ld_decay_distances_per_chrom: Vec<usize> = genome.chromosomes.ld_decay_distances.clone();
-    //     let n_chromosomes: usize = ld_decay_distances_per_chrom.len();
+        ensure!(
+            n_loci_alleles == genome.loci_alleles.len(),
+            "The number of loci alleles in the genotype data should match that of the genome!"
+        );
+        ensure!(
+            genome.chromosomes.ld_decay_distances.iter().all(|&x| x > 0),
+            "LD decay distances must be positive!"
+        );
 
-    //     for (i, j) in mating_pairs {
-    //         println!("i: {}; j: {}", i, j);
-    //         let parent_1 = genotype_data.data.slice_view(&vec![(i, i+1), (0, n_loci_alleles)])?;
-    //         let parent_2 = genotype_data.data.slice_view(&vec![(j, j+1), (0, n_loci_alleles)])?;
-    //     }
+        let mut rng = ChaCha8Rng::seed_from_u64(seed);
+        let uniform = Uniform::new(0.0, 1.0)
+            .expect("Failed to initialise a uniform distribution between 0 and 1!");
 
-    //     todo!()
-    // }
+        let linkage_correction_denominator: f64 = {
+            let e: f64 = 1.0f64.exp();
+            let a: f64 = 0.5f64.log(e);
+            -1.0 / a
+        };
+
+        let mut sex_chromosome_ids = if genome.chromosomes.sex_chromosomes.is_none() {
+            None
+        } else {
+            Some(Vec::with_capacity(n_offsprings)) // where below we set the chance of XX or ZZ and XY and ZW sex genotypes at 50%
+        };
+
+        let mut offspring_data: Vec<f32> = Vec::with_capacity(n_offsprings * n_loci_alleles * 2);
+
+        for (i, j) in mating_pairs {
+            let parent_1 = self
+                .data
+                .slice_view(&[(i, i + 1), (0, n_loci_alleles), (0, 2)])?
+                .to_vec_f32(ctx)?;
+            let parent_2 = self
+                .data
+                .slice_view(&[(j, j + 1), (0, n_loci_alleles), (0, 2)])?
+                .to_vec_f32(ctx)?;
+
+            let mut prev_chromosome: String = "".to_owned();
+            let mut prev_position: usize = 0;
+
+            let mut first_homologue_1: bool = true;
+            let mut first_homologue_2: bool = true;
+
+            for k in 0..n_loci_alleles {
+                let idx = 2 * k;
+                let qs_1 = [parent_1[idx], parent_1[idx + 1]];
+                let qs_2 = [parent_2[idx], parent_2[idx + 1]];
+
+                let (chromosome, ld_decay_distance, position, _allele, _locus_length) =
+                    genome.get_locus_info(k)?;
+                (first_homologue_1, first_homologue_2) = if prev_chromosome != chromosome {
+                    // If we have the first locus of the chromosome
+                    (
+                        uniform.sample(&mut rng) < 0.5,
+                        uniform.sample(&mut rng) < 0.5,
+                    )
+                } else {
+                    // If we have at least 1 previous locus in the same chromosome
+                    // r²(d) = r²(0) exp(-d / L)
+                    let r = (position - prev_position) as f64 / ld_decay_distance as f64;
+                    let prob_linkage = {
+                        let a = (-r / linkage_correction_denominator).exp();
+                        if a < 0.5 { 0.5 } else { a }
+                    };
+                    if uniform.sample(&mut rng) < prob_linkage {
+                        // Linked adjacent pair of loci: Keep the allele in the same homologous chromosome as the previous locus.
+                        (first_homologue_1, first_homologue_2)
+                    } else {
+                        // Cross-over between the 2 adjacent pair of loci: Use the allele in the other homologous chromosome.
+                        (!first_homologue_1, !first_homologue_2)
+                    }
+                };
+                let gamete_1 = if first_homologue_1 { qs_1[0] } else { qs_1[1] };
+                let gamete_2 = if first_homologue_2 { qs_2[0] } else { qs_2[1] };
+                offspring_data.push(gamete_1);
+                offspring_data.push(gamete_2);
+                prev_chromosome = chromosome.to_owned();
+                prev_position = position;
+            }
+            if let Some(x) = sex_chromosome_ids.as_mut() {
+                // 50% chance of getting homogametic or heterogemetic sex genotypes per offspring
+                if uniform.sample(&mut rng) < 0.5 {
+                    x.push((0, 0));
+                } else {
+                    x.push((0, 1));
+                }
+            }
+        }
+        let data = GpuTensor::from_f32(
+            ctx,
+            &offspring_data,
+            &[n_offsprings as u32, n_loci_alleles as u32, 2],
+            None,
+            None,
+        )?;
+        Ok(Self {
+            entry_ids: (0..n_offsprings).collect(),
+            locus_allele_ids: (0..n_loci_alleles).collect(),
+            sex_chromosome_ids,
+            data,
+        })
+    }
 }
 
 /// The observed phenotype metrics backed by high-performance GPU storage.
