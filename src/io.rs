@@ -5,7 +5,6 @@ use rand::prelude::*;
 use rand_chacha::{ChaCha8Rng, rand_core::SeedableRng};
 use rand_distr::{Beta, Distribution, Uniform};
 
-///////////////////////////////////////////////////////
 #[derive(Debug, Clone)]
 pub struct Chromosome {
     pub name: String,
@@ -25,25 +24,12 @@ pub struct Locus {
 }
 
 #[derive(Debug, Clone)]
-pub struct Loci {
-    pub genome: Vec<Chromosome>,
-    pub loci: Vec<Locus>,
-}
-
-///////////////////////////////////////////////////////
-#[derive(Debug, Clone)]
 pub struct Trait {
     name: String,
     is_sex: bool,
     description: String,
 }
 
-#[derive(Debug, Clone)]
-pub struct Traits {
-    pub traits: Vec<Locus>,
-}
-
-///////////////////////////////////////////////////////
 #[derive(Debug, Clone)]
 pub struct Entry {
     pub name: String,
@@ -53,30 +39,12 @@ pub struct Entry {
     pub notes: String,
 }
 
-#[derive(Debug, Clone)]
-pub struct Entries {
+#[derive(Debug)]
+pub struct Data {
     pub entries: Vec<Entry>,
-}
-
-///////////////////////////////////////////////////////
-#[derive(Debug)]
-pub struct GenotypeData {
-    pub id_entries: Vec<usize>,
-    pub id_loci: Vec<usize>,
-    pub data: GpuTensor,
-}
-
-#[derive(Debug)]
-pub struct PhenotypeData {
-    pub id_entries: Vec<usize>,
-    pub id_traits: Vec<usize>,
-    pub data: GpuTensor,
-}
-
-///////////////////////////////////////////////////////
-impl GenotypeData {
-    pub fn new(ctx: GpuContext) -> Result<()>
-    {
-        todo!()
-    }
+    pub genome: Vec<Chromosome>,
+    pub loci: Vec<Locus>,
+    pub traits: Vec<Locus>,
+    pub genotype_data: GpuTensor,
+    pub phenotype_data: GpuTensor,
 }
