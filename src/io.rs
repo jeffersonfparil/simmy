@@ -1,9 +1,9 @@
-use crate::linalg::context::GpuContext;
 use crate::linalg::tensor::GpuTensor;
-use anyhow::{Context, Result, ensure};
-use rand::prelude::*;
-use rand_chacha::{ChaCha8Rng, rand_core::SeedableRng};
-use rand_distr::{Beta, Distribution, Uniform};
+// use crate::linalg::context::GpuContext;
+// use anyhow::{Context, Result, ensure};
+// use rand::prelude::*;
+// use rand_chacha::{ChaCha8Rng, rand_core::SeedableRng};
+// use rand_distr::{Beta, Distribution, Uniform};
 
 #[derive(Debug, Clone)]
 pub struct Chromosome {
@@ -17,7 +17,7 @@ pub struct Chromosome {
 #[derive(Debug, Clone)]
 pub struct Locus {
     pub chromosome_id: u64, // index of the chromosome containing this locus, which assumes one or more chromosomes are stored in a vector (contiguous/ordered list)
-    pub position: u64, // position in the chromosome
+    pub position: u64,      // position in the chromosome
     pub alleles: Vec<String>, // sequence of each allele
     pub length: u64, // maximum size of alleles, i.e. the number of bases of the longest allele
     pub col_idx: Vec<u64>, // The column indices in the main genotype tensor, each referring to an allele
@@ -32,9 +32,10 @@ pub struct Entry {
     pub notes: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct GenotypeData {
     pub genome: Vec<Chromosome>,
     pub loci: Vec<Locus>,
     pub entries: Vec<Entry>,
+    pub data: GpuTensor,
 }
