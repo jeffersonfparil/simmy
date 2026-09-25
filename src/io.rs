@@ -1,44 +1,39 @@
 use crate::linalg::context::GpuContext;
 use crate::linalg::tensor::GpuTensor;
-use anyhow::Result;
+use anyhow::{Result, ensure};
 use rand_chacha::{ChaCha8Rng, rand_core::SeedableRng};
-use rand_distr::{Distribution, Exp};
-
-// use anyhow::{Context, Result, ensure};
-// use rand::prelude::*;
-// use rand_chacha::{ChaCha8Rng, rand_core::SeedableRng};
-// use rand_distr::{Beta, Distribution, Uniform, Exp};
+use rand_distr::{Beta, Distribution, Exp, Normal};
 
 #[derive(Debug, Clone)]
 pub struct Chromosome {
     pub name: String,
-    pub lengths: (u64, u64),
-    pub centromere_positions: (u64, u64),
-    pub ld_decay_distance: u64,
+    pub lengths: (usize, usize),
+    pub centromere_positions: (usize, usize),
+    pub ld_decay_distance: usize,
     pub is_sex_chromosome: bool,
 }
 
 #[derive(Debug, Clone)]
 pub struct Locus {
     pub chromosome_id: usize, // index of the chromosome containing this locus, which assumes one or more chromosomes are stored in a vector (contiguous/ordered list)
-    pub position: u64,        // position in the chromosome
+    pub position: usize,      // position in the chromosome
     pub alleles: Vec<String>, // sequence of each allele
-    pub length: u64, // maximum size of alleles, i.e. the number of bases of the longest allele
-    pub col_idx: Vec<u64>, // The column indices in the main genotype tensor, each referring to an allele
+    pub length: usize, // maximum size of alleles, i.e. the number of bases of the longest allele
+    pub col_idx: Vec<usize>, // The column indices in the main genotype tensor, each referring to an allele
 }
 
 #[derive(Debug, Clone)]
 pub struct Trait {
-    _name: String,
-    _is_sex: bool,
-    _description: String,
+    pub name: String,
+    pub is_sex: bool,
+    pub description: String,
 }
 
 #[derive(Debug, Clone)]
 pub struct Entry {
     pub name: String,
     pub species: String,
-    pub ploidy: u64,
+    pub ploidy: usize,
     pub group: String,
     pub notes: String,
 }
@@ -54,15 +49,34 @@ pub struct Data {
 }
 
 impl Data {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
-        _ctx: GpuContext,
+        ctx: &GpuContext,
         n_entries: usize,
         n_chromosomes: usize,
         n_loci: usize,
-        _n_traits: usize,
-        _with_sex: bool,
-        seed: u64,
+        n_traits: usize,
+        with_sex: bool,
+        ploidy: usize,
+        seed: usize,
     ) -> Result<Self> {
+        ensure!(
+            n_entries > 0,
+            "The number of entries need to be greater than zero!"
+        );
+        ensure!(
+            n_chromosomes > 0,
+            "The number of chromosomes need to be greater than zero!"
+        );
+        ensure!(
+            n_loci > 0,
+            "The number of loci need to be greater than zero!"
+        );
+        ensure!(
+            n_traits > 0,
+            "The number of traits need to be greater than zero!"
+        );
+        ensure!(ploidy > 0, "Ploidy need to be greater than zero!");
         // Entries
         let mut entries: Vec<Entry> = Vec::with_capacity(n_entries);
         let n_digits: usize = format!("{}", n_entries).len();
@@ -70,7 +84,7 @@ impl Data {
             entries.push(Entry {
                 name: format!("entry_{:0>n_digits$}", i),
                 species: "".to_owned(),
-                ploidy: 2,
+                ploidy,
                 group: "".to_owned(),
                 notes: "".to_owned(),
             });
@@ -88,34 +102,34 @@ impl Data {
             });
         }
         // Loci
-        let mut rng = ChaCha8Rng::seed_from_u64(seed);
-
+        let mut rng = ChaCha8Rng::seed_from_u64(seed as u64);
         // Divy up the loci into chromosomes
-        let mut positions_per_chromosome: Vec<Vec<u64>> = Vec::with_capacity(n_chromosomes);
-        let mut m = (n_loci / n_chromosomes) as u64;
+        let mut positions_per_chromosome: Vec<Vec<usize>> = Vec::with_capacity(n_chromosomes);
+        let mut m = n_loci / n_chromosomes;
         for (i, chromosome) in genome.iter().enumerate() {
             m += if i < (n_chromosomes - 1) {
                 0
             } else {
-                (n_loci as u64) - (m * n_chromosomes as u64)
+                n_loci - (m * n_chromosomes)
             };
             let n = chromosome.lengths.0;
             let k = n / m;
-            let mut pos: Vec<u64> = (0..n).step_by(k as usize).collect();
-            if (pos.len() as u64) < m {
+            let mut pos: Vec<usize> = (0..n).step_by(k).collect();
+            if pos.len() < m {
                 pos.push(n - 1);
             }
             positions_per_chromosome.push(pos);
         }
-        let exponential = Exp::new(1.0).expect("Failed to initialise exponential distribution!");
+        // Simulate loci-alleles
         let mut loci: Vec<Locus> = Vec::with_capacity(n_loci);
-        let mut locus_allele_counter: u64 = 0;
+        let mut n_loci_alleles: usize = 0;
+        let exponential = Exp::new(1.0).expect("Failed to initialise exponential distribution!");
         for (i, positions) in positions_per_chromosome.iter().enumerate() {
             for &pos in positions {
                 let n_alleles = {
                     let a: f64 = exponential.sample(&mut rng);
-                    a.round().max(2.0) as usize
-                };
+                    a.round().clamp(2.0, 5.0) as usize
+                }; // TODO: add more alleles but for now we only have SNPs, i.e. A, T, C, G, and D
                 loci.push(Locus {
                     chromosome_id: i,
                     position: pos,
@@ -124,12 +138,63 @@ impl Data {
                         .map(|&x| x.to_owned())
                         .collect::<Vec<String>>(),
                     length: 1,
-                    col_idx: (locus_allele_counter..(locus_allele_counter + (n_alleles as u64)))
-                        .collect::<Vec<u64>>(),
+                    col_idx: (n_loci_alleles..(n_loci_alleles + n_alleles)).collect::<Vec<usize>>(),
                 });
-                locus_allele_counter += n_alleles as u64;
+                n_loci_alleles += n_alleles;
             }
         }
-        todo!()
+        // Traits
+        let mut traits: Vec<Trait> = Vec::with_capacity(n_traits);
+        let n_digits: usize = format!("{}", n_traits).len();
+        for i in 0..n_traits {
+            traits.push(Trait {
+                name: format!("trait_{:0>n_digits$}", i),
+                is_sex: with_sex && (i == (n_traits - 1)),
+                description: "".to_owned(),
+            });
+        }
+        // Genotype data
+        let mut genotype_data_tmp: Vec<f32> = vec![0.0; n_entries * n_loci_alleles * 2];
+        let beta =
+            Beta::new(0.5, 0.5).expect("Failed to initialise a Beta distribution (a=b=0.5)!");
+        for _i in 0..n_entries {
+            for _j in 0..n_loci_alleles {
+                let n_alleles_from_parent_1 = (beta.sample(&mut rng) * (ploidy as f32)).round();
+                let n_alleles_from_parent_2 = (beta.sample(&mut rng) * (ploidy as f32)).round();
+                genotype_data_tmp.push(n_alleles_from_parent_1);
+                genotype_data_tmp.push(n_alleles_from_parent_2);
+            }
+        }
+        let genotype_data = GpuTensor::from_f32(
+            ctx,
+            &genotype_data_tmp,
+            &[n_entries as u32, n_loci_alleles as u32, 2],
+            None,
+            None,
+        )?;
+        // Phenotype data
+        let mut phenotype_data_tmp: Vec<f32> = vec![0.0; n_entries * n_traits];
+        let normal =
+            Normal::new(0.0, 1.0).expect("Failed to initialise a standard normal distribution!");
+        for _i in 0..n_entries {
+            for _j in 0..n_traits {
+                phenotype_data_tmp.push(normal.sample(&mut rng));
+            }
+        }
+        let phenotype_data = GpuTensor::from_f32(
+            ctx,
+            &phenotype_data_tmp,
+            &[n_entries as u32, n_loci_alleles as u32, 2],
+            None,
+            None,
+        )?;
+        Ok(Self {
+            entries,
+            genome,
+            loci,
+            traits,
+            genotype_data,
+            phenotype_data,
+        })
     }
 }
