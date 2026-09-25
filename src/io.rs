@@ -60,6 +60,8 @@ impl Data {
         ploidy: usize,
         seed: usize,
     ) -> Result<Self> {
+        // This is intended as a generic not totally biologically realistic initialiser for the Data struct,
+        // where future methods will mutate the resulting struct with more biologically realistic information.
         ensure!(
             n_entries > 0,
             "The number of entries need to be greater than zero!"
@@ -71,6 +73,10 @@ impl Data {
         ensure!(
             n_loci > 0,
             "The number of loci need to be greater than zero!"
+        );
+        ensure!(
+            n_loci >= n_chromosomes,
+            "The number of loci need to be at least as many as the number of chromosomes!"
         );
         ensure!(
             n_traits > 0,
@@ -162,22 +168,24 @@ impl Data {
         let beta_n =
             Beta::new(2.0, 5.0).expect("Failed to initialise a Beta distribution (a=2; b=5)!"); // We will sample allele indices per locus from a skewed distribution, i.e. biased towards the first allele which is more realistic than uniform distribution.
         let beta_u =
-            Beta::new(0.5, 0.5).expect("Failed to initialise a Beta distribution (a=b=0.5)!"); // We will sample from a realistic U shaped distribution (bell-shaped assumes balancing selection on all loci which rarely occur in genome-wide loci).
+            Beta::new(0.5, 0.5).expect("Failed to initialise a Beta distribution (a=b=0.5)!"); // We will sample from a realistic U shaped distribution for genomewide loci on a single population.
         for i in 0..n_entries {
             for locus in &loci {
-                let allele_dosage_from_parent_1 =
-                    (beta_u.sample(&mut rng) * ((ploidy / 2) as f32)).round();
-                let allele_dosage_from_parent_2 =
-                    ((ploidy / 2) as f32) - allele_dosage_from_parent_1;
                 let idx = i * 2 * n_loci_alleles;
-                // We select an allele from each parent, where we may have multiple alleles per locus, hence parent1 ∈ {0,1} & parent2 ∈ {1,0} at a single locus is valid for a diploid because allele count sum to 2.
                 let n_alleles = locus.col_idx.len();
-                let j_1 = locus.col_idx
-                    [(beta_n.sample(&mut rng) * ((n_alleles - 1) as f32)).round() as usize];
-                let j_2 = locus.col_idx
-                    [(beta_n.sample(&mut rng) * ((n_alleles - 1) as f32)).round() as usize];
-                genotype_data_tmp[idx + (2 * j_1)] = allele_dosage_from_parent_1;
-                genotype_data_tmp[idx + (2 * j_2) + 1] = allele_dosage_from_parent_2;
+                for j in 0..2 {
+                    let allele_1_parent_j = locus.col_idx
+                        [(beta_n.sample(&mut rng) * ((n_alleles - 1) as f32)).round() as usize];
+                    let allele_2_parent_j = locus.col_idx
+                        [(beta_n.sample(&mut rng) * ((n_alleles - 1) as f32)).round() as usize];
+                    let allele_1_dosage_parent_j =
+                        (beta_u.sample(&mut rng) * ((ploidy / 2) as f32)).round();
+                    let allele_2_dosage_parent_j = ((ploidy / 2) as f32) - allele_1_dosage_parent_j;
+                    genotype_data_tmp[idx + (2 * allele_1_parent_j) + j] +=
+                        allele_1_dosage_parent_j;
+                    genotype_data_tmp[idx + (2 * allele_2_parent_j) + j] +=
+                        allele_2_dosage_parent_j;
+                }
             }
         }
         let genotype_data = GpuTensor::from_f32(
@@ -215,4 +223,233 @@ impl Data {
     }
     // TODO: pmating pair selection
     // TODO: mating with LD
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::linalg::context::GpuContext;
+    fn context() -> GpuContext {
+        pollster::block_on(GpuContext::new()).expect("Failed to create GPU context")
+    }
+    #[test]
+    fn rejects_zero_entries() {
+        let ctx = context();
+        assert!(Data::new(&ctx, 0, 1, 1, 1, false, 2, 42).is_err());
+    }
+    #[test]
+    fn rejects_zero_chromosomes() {
+        let ctx = context();
+        assert!(Data::new(&ctx, 1, 0, 1, 1, false, 2, 42).is_err());
+    }
+    #[test]
+    fn rejects_zero_loci() {
+        let ctx = context();
+        assert!(Data::new(&ctx, 1, 1, 0, 1, false, 2, 42).is_err());
+    }
+    #[test]
+    fn rejects_fewer_loci_than_chromosomes() {
+        let ctx = context();
+        assert!(Data::new(&ctx, 1, 10, 5, 1, false, 2, 42).is_err());
+    }
+    #[test]
+    fn rejects_zero_traits() {
+        let ctx = context();
+        assert!(Data::new(&ctx, 1, 1, 1, 0, false, 2, 42).is_err());
+    }
+    #[test]
+    fn rejects_zero_ploidy() {
+        let ctx = context();
+        assert!(Data::new(&ctx, 1, 1, 1, 1, false, 0, 42).is_err());
+    }
+    #[test]
+    fn rejects_odd_ploidy() {
+        let ctx = context();
+        assert!(Data::new(&ctx, 1, 1, 1, 1, false, 3, 42).is_err());
+    }
+    #[test]
+    fn creates_expected_counts() {
+        let ctx = context();
+        let data = Data::new(&ctx, 25, 5, 100, 7, false, 2, 42).unwrap();
+        assert_eq!(data.entries.len(), 25);
+        assert_eq!(data.genome.len(), 5);
+        assert_eq!(data.loci.len(), 100);
+        assert_eq!(data.traits.len(), 7);
+    }
+    #[test]
+    fn creates_one_locus_per_chromosome_minimum() {
+        let ctx = context();
+        let data = Data::new(&ctx, 1, 8, 8, 1, false, 2, 42).unwrap();
+        let mut counts = [0usize; 8];
+        for locus in &data.loci {
+            counts[locus.chromosome_id] += 1;
+        }
+        assert!(counts.iter().all(|&n| n > 0));
+    }
+    #[test]
+    fn last_chromosome_is_sex_chromosome_when_enabled() {
+        let ctx = context();
+        let data = Data::new(&ctx, 1, 5, 50, 1, true, 2, 42).unwrap();
+        assert!(!data.genome[0].is_sex_chromosome);
+        assert!(!data.genome[1].is_sex_chromosome);
+        assert!(!data.genome[2].is_sex_chromosome);
+        assert!(!data.genome[3].is_sex_chromosome);
+        assert!(data.genome[4].is_sex_chromosome);
+    }
+    #[test]
+    fn no_sex_chromosomes_when_disabled() {
+        let ctx = context();
+        let data = Data::new(&ctx, 1, 5, 50, 1, false, 2, 42).unwrap();
+        assert!(data.genome.iter().all(|c| !c.is_sex_chromosome));
+    }
+    #[test]
+    fn last_trait_is_sex_trait_when_enabled() {
+        let ctx = context();
+        let data = Data::new(&ctx, 1, 1, 10, 5, true, 2, 42).unwrap();
+        assert!(data.traits[4].is_sex);
+        assert!(data.traits[..4].iter().all(|t| !t.is_sex));
+    }
+    #[test]
+    fn locus_col_indices_are_contiguous_and_unique() {
+        let ctx = context();
+        let data = Data::new(&ctx, 1, 5, 100, 1, false, 2, 42).unwrap();
+        let mut all = data
+            .loci
+            .iter()
+            .flat_map(|l| l.col_idx.iter().copied())
+            .collect::<Vec<_>>();
+        all.sort_unstable();
+        for (i, idx) in all.iter().enumerate() {
+            assert_eq!(*idx, i);
+        }
+    }
+    #[test]
+    fn locus_allele_count_is_between_two_and_five() {
+        let ctx = context();
+        let data = Data::new(&ctx, 1, 5, 100, 1, false, 2, 42).unwrap();
+        for locus in &data.loci {
+            assert!((2..=5).contains(&locus.alleles.len()));
+            assert_eq!(locus.length, 1);
+        }
+    }
+    #[test]
+    fn locus_column_count_matches_allele_count() {
+        let ctx = context();
+        let data = Data::new(&ctx, 1, 5, 100, 1, false, 2, 42).unwrap();
+        for locus in &data.loci {
+            assert_eq!(locus.alleles.len(), locus.col_idx.len());
+        }
+    }
+    #[test]
+    fn chromosome_positions_are_sorted() {
+        let ctx = context();
+        let data = Data::new(&ctx, 1, 5, 100, 1, false, 2, 42).unwrap();
+        for chr in 0..data.genome.len() {
+            let positions: Vec<_> = data
+                .loci
+                .iter()
+                .filter(|l| l.chromosome_id == chr)
+                .map(|l| l.position)
+                .collect();
+            assert!(positions.windows(2).all(|w| w[0] <= w[1]));
+        }
+    }
+    #[test]
+    fn reproducible_with_same_seed() {
+        let ctx = context();
+        let data1 = Data::new(&ctx, 10, 5, 100, 3, true, 2, 123).unwrap();
+        let data2 = Data::new(&ctx, 10, 5, 100, 3, true, 2, 123).unwrap();
+        assert_eq!(data1.entries.len(), data2.entries.len());
+        assert_eq!(data1.genome.len(), data2.genome.len());
+        assert_eq!(data1.loci.len(), data2.loci.len());
+        for (a, b) in data1.loci.iter().zip(data2.loci.iter()) {
+            assert_eq!(a.chromosome_id, b.chromosome_id);
+            assert_eq!(a.position, b.position);
+            assert_eq!(a.alleles, b.alleles);
+            assert_eq!(a.col_idx, b.col_idx);
+        }
+    }
+    #[test]
+    fn entry_names_are_unique() {
+        let ctx = context();
+        let data = Data::new(&ctx, 100, 5, 100, 1, false, 2, 42).unwrap();
+        let mut names = data
+            .entries
+            .iter()
+            .map(|e| e.name.clone())
+            .collect::<Vec<_>>();
+        names.sort();
+        names.dedup();
+        assert_eq!(names.len(), 100);
+    }
+    #[test]
+    fn trait_names_are_unique() {
+        let ctx = context();
+        let data = Data::new(&ctx, 1, 5, 100, 20, false, 2, 42).unwrap();
+        let mut names = data
+            .traits
+            .iter()
+            .map(|t| t.name.clone())
+            .collect::<Vec<_>>();
+        names.sort();
+        names.dedup();
+        assert_eq!(names.len(), 20);
+    }
+    #[test]
+    fn locus_total_allele_dosage_equals_ploidy() {
+        let ctx = context();
+        for ploidy in [2usize, 4, 6, 8, 10] {
+            let data = Data::new(&ctx, 10, 5, 100, 1, false, ploidy, 42).unwrap();
+            let genotype = data.genotype_data.to_vec_f32(&ctx).unwrap();
+            let n_loci_alleles: usize = data.loci.iter().map(|l| l.col_idx.len()).sum();
+            for entry_idx in 0..data.entries.len() {
+                let base = entry_idx * n_loci_alleles * 2;
+                for locus in &data.loci {
+                    let total: usize = locus
+                        .col_idx
+                        .iter()
+                        .map(|&col| {
+                            (genotype[base + (2 * col)] + genotype[base + (2 * col) + 1]) as usize
+                        })
+                        .sum();
+                    assert_eq!(
+                        total, ploidy,
+                        "entry={}, chromosome={}, position={}, ploidy={}",
+                        entry_idx, locus.chromosome_id, locus.position, ploidy
+                    );
+                }
+            }
+        }
+    }
+    #[test]
+    fn homologous_chromosome_dosage_equals_half_ploidy() {
+        let ctx = context();
+        for ploidy in [2usize, 4, 6, 8, 10] {
+            let data = Data::new(&ctx, 10, 5, 100, 1, false, ploidy, 42).unwrap();
+            let genotype = data.genotype_data.to_vec_f32(&ctx).unwrap();
+            let n_loci_alleles: usize = data.loci.iter().map(|l| l.col_idx.len()).sum();
+            for entry_idx in 0..data.entries.len() {
+                let base = entry_idx * n_loci_alleles * 2;
+                for locus in &data.loci {
+                    for parent in 0..2 {
+                        let dosage: usize = locus
+                            .col_idx
+                            .iter()
+                            .map(|&col| genotype[base + (2 * col) + parent] as usize)
+                            .sum();
+                        assert_eq!(
+                            dosage,
+                            ploidy / 2,
+                            "entry={}, chromosome={}, position={}, parent={}, ploidy={}",
+                            entry_idx,
+                            locus.chromosome_id,
+                            locus.position,
+                            parent,
+                            ploidy
+                        );
+                    }
+                }
+            }
+        }
+    }
 }
