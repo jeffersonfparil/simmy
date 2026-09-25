@@ -202,17 +202,19 @@ impl Data {
                 // Sample alleles and their dosages per homologous chromosome or parent,
                 // where the same allele may be sampled and hence fixed on a homologous chromosome and so we add to the initialised 0.0 dosages.
                 for j in 0..2 {
-                    let allele_1_parent_j = locus.col_idx
-                        [(beta_n.sample(&mut rng) * ((n_alleles - 1) as f32)).round() as usize];
-                    let allele_2_parent_j = locus.col_idx
-                        [(beta_n.sample(&mut rng) * ((n_alleles - 1) as f32)).round() as usize];
-                    let allele_1_dosage_parent_j =
-                        (beta_u.sample(&mut rng) * ((ploidy / 2) as f32)).round();
-                    let allele_2_dosage_parent_j = ((ploidy / 2) as f32) - allele_1_dosage_parent_j;
-                    genotype_data_tmp[idx + (2 * allele_1_parent_j) + j] +=
-                        allele_1_dosage_parent_j;
-                    genotype_data_tmp[idx + (2 * allele_2_parent_j) + j] +=
-                        allele_2_dosage_parent_j;
+                    // Each allele from each ploidy is sampled here
+                    for _ in 0..(ploidy / 2) {
+                        let allele_1_parent_j = locus.col_idx
+                            [(beta_n.sample(&mut rng) * ((n_alleles - 1) as f32)).round() as usize];
+                        let allele_2_parent_j = locus.col_idx
+                            [(beta_n.sample(&mut rng) * ((n_alleles - 1) as f32)).round() as usize];
+                        let allele_1_dosage_parent_j = (beta_u.sample(&mut rng) as f32).round();
+                        let allele_2_dosage_parent_j = 1.00 - allele_1_dosage_parent_j;
+                        genotype_data_tmp[idx + (2 * allele_1_parent_j) + j] +=
+                            allele_1_dosage_parent_j;
+                        genotype_data_tmp[idx + (2 * allele_2_parent_j) + j] +=
+                            allele_2_dosage_parent_j;
+                    }
                 }
             }
         }
@@ -249,7 +251,91 @@ impl Data {
             phenotype_data,
         })
     }
+    pub fn check_dimensions(&self, ctx: &GpuContext) -> Result<()> {
+        let n_entries: usize = self.entries.len();
+        let n_loci: usize = self.loci.len();
+        let n_loci_alleles: usize = self.loci.iter().map(|l| l.col_idx.len()).sum();
+        let n_traits: usize = self.traits.len();
+        let n_chromosomes: usize = self.genome.len();
+        ensure!(
+            n_entries > 0,
+            "The number of entries need to be greater than zero!"
+        );
+        ensure!(
+            n_chromosomes > 0,
+            "The number of chromosomes need to be greater than zero!"
+        );
+        ensure!(
+            n_loci > 0,
+            "The number of loci need to be greater than zero!"
+        );
+        ensure!(
+            n_loci >= n_chromosomes,
+            "The number of loci need to be at least as many as the number of chromosomes!"
+        );
+        ensure!(
+            n_traits > 0,
+            "The number of traits need to be greater than zero!"
+        );
+        ensure!(
+            n_entries == self.genotype_data.shape[0] as usize,
+            "The number of entries in `entries` and `genotype_data` do not match!"
+        );
+        ensure!(
+            n_entries == self.phenotype_data.shape[0] as usize,
+            "The number of entries in `entries` and `phenotype_data` do not match!"
+        );
+        ensure!(
+            n_loci <= self.genotype_data.shape[1] as usize,
+            "The number of loci in `loci` must less than or equal to the number of loci-alleles in `genotype_data`!"
+        );
+        ensure!(
+            n_loci_alleles == self.genotype_data.shape[1] as usize,
+            "The number of locus alleles in `loci` and `genotype_data` do not match!"
+        );
+        ensure!(
+            n_traits == self.phenotype_data.shape[1] as usize,
+            "The number of traits in `traits` and `phenotype_data` do not match!"
+        );
+        let genotype = self.genotype_data.to_vec_f32(ctx)?;
+        let n_loci_alleles: usize = self.loci.iter().map(|l| l.col_idx.len()).sum();
+        let mut ploidy: usize = 0;
+        for entry_idx in 0..self.entries.len() {
+            let base = entry_idx * n_loci_alleles * 2;
+            for locus in &self.loci {
+                let total_dosage: usize = locus
+                    .col_idx
+                    .iter()
+                    .map(|&col| {
+                        (genotype[base + (2 * col)] + genotype[base + (2 * col) + 1]) as usize
+                    })
+                    .sum();
+                ensure!(
+                    total_dosage.is_multiple_of(2),
+                    "We do not support odd ploidies at the moment!"
+                );
+                ploidy = if ploidy == 0 { total_dosage } else { ploidy };
+                ensure!(
+                    ploidy == total_dosage,
+                    "Ploidies are inconsistent across entries and/or loci!"
+                );
+            }
+        }
+        Ok(())
+    }
     // TODO: mating pair selection
+    pub fn sample_mating_pairs(
+        &self,
+        ctx: &GpuContext,
+        _n_offsprings: usize,
+    ) -> Result<(usize, usize)> {
+        self.check_dimensions(ctx)?;
+        let _with_sex: bool = self
+            .genome
+            .last()
+            .is_some_and(|last_chrom| last_chrom.is_sex_chromosome);
+        todo!()
+    }
     // TODO: mating with LD
 }
 
@@ -492,5 +578,30 @@ mod tests {
                 }
             }
         }
+    }
+    #[test]
+    fn check_dimensions_passes_for_valid_data() {
+        let ctx = context();
+        let data = Data::new(
+            &ctx, 10,  // entries
+            5,   // chromosomes
+            100, // loci
+            3,   // traits
+            true, 4, // ploidy
+            42,
+        )
+        .unwrap();
+        assert!(data.check_dimensions(&ctx).is_ok());
+    }
+    #[test]
+    fn check_dimensions_rejects_trait_tensor_mismatch() {
+        let ctx = context();
+        let mut data = Data::new(&ctx, 10, 5, 100, 3, false, 2, 42).unwrap();
+        data.traits.pop();
+        let err = data.check_dimensions(&ctx).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("traits in `traits` and `phenotype_data` do not match")
+        );
     }
 }
