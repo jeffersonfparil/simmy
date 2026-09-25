@@ -45,8 +45,8 @@ pub struct Data {
     pub genome: Vec<Chromosome>,
     pub loci: Vec<Locus>,
     pub traits: Vec<Trait>,
-    pub genotype_data: GpuTensor, // shape: n_entries x n_loci_alleles x maternal+paternal haplotypes
-    pub phenotype_data: GpuTensor,
+    pub genotype_data: GpuTensor, // 3D tensor with shape: n_entries x n_loci_alleles x maternal+paternal haplotypes
+    pub phenotype_data: GpuTensor, // 2D tensor with shape: n_entries x n_traits
 }
 
 impl fmt::Display for Data {
@@ -249,7 +249,7 @@ impl Data {
             phenotype_data,
         })
     }
-    // TODO: pmating pair selection
+    // TODO: mating pair selection
     // TODO: mating with LD
 }
 
