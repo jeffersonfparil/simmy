@@ -1,6 +1,8 @@
 use crate::linalg::context::GpuContext;
 use crate::linalg::tensor::GpuTensor;
 use anyhow::{Result, ensure};
+use rand::RngExt;
+use rand::prelude::IndexedRandom;
 use rand_chacha::{ChaCha8Rng, rand_core::SeedableRng};
 use rand_distr::{Beta, Distribution, Exp, Normal};
 use std::fmt;
@@ -46,7 +48,7 @@ pub struct Data {
     pub loci: Vec<Locus>,
     pub traits: Vec<Trait>,
     pub genotype_data: GpuTensor, // 3D tensor with shape: n_entries x n_loci_alleles x maternal+paternal haplotypes
-    pub phenotype_data: GpuTensor, // 2D tensor with shape: n_entries x n_traits
+    pub phenotype_data: GpuTensor, // 2D tensor with shape: n_entries x n_traits (additionally monogametic = 0.0 and heterogametic = 1.0)
 }
 
 impl fmt::Display for Data {
@@ -162,10 +164,13 @@ impl Data {
         let exponential = Exp::new(1.0).expect("Failed to initialise exponential distribution!");
         for (i, positions) in positions_per_chromosome.iter().enumerate() {
             for &pos in positions {
-                let n_alleles = {
+                let n_alleles: usize = if !genome[i].is_sex_chromosome {
+                    // TODO: add more alleles but for now we only have SNPs, i.e. A, T, C, G, and D (note that these are still SNPs even though we can have multi-allelic loci because the variations remain single nucleotides)
                     let a: f64 = exponential.sample(&mut rng);
                     a.round().clamp(2.0, 5.0) as usize
-                }; // TODO: add more alleles but for now we only have SNPs, i.e. A, T, C, G, and D (note that these are still SNPs even though we can have multi-allelic loci because the variations remain single nucleotides)
+                } else {
+                    2
+                };
                 loci.push(Locus {
                     chromosome_id: i,
                     position: pos,
@@ -196,24 +201,50 @@ impl Data {
         let beta_u =
             Beta::new(0.5, 0.5).expect("Failed to initialise a Beta distribution (a=b=0.5)!"); // We will sample from a realistic U shaped distribution for genomewide loci on a single population.
         for i in 0..n_entries {
+            let idx = i * 2 * n_loci_alleles;
+            let is_monogametic = with_sex && beta_u.sample(&mut rng) < 0.5; // XX or ZZ, i.e. define whether the entry is monogametic or not
             for locus in &loci {
-                let idx = i * 2 * n_loci_alleles;
                 let n_alleles = locus.col_idx.len();
-                // Sample alleles and their dosages per homologous chromosome or parent,
-                // where the same allele may be sampled and hence fixed on a homologous chromosome and so we add to the initialised 0.0 dosages.
-                for j in 0..2 {
-                    // Each allele from each ploidy is sampled here
-                    for _ in 0..(ploidy / 2) {
-                        let allele_1_parent_j = locus.col_idx
-                            [(beta_n.sample(&mut rng) * ((n_alleles - 1) as f32)).round() as usize];
-                        let allele_2_parent_j = locus.col_idx
-                            [(beta_n.sample(&mut rng) * ((n_alleles - 1) as f32)).round() as usize];
-                        let allele_1_dosage_parent_j = (beta_u.sample(&mut rng) as f32).round();
-                        let allele_2_dosage_parent_j = 1.00 - allele_1_dosage_parent_j;
-                        genotype_data_tmp[idx + (2 * allele_1_parent_j) + j] +=
-                            allele_1_dosage_parent_j;
-                        genotype_data_tmp[idx + (2 * allele_2_parent_j) + j] +=
-                            allele_2_dosage_parent_j;
+                if !genome[locus.chromosome_id].is_sex_chromosome {
+                    // Sample alleles and their dosages per homologous chromosome or parent,
+                    // where the same allele may be sampled and hence fixed on a homologous chromosome and so we add to the initialised 0.0 dosages.
+                    for j in 0..2 {
+                        // For autosomal loci
+                        // Each allele from each ploidy is sampled here
+                        for _ in 0..(ploidy / 2) {
+                            let allele_1_parent_j = locus.col_idx[(beta_n.sample(&mut rng)
+                                * ((n_alleles - 1) as f32))
+                                .round()
+                                as usize];
+                            let allele_2_parent_j = locus.col_idx[(beta_n.sample(&mut rng)
+                                * ((n_alleles - 1) as f32))
+                                .round()
+                                as usize];
+                            let allele_1_dosage_parent_j = (beta_u.sample(&mut rng) as f32).round();
+                            let allele_2_dosage_parent_j = 1.00 - allele_1_dosage_parent_j;
+                            genotype_data_tmp[idx + (2 * allele_1_parent_j) + j] +=
+                                allele_1_dosage_parent_j;
+                            genotype_data_tmp[idx + (2 * allele_2_parent_j) + j] +=
+                                allele_2_dosage_parent_j;
+                        }
+                    }
+                } else {
+                    // For sex chromosome loci, i.e. with 2 alleles which represent the heterogametic thing-o
+                    // XX or ZZ homogametic and XY or ZW heterogametic ==> males and female sexes
+                    let allele_1_parent_j = locus.col_idx[0];
+                    let allele_2_parent_j = locus.col_idx[1];
+                    if is_monogametic {
+                        // XX or ZZ
+                        genotype_data_tmp[idx + (2 * allele_1_parent_j)] += (ploidy / 2) as f32;
+                        genotype_data_tmp[idx + (2 * allele_1_parent_j) + 1] += 0.0;
+                        genotype_data_tmp[idx + (2 * allele_2_parent_j)] += (ploidy / 2) as f32;
+                        genotype_data_tmp[idx + (2 * allele_2_parent_j) + 1] += 0.0;
+                    } else {
+                        // XY or ZW
+                        genotype_data_tmp[idx + (2 * allele_1_parent_j)] += (ploidy / 2) as f32;
+                        genotype_data_tmp[idx + (2 * allele_1_parent_j) + 1] += 0.0;
+                        genotype_data_tmp[idx + (2 * allele_2_parent_j)] += 0.0;
+                        genotype_data_tmp[idx + (2 * allele_2_parent_j) + 1] += (ploidy / 2) as f32;
                     }
                 }
             }
@@ -230,8 +261,26 @@ impl Data {
         let normal =
             Normal::new(0.0, 1.0).expect("Failed to initialise a standard normal distribution!");
         for i in 0..n_entries {
+            let is_monogametic = if !with_sex {
+                false
+            } else {
+                let sex_locus = loci
+                    .iter()
+                    .rev()
+                    .find(|&l| genome[l.chromosome_id].is_sex_chromosome)
+                    .expect("No sex locus found despite with_sex=true");
+                let idx_0 = genotype_data.linear_index(&[i, sex_locus.col_idx[0], 0]);
+                let idx_1 = genotype_data.linear_index(&[i, sex_locus.col_idx[1], 0]);
+                genotype_data_tmp[idx_0] == genotype_data_tmp[idx_1]
+            };
             for j in 0..n_traits {
-                phenotype_data_tmp[(i * n_traits) + j] = normal.sample(&mut rng);
+                if with_sex && (j == (n_traits - 1)) {
+                    // Sex, i.e. 0 for monogametic (XX or ZZ) and 1 for heterogametic (XY or ZW)
+                    phenotype_data_tmp[(i * n_traits) + j] = if is_monogametic { 0.0 } else { 1.0 };
+                } else {
+                    // Continuous trait values
+                    phenotype_data_tmp[(i * n_traits) + j] = normal.sample(&mut rng);
+                }
             }
         }
         let phenotype_data = GpuTensor::from_f32(
@@ -323,18 +372,70 @@ impl Data {
         }
         Ok(())
     }
-    // TODO: mating pair selection
     pub fn sample_mating_pairs(
         &self,
         ctx: &GpuContext,
-        _n_offsprings: usize,
-    ) -> Result<(usize, usize)> {
+        n_offsprings: usize,
+        seed: u64,
+    ) -> Result<Vec<(usize, usize)>> {
         self.check_dimensions(ctx)?;
-        let _with_sex: bool = self
+        let n_entries: usize = self.entries.len();
+        let n_traits: usize = self.traits.len();
+        let with_sex: bool = self
             .genome
             .last()
             .is_some_and(|last_chrom| last_chrom.is_sex_chromosome);
-        todo!()
+        ensure!(
+            !with_sex || self.traits.last().is_some_and(|t| t.is_sex),
+            "Sex chromosome detected but final trait is not marked as a sex trait!"
+        );
+        let mut mating_pairs: Vec<(usize, usize)> = Vec::with_capacity(n_offsprings);
+        let mut rng = ChaCha8Rng::seed_from_u64(seed);
+        let (idx_homogametics, idx_heterogametics) = if with_sex {
+            let phenotypes: Vec<f32> = self.phenotype_data.to_vec_f32(ctx)?;
+            let mut idx_homogametics = vec![];
+            let mut idx_heterogametics = vec![];
+            for i in 0..n_entries {
+                let sex = phenotypes[(i * n_traits) + (n_traits - 1)];
+                match sex {
+                    0.0 => idx_homogametics.push(i),
+                    1.0 => idx_heterogametics.push(i),
+                    _ => anyhow::bail!(
+                        "Invalid sex phenotype value: {}. We only expect 0.0 for homogametic and 1.0 for heterogametic!",
+                        sex
+                    ),
+                }
+            }
+            (idx_homogametics, idx_heterogametics)
+        } else {
+            (vec![], vec![])
+        };
+        for _ in 0..n_offsprings {
+            if !with_sex {
+                // Monoecious
+                mating_pairs.push((
+                    rng.random_range(0..n_entries),
+                    rng.random_range(0..n_entries),
+                ));
+            } else {
+                // Dioecious
+                ensure!(
+                    !idx_homogametics.is_empty(),
+                    "No homogametic individuals available!"
+                );
+                ensure!(
+                    !idx_heterogametics.is_empty(),
+                    "No heterogametic individuals available!"
+                );
+                if let (Some(&x), Some(&y)) = (
+                    idx_homogametics.choose(&mut rng),
+                    idx_heterogametics.choose(&mut rng),
+                ) {
+                    mating_pairs.push((x, y));
+                }
+            }
+        }
+        Ok(mating_pairs)
     }
     // TODO: mating with LD
 }
@@ -591,7 +692,147 @@ mod tests {
             42,
         )
         .unwrap();
+        println!("data: {}", data);
         assert!(data.check_dimensions(&ctx).is_ok());
+    }
+    #[test]
+    fn sex_chromosome_genotypes_are_xx_or_xy() {
+        let ctx = context();
+        let ploidy = 4usize;
+        let data = Data::new(&ctx, 50, 5, 100, 1, true, ploidy, 42).unwrap();
+        println!("data: {}", data);
+        let genotype = data.genotype_data.to_vec_f32(&ctx).unwrap();
+        let sex_chr = data
+            .genome
+            .iter()
+            .position(|c| c.is_sex_chromosome)
+            .unwrap();
+        let sex_loci: Vec<_> = data
+            .loci
+            .iter()
+            .filter(|l| l.chromosome_id == sex_chr)
+            .collect();
+        let n_loci_alleles: usize = data.loci.iter().map(|l| l.col_idx.len()).sum();
+        for entry_idx in 0..data.entries.len() {
+            let base = entry_idx * n_loci_alleles * 2;
+            for locus in &sex_loci {
+                let a0 = locus.col_idx[0];
+                let a1 = locus.col_idx[1];
+                let x0 = genotype[base + (2 * a0)] as usize;
+                let x1 = genotype[base + (2 * a0) + 1] as usize;
+                let y0 = genotype[base + (2 * a1)] as usize;
+                let y1 = genotype[base + (2 * a1) + 1] as usize;
+                let is_xx = x0 == ploidy / 2 && x1 == 0 && y0 == ploidy / 2 && y1 == 0;
+                let is_xy = x0 == ploidy / 2 && x1 == 0 && y0 == 0 && y1 == ploidy / 2;
+                assert!(
+                    is_xx || is_xy,
+                    "invalid sex genotype: ({},{},{},{})",
+                    x0,
+                    x1,
+                    y0,
+                    y1
+                );
+            }
+        }
+    }
+    #[test]
+    fn sex_chromosome_loci_have_two_alleles() {
+        let ctx = context();
+        let data = Data::new(&ctx, 10, 5, 100, 1, true, 2, 42).unwrap();
+        println!("data: {}", data);
+        let sex_chr = data
+            .genome
+            .iter()
+            .position(|c| c.is_sex_chromosome)
+            .unwrap();
+        for locus in data.loci.iter().filter(|l| l.chromosome_id == sex_chr) {
+            assert_eq!(locus.alleles.len(), 2);
+            assert_eq!(locus.col_idx.len(), 2);
+        }
+    }
+    #[test]
+    fn sex_trait_is_binary() {
+        let ctx = context();
+        let data = Data::new(&ctx, 100, 5, 100, 3, true, 2, 42).unwrap();
+        println!("data: {}", data);
+        let phenotype = data.phenotype_data.to_vec_f32(&ctx).unwrap();
+        let sex_trait_idx = data.traits.len() - 1;
+        for entry_idx in 0..data.entries.len() {
+            let sex = phenotype[(entry_idx * data.traits.len()) + sex_trait_idx];
+            assert!(sex == 0.0 || sex == 1.0);
+        }
+    }
+    #[test]
+    fn sex_trait_matches_sex_genotype() {
+        let ctx = context();
+        let ploidy = 4usize;
+        let data = Data::new(&ctx, 100, 5, 100, 3, true, ploidy, 42).unwrap();
+        println!("data: {}", data);
+        let genotype = data.genotype_data.to_vec_f32(&ctx).unwrap();
+        let phenotype = data.phenotype_data.to_vec_f32(&ctx).unwrap();
+        let sex_trait_idx = data.traits.len() - 1;
+        let sex_chr = data
+            .genome
+            .iter()
+            .position(|c| c.is_sex_chromosome)
+            .unwrap();
+        let sex_locus = data
+            .loci
+            .iter()
+            .find(|l| l.chromosome_id == sex_chr)
+            .unwrap();
+        let n_loci_alleles: usize = data.loci.iter().map(|l| l.col_idx.len()).sum();
+        for entry_idx in 0..data.entries.len() {
+            let base = entry_idx * n_loci_alleles * 2;
+            let a0 = sex_locus.col_idx[0];
+            let a1 = sex_locus.col_idx[1];
+            let x0 = genotype[base + (2 * a0)] as usize;
+            let y0 = genotype[base + (2 * a1)] as usize;
+            let expected = if x0 == ploidy / 2 && y0 == ploidy / 2 {
+                0.0
+            } else {
+                1.0
+            };
+            let observed = phenotype[(entry_idx * data.traits.len()) + sex_trait_idx];
+            assert_eq!(
+                observed, expected,
+                "entry={}, x0={}, y0={}",
+                entry_idx, x0, y0
+            );
+        }
+    }
+    #[test]
+    fn sex_ratio_is_approximately_fifty_fifty() {
+        let ctx = context();
+        let data = Data::new(&ctx, 1000, 5, 100, 3, true, 2, 42).unwrap();
+        println!("data: {}", data);
+        let phenotype = data.phenotype_data.to_vec_f32(&ctx).unwrap();
+        let sex_trait_idx = data.traits.len() - 1;
+        let mut monogametic = 0usize;
+        let mut heterogametic = 0usize;
+        for entry_idx in 0..data.entries.len() {
+            let sex = phenotype[(entry_idx * data.traits.len()) + sex_trait_idx];
+            if sex == 0.0 {
+                monogametic += 1;
+            } else if sex == 1.0 {
+                heterogametic += 1;
+            } else {
+                panic!("invalid sex phenotype: {}", sex);
+            }
+        }
+        let total = monogametic + heterogametic;
+        let mono_fraction = monogametic as f64 / total as f64;
+        let hetero_fraction = heterogametic as f64 / total as f64;
+        assert!(
+            (mono_fraction - 0.5).abs() < 0.10,
+            "monogametic fraction {} not close to 0.5",
+            mono_fraction
+        );
+        assert!(
+            (hetero_fraction - 0.5).abs() < 0.10,
+            "heterogametic fraction {} not close to 0.5",
+            hetero_fraction
+        );
     }
     #[test]
     fn check_dimensions_rejects_trait_tensor_mismatch() {
@@ -603,5 +844,82 @@ mod tests {
             err.to_string()
                 .contains("traits in `traits` and `phenotype_data` do not match")
         );
+    }
+    #[test]
+    fn mating_pair_count_matches_request() {
+        let ctx = context();
+        let data = Data::new(&ctx, 100, 5, 100, 3, false, 2, 42).unwrap();
+        let n_offsprings = 1_000;
+        let pairs = data.sample_mating_pairs(&ctx, n_offsprings, 123).unwrap();
+        assert_eq!(pairs.len(), n_offsprings);
+    }
+    #[test]
+    fn mating_pairs_contain_valid_entry_indices() {
+        let ctx = context();
+        let data = Data::new(&ctx, 100, 5, 100, 3, false, 2, 42).unwrap();
+        println!("data: {}", data);
+        let pairs = data.sample_mating_pairs(&ctx, 10_000, 123).unwrap();
+        for (a, b) in pairs {
+            assert!(a < data.entries.len());
+            assert!(b < data.entries.len());
+        }
+    }
+    #[test]
+    fn mating_pairs_are_reproducible() {
+        let ctx = context();
+        let data = Data::new(&ctx, 100, 5, 100, 3, true, 2, 42).unwrap();
+        println!("data: {}", data);
+        let pairs_1 = data.sample_mating_pairs(&ctx, 1_000, 999).unwrap();
+        let pairs_2 = data.sample_mating_pairs(&ctx, 1_000, 999).unwrap();
+        assert_eq!(pairs_1, pairs_2);
+    }
+    #[test]
+    fn dioecious_pairings_are_homogametic_by_heterogametic() {
+        let ctx = context();
+        let data = Data::new(&ctx, 500, 5, 100, 3, true, 2, 42).unwrap();
+        println!("data: {}", data);
+        let pairs = data.sample_mating_pairs(&ctx, 10_000, 999).unwrap();
+        let phenotype = data.phenotype_data.to_vec_f32(&ctx).unwrap();
+        let sex_col = data.traits.len() - 1;
+        for (x, y) in pairs {
+            let sex_x = phenotype[(x * data.traits.len()) + sex_col];
+            let sex_y = phenotype[(y * data.traits.len()) + sex_col];
+            assert_eq!(sex_x, 0.0);
+            assert_eq!(sex_y, 1.0);
+        }
+    }
+    #[test]
+    fn monoecious_population_can_self() {
+        let ctx = context();
+        let data = Data::new(&ctx, 50, 5, 100, 3, false, 2, 42).unwrap();
+        println!("data: {}", data);
+        let pairs = data.sample_mating_pairs(&ctx, 20_000, 123).unwrap();
+        assert!(pairs.iter().any(|(a, b)| a == b));
+    }
+    #[test]
+    fn zero_offspring_returns_empty_vector() {
+        let ctx = context();
+        let data = Data::new(&ctx, 100, 5, 100, 3, true, 2, 42).unwrap();
+        println!("data: {}", data);
+        let pairs = data.sample_mating_pairs(&ctx, 0, 123).unwrap();
+        assert!(pairs.is_empty());
+    }
+    #[test]
+    fn invalid_sex_phenotype_is_rejected() {
+        let ctx = context();
+        let mut data = Data::new(&ctx, 20, 5, 100, 3, true, 2, 42).unwrap();
+        let mut phenotype = data.phenotype_data.to_vec_f32(&ctx).unwrap();
+        let entry_idx = 0;
+        let sex_col = data.traits.len() - 1;
+        phenotype[(entry_idx * data.traits.len()) + sex_col] = 2.0;
+        data.phenotype_data = GpuTensor::from_f32(
+            &ctx,
+            &phenotype,
+            &[data.entries.len() as u32, data.traits.len() as u32],
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(data.sample_mating_pairs(&ctx, 10, 123).is_err());
     }
 }
