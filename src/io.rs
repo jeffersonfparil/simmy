@@ -3,6 +3,7 @@ use crate::linalg::tensor::GpuTensor;
 use anyhow::{Result, ensure};
 use rand_chacha::{ChaCha8Rng, rand_core::SeedableRng};
 use rand_distr::{Beta, Distribution, Exp, Normal};
+use std::fmt;
 
 #[derive(Debug, Clone)]
 pub struct Chromosome {
@@ -46,6 +47,31 @@ pub struct Data {
     pub traits: Vec<Trait>,
     pub genotype_data: GpuTensor, // shape: n_entries x n_loci_alleles x maternal+paternal haplotypes
     pub phenotype_data: GpuTensor,
+}
+
+impl fmt::Display for Data {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let n_loci_alleles: usize = self.loci.iter().map(|l| l.col_idx.len()).sum();
+        writeln!(f, "Data")?;
+        writeln!(f, "\t- Entries: {}", self.entries.len())?;
+        writeln!(f, "\t- Chromosomes: {}", self.genome.len())?;
+        writeln!(f, "\t- Loci: {}", self.loci.len())?;
+        writeln!(f, "\t- Locus Alleles: {}", n_loci_alleles)?;
+        writeln!(f, "\t- Traits: {}", self.traits.len())?;
+        writeln!(f, "\t  ---------------------------------")?;
+        writeln!(f, "\t- Genotype Tensor Shape: {}", self.genotype_data)?;
+        writeln!(f, "\t  ---------------------------------")?;
+        writeln!(f, "\t- Phenotype Tensor Shape: {}", self.phenotype_data)?;
+        writeln!(f, "\t  ---------------------------------")?;
+        let sex_chromosomes = self.genome.iter().filter(|c| c.is_sex_chromosome).count();
+        let sex_traits = self.traits.iter().filter(|t| t.is_sex).count();
+        writeln!(f, "\t- Sex Chromosomes: {}", sex_chromosomes)?;
+        writeln!(f, "\t- Sex Traits: {}", sex_traits)?;
+        if let Some(entry) = self.entries.first() {
+            writeln!(f, "\t- Ploidy: {}", entry.ploidy)?;
+        }
+        Ok(())
+    }
 }
 
 impl Data {
@@ -173,6 +199,8 @@ impl Data {
             for locus in &loci {
                 let idx = i * 2 * n_loci_alleles;
                 let n_alleles = locus.col_idx.len();
+                // Sample alleles and their dosages per homologous chromosome or parent,
+                // where the same allele may be sampled and hence fixed on a homologous chromosome and so we add to the initialised 0.0 dosages.
                 for j in 0..2 {
                     let allele_1_parent_j = locus.col_idx
                         [(beta_n.sample(&mut rng) * ((n_alleles - 1) as f32)).round() as usize];
@@ -271,6 +299,7 @@ mod tests {
     fn creates_expected_counts() {
         let ctx = context();
         let data = Data::new(&ctx, 25, 5, 100, 7, false, 2, 42).unwrap();
+        println!("data: {}", data);
         assert_eq!(data.entries.len(), 25);
         assert_eq!(data.genome.len(), 5);
         assert_eq!(data.loci.len(), 100);
@@ -280,6 +309,7 @@ mod tests {
     fn creates_one_locus_per_chromosome_minimum() {
         let ctx = context();
         let data = Data::new(&ctx, 1, 8, 8, 1, false, 2, 42).unwrap();
+        println!("data: {}", data);
         let mut counts = [0usize; 8];
         for locus in &data.loci {
             counts[locus.chromosome_id] += 1;
@@ -290,6 +320,7 @@ mod tests {
     fn last_chromosome_is_sex_chromosome_when_enabled() {
         let ctx = context();
         let data = Data::new(&ctx, 1, 5, 50, 1, true, 2, 42).unwrap();
+        println!("data: {}", data);
         assert!(!data.genome[0].is_sex_chromosome);
         assert!(!data.genome[1].is_sex_chromosome);
         assert!(!data.genome[2].is_sex_chromosome);
@@ -300,12 +331,14 @@ mod tests {
     fn no_sex_chromosomes_when_disabled() {
         let ctx = context();
         let data = Data::new(&ctx, 1, 5, 50, 1, false, 2, 42).unwrap();
+        println!("data: {}", data);
         assert!(data.genome.iter().all(|c| !c.is_sex_chromosome));
     }
     #[test]
     fn last_trait_is_sex_trait_when_enabled() {
         let ctx = context();
         let data = Data::new(&ctx, 1, 1, 10, 5, true, 2, 42).unwrap();
+        println!("data: {}", data);
         assert!(data.traits[4].is_sex);
         assert!(data.traits[..4].iter().all(|t| !t.is_sex));
     }
@@ -313,6 +346,7 @@ mod tests {
     fn locus_col_indices_are_contiguous_and_unique() {
         let ctx = context();
         let data = Data::new(&ctx, 1, 5, 100, 1, false, 2, 42).unwrap();
+        println!("data: {}", data);
         let mut all = data
             .loci
             .iter()
@@ -327,6 +361,7 @@ mod tests {
     fn locus_allele_count_is_between_two_and_five() {
         let ctx = context();
         let data = Data::new(&ctx, 1, 5, 100, 1, false, 2, 42).unwrap();
+        println!("data: {}", data);
         for locus in &data.loci {
             assert!((2..=5).contains(&locus.alleles.len()));
             assert_eq!(locus.length, 1);
@@ -336,6 +371,7 @@ mod tests {
     fn locus_column_count_matches_allele_count() {
         let ctx = context();
         let data = Data::new(&ctx, 1, 5, 100, 1, false, 2, 42).unwrap();
+        println!("data: {}", data);
         for locus in &data.loci {
             assert_eq!(locus.alleles.len(), locus.col_idx.len());
         }
@@ -344,6 +380,7 @@ mod tests {
     fn chromosome_positions_are_sorted() {
         let ctx = context();
         let data = Data::new(&ctx, 1, 5, 100, 1, false, 2, 42).unwrap();
+        println!("data: {}", data);
         for chr in 0..data.genome.len() {
             let positions: Vec<_> = data
                 .loci
@@ -373,6 +410,7 @@ mod tests {
     fn entry_names_are_unique() {
         let ctx = context();
         let data = Data::new(&ctx, 100, 5, 100, 1, false, 2, 42).unwrap();
+        println!("data: {}", data);
         let mut names = data
             .entries
             .iter()
@@ -386,6 +424,7 @@ mod tests {
     fn trait_names_are_unique() {
         let ctx = context();
         let data = Data::new(&ctx, 1, 5, 100, 20, false, 2, 42).unwrap();
+        println!("data: {}", data);
         let mut names = data
             .traits
             .iter()
@@ -400,6 +439,7 @@ mod tests {
         let ctx = context();
         for ploidy in [2usize, 4, 6, 8, 10] {
             let data = Data::new(&ctx, 10, 5, 100, 1, false, ploidy, 42).unwrap();
+            println!("data: {}", data);
             let genotype = data.genotype_data.to_vec_f32(&ctx).unwrap();
             let n_loci_alleles: usize = data.loci.iter().map(|l| l.col_idx.len()).sum();
             for entry_idx in 0..data.entries.len() {
@@ -426,6 +466,7 @@ mod tests {
         let ctx = context();
         for ploidy in [2usize, 4, 6, 8, 10] {
             let data = Data::new(&ctx, 10, 5, 100, 1, false, ploidy, 42).unwrap();
+            println!("data: {}", data);
             let genotype = data.genotype_data.to_vec_f32(&ctx).unwrap();
             let n_loci_alleles: usize = data.loci.iter().map(|l| l.col_idx.len()).sum();
             for entry_idx in 0..data.entries.len() {
