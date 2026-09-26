@@ -934,6 +934,73 @@ mod tests {
         );
     }
     #[test]
+    fn prob_linkage_different_chromosomes_returns_half() {
+        let ctx = context();
+        let mut data = Data::new(&ctx, 10, 2, 10, 1, 2, false, 42).unwrap();
+        // Force locus 0 to chromosome 0 and locus 1 to chromosome 1
+        data.loci[0].chromosome_id = 0;
+        data.loci[1].chromosome_id = 1;
+        let r = data.prob_linkage(0, 1).unwrap();
+        assert_eq!(
+            r, 0.5,
+            "Loci on different chromosomes must assort independently (r=0.5)"
+        );
+    }
+    #[test]
+    fn prob_linkage_same_chromosome_zero_distance_returns_one() {
+        let ctx = context();
+        let mut data = Data::new(&ctx, 10, 1, 10, 1, 2, false, 42).unwrap();
+        // Force loci to the exact same position on the same chromosome
+        data.loci[0].chromosome_id = 0;
+        data.loci[0].position = 1000;
+        data.loci[1].chromosome_id = 0;
+        data.loci[1].position = 1000;
+        let r = data.prob_linkage(0, 1).unwrap();
+        assert_eq!(
+            r, 1.0,
+            "Loci at the exact same position must have complete linkage (r=1.0)"
+        );
+    }
+    #[test]
+    fn prob_linkage_same_chromosome_intermediate_distance() {
+        let ctx = context();
+        let mut data = Data::new(&ctx, 10, 1, 10, 1, 2, false, 42).unwrap();
+        // Set a clean decay distance for predictable math
+        data.genome[0].ld_decay_distance = 10_000;
+        data.loci[0].chromosome_id = 0;
+        data.loci[0].position = 10_000;
+        data.loci[1].chromosome_id = 0;
+        data.loci[1].position = 12_231; // distance = 2231
+        // Mathematical expectation:
+        // distance / ld_decay = 2231 / 10000 = 0.2231
+        // r = exp(-0.2231) ≈ 0.8
+        let r = data.prob_linkage(0, 1).unwrap();
+        let expected = (-0.2231f64).exp();
+        assert!(
+            (r - expected).abs() < 1e-6,
+            "Expected intermediate linkage {}, got {}",
+            expected,
+            r
+        );
+    }
+    #[test]
+    fn prob_linkage_large_distance_capped_at_half() {
+        let ctx = context();
+        let mut data = Data::new(&ctx, 10, 1, 10, 1, 2, false, 42).unwrap();
+        data.genome[0].ld_decay_distance = 10_000;
+        data.loci[0].chromosome_id = 0;
+        data.loci[0].position = 0;
+        data.loci[1].chromosome_id = 0;
+        data.loci[1].position = 100_000; // distance = 100,000
+        // exp(-100,000 / 10,000) = exp(-10) ≈ 0.000045
+        // This must be bounded to 0.5 by .max(0.5)
+        let r = data.prob_linkage(0, 1).unwrap();
+        assert_eq!(
+            r, 0.5,
+            "Loci separated by vast distances should be capped at independent assortment (r=0.5)"
+        );
+    }
+    #[test]
     fn mate_creates_correct_dimensions() {
         let ctx = context();
         let parent_data = Data::new(&ctx, 10, 2, 20, 2, 2, true, 42).unwrap();
