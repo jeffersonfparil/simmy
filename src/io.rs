@@ -1,11 +1,14 @@
 use crate::linalg::context::GpuContext;
 use crate::linalg::tensor::GpuTensor;
 use anyhow::{Result, bail, ensure};
+use bytemuck::{Pod, Zeroable};
 use rand::RngExt;
 use rand::prelude::IndexedRandom;
 use rand_chacha::{ChaCha8Rng, rand_core::SeedableRng};
 use rand_distr::{Beta, Distribution, Exp, Normal};
+use std::borrow::Cow;
 use std::fmt;
+use wgpu::util::DeviceExt;
 
 #[derive(Debug, Clone)]
 pub struct Chromosome {
@@ -99,6 +102,53 @@ impl fmt::Display for Data {
         writeln!(f, "\t  ---------------------------------")?;
         Ok(())
     }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+struct MeiosisParams {
+    /// The total number of allele columns across all loci in the genotype tensor.
+    n_loci_alleles: u32,
+    /// The total number of loci being simulated.
+    n_loci: u32,
+    /// The base random seed used to initialize the thread-local PCG random number generator.
+    seed: u32,
+    /// Explicit padding to ensure the struct aligns to a 16-byte boundary,
+    /// which is strictly required for WGSL uniform buffers.
+    _padding: u32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+struct MatingPairData {
+    /// The row index of the first parent in the parental genotype tensor.
+    p1_idx: u32,
+    /// The row index of the second parent in the parental genotype tensor.
+    p2_idx: u32,
+    /// The biological sex of the first parent.
+    /// Encoded as: 0 = Hermaphrodite, 1 = Homogametic, 2 = Heterogametic.
+    sex_p1: u32,
+    /// The biological sex of the second parent.
+    /// Encoded as: 0 = Hermaphrodite, 1 = Homogametic, 2 = Heterogametic.
+    sex_p2: u32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+struct LocusData {
+    /// The inclusive starting column index for this locus in the genotype tensor.
+    start_col: u32,
+    /// The exclusive ending column index for this locus in the genotype tensor.
+    end_col: u32,
+    /// The linkage probability relative to the previous locus.
+    /// `1.0` implies complete linkage (no crossover), while `0.5` implies
+    /// independent assortment (50% chance of crossover).
+    r: f32,
+    /// Bitwise flags representing locus characteristics.
+    /// * Bit 0 (`1`): Indicates if the locus resides on a sex chromosome.
+    /// * Bit 1 (`2`): Indicates if the locus is the start of a new chromosome
+    ///   (forcing independent assortment).
+    metadata: u32,
 }
 
 impl Data {
@@ -430,65 +480,190 @@ impl Data {
         }
         Ok(mating_pairs)
     }
-    // TODO: mating with LD...
     pub fn prob_linkage(&self, idx_locus_1: usize, idx_locus_2: usize) -> Result<f64> {
         self.check_dimensions()?;
-        ensure!(
-            self.loci[idx_locus_1].chromosome_id == self.loci[idx_locus_2].chromosome_id,
-            "The two loci need to be in the same chromosome!"
-        );
-        let idx_chromosome: usize = self.loci[idx_locus_1].chromosome_id;
-        let ld_decay_distance: f64 = self.genome[idx_chromosome].ld_decay_distance as f64;
-        let distance: f64 = {
-            let position_1: usize = self.loci[idx_locus_1].position;
-            let position_2: usize = self.loci[idx_locus_2].position;
-            (position_1 as f64 - position_2 as f64).abs()
+        let r: f64 = if self.loci[idx_locus_1].chromosome_id == self.loci[idx_locus_2].chromosome_id
+        {
+            let idx_chromosome: usize = self.loci[idx_locus_1].chromosome_id;
+            let ld_decay_distance: f64 = self.genome[idx_chromosome].ld_decay_distance as f64;
+            let distance: f64 = {
+                let position_1: usize = self.loci[idx_locus_1].position;
+                let position_2: usize = self.loci[idx_locus_2].position;
+                (position_1 as f64 - position_2 as f64).abs()
+            };
+            (-distance / ld_decay_distance).exp().max(0.5) // ranges from 0.5 (no linkage) to 1.0 (complete linkage)
+        } else {
+            0.5
         };
-        let r: f64 = (-distance / ld_decay_distance).exp().max(0.5); // ranges from 0.5 (no linkage) to 1.0 (complete linkage)
         Ok(r)
     }
-    // pub fn mate(
-    //     &self,
-    //     mating_pairs: Vec<(usize, usize)>,
-    //     ctx: &GpuContext,
-    //     seed: u64,
-    // ) -> Result<Self> {
-    //     self.check_dimensions()?;
-    //     let n_offsprings: usize = mating_pairs.len();
-    //     let n_chromosomes: usize = self.genome.len();
-    //     let n_loci: usize = self.loci.len();
-    //     let n_loci_alleles: usize = self.loci.iter().fold(0, |sum, x| sum + x.col_idx.len());
-    //     let n_traits: usize = self.traits.len();
-    //     let mut offsprings: Self = Data::new(
-    //         ctx,
-    //         n_offsprings,
-    //         n_chromosomes,
-    //         n_loci,
-    //         n_traits,
-    //         self.ploidy,
-    //         self.sexes[0] != Sex::Hermaphrodite,
-    //         seed,
-    //     )?;
-    //     // TODO: entries ==> rename?
-    //     // TODO: ploidy ==> OK
-    //     // TODO: sexes ==> use in recombination of the sex chromosomes
-    //     offsprings.genome = self.genome.clone();
-    //     offsprings.loci = self.loci.clone();
-    //     offsprings.traits = self.traits.clone();
-    //     let mut genotype_data_tmp: Vec<f32> = Vec::with_capacity(n_offsprings * n_loci_alleles * 2);
-    //     // TODO: phenotype_data will be simulated in some other method...
-    //     let mut rng = ChaCha8Rng::seed_from_u64(seed);
-    //     for i in 0..n_offsprings {
-    //         let mut idx_parent_1_homologous_chrom: usize = rng.random_range(0..2);
-    //         let mut idx_parent_2_homologous_chrom: usize = rng.random_range(0..2);
-    //         genotype_data_tmp[i * 2 * n_loci_alleles + ]
-    //         for j in 1..n_loci {
-
-    //         }
-    //     }
-
-    //     todo!()
-    // }
+    pub fn mate(
+        &self,
+        mating_pairs: Vec<(usize, usize)>,
+        ctx: &GpuContext,
+        seed: u64,
+    ) -> Result<Self> {
+        self.check_dimensions()?;
+        let n_offsprings = mating_pairs.len();
+        let n_loci = self.loci.len();
+        let n_loci_alleles = self.loci.iter().fold(0, |sum, x| sum + x.col_idx.len());
+        // Locus Data
+        let mut locus_data_packed = Vec::with_capacity(n_loci);
+        for j in 0..n_loci {
+            let start_col = *self.loci[j].col_idx.first().unwrap() as u32;
+            let end_col = (*self.loci[j].col_idx.last().unwrap() as u32) + 1;
+            let r = if j == 0 {
+                0.5
+            } else {
+                self.prob_linkage(j - 1, j)? as f32
+            };
+            let mut metadata = 0u32;
+            let chr_id = self.loci[j].chromosome_id;
+            if self.genome[chr_id].is_sex_chromosome {
+                metadata |= 1;
+            }
+            if j == 0 || chr_id != self.loci[j - 1].chromosome_id {
+                metadata |= 2;
+            }
+            locus_data_packed.push(LocusData {
+                start_col,
+                end_col,
+                r,
+                metadata,
+            });
+        }
+        // Mating Pair Data
+        let mut pairs_data_packed = Vec::with_capacity(n_offsprings);
+        for &(p1, p2) in mating_pairs.iter() {
+            let sex_p1 = match self.sexes[p1] {
+                Sex::Hermaphrodite => 0,
+                Sex::Homogametic => 1,
+                Sex::Heterogametic => 2,
+            };
+            let sex_p2 = match self.sexes[p2] {
+                Sex::Hermaphrodite => 0,
+                Sex::Homogametic => 1,
+                Sex::Heterogametic => 2,
+            };
+            pairs_data_packed.push(MatingPairData {
+                p1_idx: p1 as u32,
+                p2_idx: p2 as u32,
+                sex_p1,
+                sex_p2,
+            });
+        }
+        // GPU Buffers
+        let device = &ctx.device;
+        let mating_pairs_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("mating_pairs"),
+            contents: bytemuck::cast_slice(&pairs_data_packed),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+        let locus_data_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("locus_data"),
+            contents: bytemuck::cast_slice(&locus_data_packed),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+        let params = MeiosisParams {
+            n_loci_alleles: n_loci_alleles as u32,
+            n_loci: n_loci as u32,
+            seed: seed as u32,
+            _padding: 0,
+        };
+        let params_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("params"),
+            contents: bytemuck::bytes_of(&params),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let offspring_size =
+            (n_offsprings * n_loci_alleles * 2 * std::mem::size_of::<f32>()) as u64;
+        let offspring_genotypes_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("offspring_genotypes"),
+            size: offspring_size,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        // Compile and Configure Pipeline
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Meiosis Shader"),
+            source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(include_str!("meiosis.wgsl"))),
+        });
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("Meiosis Pipeline"),
+            layout: None,
+            module: &shader,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Meiosis Bind Group"),
+            layout: &pipeline.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.genotype_data.buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: offspring_genotypes_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: mating_pairs_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: locus_data_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: params_buf.as_entire_binding(),
+                },
+            ],
+        });
+        // GPU Computation
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Meiosis Encoder"),
+        });
+        {
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Meiosis Pass"),
+                timestamp_writes: None,
+            });
+            cpass.set_pipeline(&pipeline);
+            cpass.set_bind_group(0, &bind_group, &[]);
+            let workgroup_count = (n_offsprings as u32).div_ceil(64);
+            cpass.dispatch_workgroups(workgroup_count, 1, 1);
+        }
+        ctx.queue.submit(Some(encoder.finish()));
+        // Output
+        let mut offsprings = Data::new(
+            ctx,
+            n_offsprings,
+            self.genome.len(),
+            n_loci,
+            self.traits.len(),
+            self.ploidy,
+            self.sexes[0] != Sex::Hermaphrodite,
+            seed,
+        )?;
+        offsprings.genome = self.genome.clone();
+        offsprings.loci = self.loci.clone();
+        offsprings.traits = self.traits.clone();
+        for (i, &(p1, p2)) in mating_pairs.iter().enumerate() {
+            offsprings.entries[i] = self.entries[p1].clone();
+            offsprings.entries[i].name =
+                format!("{}--x--{}", self.entries[p1].name, self.entries[p2].name);
+        }
+        offsprings.genotype_data = GpuTensor::from_buffer(
+            std::sync::Arc::new(offspring_genotypes_buf),
+            &[n_offsprings as u32, n_loci_alleles as u32, 2],
+            None,
+            None,
+        )?;
+        Ok(offsprings)
+    }
 }
 
 #[cfg(test)]
@@ -680,6 +855,7 @@ mod tests {
     fn sample_mating_pairs_returns_correct_number_and_is_deterministic() {
         let ctx = context();
         let data = Data::new(&ctx, 100, 5, 100, 1, 2, true, 42).unwrap();
+        println!("data: {}", data);
         let n_offspring = 75;
         let pairs_run_1 = data.sample_mating_pairs(n_offspring, 123).unwrap();
         let pairs_run_2 = data.sample_mating_pairs(n_offspring, 123).unwrap();
@@ -693,6 +869,7 @@ mod tests {
     fn sample_mating_pairs_respects_dioecious_sexes() {
         let ctx = context();
         let data = Data::new(&ctx, 100, 5, 100, 1, 2, true, 42).unwrap();
+        println!("data: {}", data);
         let pairs = data.sample_mating_pairs(200, 123).unwrap();
         for (parent_1, parent_2) in pairs {
             assert_eq!(
@@ -711,6 +888,7 @@ mod tests {
     fn sample_mating_pairs_works_with_hermaphrodites() {
         let ctx = context();
         let data = Data::new(&ctx, 50, 5, 100, 1, 2, false, 42).unwrap(); // with_sex = false sets all to Hermaphrodite
+        println!("data: {}", data);
         let pairs = data.sample_mating_pairs(100, 123).unwrap();
         for (parent_1, parent_2) in pairs {
             assert_eq!(data.sexes[parent_1], Sex::Hermaphrodite);
@@ -725,6 +903,7 @@ mod tests {
         for sex in data.sexes.iter_mut() {
             *sex = Sex::Heterogametic;
         }
+        println!("data: {}", data);
         let result = data.sample_mating_pairs(5, 123);
         assert!(
             result.is_err(),
@@ -743,6 +922,7 @@ mod tests {
         for sex in data.sexes.iter_mut() {
             *sex = Sex::Homogametic;
         }
+        println!("data: {}", data);
         let result = data.sample_mating_pairs(5, 123);
         assert!(
             result.is_err(),
@@ -752,5 +932,168 @@ mod tests {
             result.unwrap_err().to_string(),
             "There should be hermaphroditic and/or heterogametic entries!"
         );
+    }
+    #[test]
+    fn mate_creates_correct_dimensions() {
+        let ctx = context();
+        let parent_data = Data::new(&ctx, 10, 2, 20, 2, 2, true, 42).unwrap();
+        println!("parent_data: {}", parent_data);
+        // Generate 15 offspring from random mating pairs
+        let pairs = parent_data.sample_mating_pairs(15, 123).unwrap();
+        let offspring_data = parent_data.mate(pairs, &ctx, 456).unwrap();
+        println!("offspring_data: {}", offspring_data);
+        assert_eq!(offspring_data.entries.len(), 15);
+        assert_eq!(offspring_data.genotype_data.shape[0] as usize, 15); // 15 offspring
+        assert_eq!(
+            offspring_data.genotype_data.shape[1],
+            parent_data.genotype_data.shape[1]
+        ); // Loci-alleles preserved
+        assert_eq!(offspring_data.genotype_data.shape[2], 2); // 2 homologous chromosomes
+    }
+    #[test]
+    fn mate_produces_deterministic_results() {
+        let ctx = context();
+        let parent_data = Data::new(&ctx, 10, 2, 20, 2, 2, true, 42).unwrap();
+        println!("parent_data: {}", parent_data);
+        let pairs = parent_data.sample_mating_pairs(5, 123).unwrap();
+        // Mate twice with the exact same seed
+        let offspring_1 = parent_data.mate(pairs.clone(), &ctx, 999).unwrap();
+        let offspring_2 = parent_data.mate(pairs, &ctx, 999).unwrap();
+        // Download the GPU buffers
+        let vec_1 = offspring_1.genotype_data.to_vec_f32(&ctx).unwrap();
+        let vec_2 = offspring_2.genotype_data.to_vec_f32(&ctx).unwrap();
+        assert_eq!(
+            vec_1, vec_2,
+            "GPU Compute Shader must produce perfectly deterministic genotypes for the same seed."
+        );
+    }
+    #[test]
+    fn mate_generates_correct_offspring_names() {
+        let ctx = context();
+        let parent_data = Data::new(&ctx, 10, 2, 5, 2, 2, true, 42).unwrap();
+        println!("parent_data: {}", parent_data);
+        // Manually assign pairs to guarantee exact indices
+        let pairs = vec![(2, 7), (0, 9)];
+        let p2_name = &parent_data.entries[2].name;
+        let p7_name = &parent_data.entries[7].name;
+        let p0_name = &parent_data.entries[0].name;
+        let p9_name = &parent_data.entries[9].name;
+        let offspring_data = parent_data.mate(pairs, &ctx, 111).unwrap();
+        println!("offspring_data: {}", offspring_data);
+        assert_eq!(
+            offspring_data.entries[0].name,
+            format!("{}--x--{}", p2_name, p7_name)
+        );
+        assert_eq!(
+            offspring_data.entries[1].name,
+            format!("{}--x--{}", p0_name, p9_name)
+        );
+    }
+    #[test]
+    fn mate_preserves_total_ploidy_per_autosomal_locus() {
+        let ctx = context();
+        let ploidy = 2; // Diploid
+        let parent_data = Data::new(&ctx, 10, 3, 15, 2, ploidy, true, 42).unwrap();
+        println!("parent_data: {}", parent_data);
+        let pairs = parent_data.sample_mating_pairs(5, 123).unwrap();
+        let offspring_data = parent_data.mate(pairs, &ctx, 777).unwrap();
+        println!("offspring_data: {}", offspring_data);
+        // Download the genotype tensor to evaluate the allele sums
+        let genotype = offspring_data.genotype_data.to_vec_f32(&ctx).unwrap();
+        let n_loci_alleles = offspring_data.genotype_data.shape[1] as usize;
+        for entry_idx in 0..offspring_data.entries.len() {
+            let base = entry_idx * n_loci_alleles * 2;
+            for locus in &offspring_data.loci {
+                // Skip sex chromosomes for this strict check, as their dosage
+                // varies based on homogametic vs heterogametic sex inheritance
+                if offspring_data.genome[locus.chromosome_id].is_sex_chromosome {
+                    continue;
+                }
+                // Sum all allele dosages for this specific locus across both homologous chromosomes
+                let total_dosage: f32 = locus
+                    .col_idx
+                    .iter()
+                    .map(|&col| genotype[base + (2 * col)] + genotype[base + (2 * col) + 1])
+                    .sum();
+                // Due to floating point math inside f32, we check with a small epsilon
+                assert!(
+                    (total_dosage - ploidy as f32).abs() < 1e-4,
+                    "Autosomal locus dosage {} does not equal expected ploidy {} at offspring {}, locus {}",
+                    total_dosage,
+                    ploidy,
+                    entry_idx,
+                    locus.position
+                );
+            }
+        }
+    }
+    #[test]
+    fn mate_high_linkage_prevents_crossovers() {
+        let ctx = context();
+        // Create parent population (using false for sex to simplify to hermaphrodites for the test)
+        let mut parent_data = Data::new(&ctx, 10, 3, 30, 2, 2, false, 42).unwrap();
+        // Force extremely high linkage on all chromosomes to completely suppress crossovers
+        for chr in &mut parent_data.genome {
+            // A massive LD decay distance ensures `r` evaluates to 1.0 (complete linkage)
+            chr.ld_decay_distance = 1_000_000_000_000;
+        }
+        // Mate specific pairs
+        let pairs = vec![(0, 1), (2, 3), (4, 5)];
+        let offspring_data = parent_data.mate(pairs.clone(), &ctx, 123).unwrap();
+        println!("offspring_data: {}", offspring_data);
+        // Download both tensors to host memory for comparison
+        let parent_vec = parent_data.genotype_data.to_vec_f32(&ctx).unwrap();
+        let offspring_vec = offspring_data.genotype_data.to_vec_f32(&ctx).unwrap();
+        let n_loci_alleles = parent_data.genotype_data.shape[1] as usize;
+        for (off_idx, &(p1_idx, p2_idx)) in pairs.iter().enumerate() {
+            for chr_idx in 0..parent_data.genome.len() {
+                // Find all locus allele columns belonging to this specific chromosome
+                let mut chr_cols: Vec<usize> = Vec::new();
+                for locus in &parent_data.loci {
+                    if locus.chromosome_id == chr_idx {
+                        chr_cols.extend(&locus.col_idx);
+                    }
+                }
+                let mut p1_homolog_0 = Vec::new();
+                let mut p1_homolog_1 = Vec::new();
+                let mut p2_homolog_0 = Vec::new();
+                let mut p2_homolog_1 = Vec::new();
+                let mut off_homolog_0 = Vec::new();
+                let mut off_homolog_1 = Vec::new();
+                let p1_base = p1_idx * n_loci_alleles * 2;
+                let p2_base = p2_idx * n_loci_alleles * 2;
+                let off_base = off_idx * n_loci_alleles * 2;
+                // Extract the haplotypes for this entire chromosome
+                for &col in &chr_cols {
+                    p1_homolog_0.push(parent_vec[p1_base + (2 * col)]);
+                    p1_homolog_1.push(parent_vec[p1_base + (2 * col) + 1]);
+                    p2_homolog_0.push(parent_vec[p2_base + (2 * col)]);
+                    p2_homolog_1.push(parent_vec[p2_base + (2 * col) + 1]);
+                    off_homolog_0.push(offspring_vec[off_base + (2 * col)]);
+                    off_homolog_1.push(offspring_vec[off_base + (2 * col) + 1]);
+                }
+                // Since recombination was completely suppressed, the offspring's first
+                // homologous chromosome MUST be a perfect copy of one of Parent 1's homologs
+                let matches_p1_h0 = off_homolog_0 == p1_homolog_0;
+                let matches_p1_h1 = off_homolog_0 == p1_homolog_1;
+                assert!(
+                    matches_p1_h0 || matches_p1_h1,
+                    "Offspring {} experienced a crossover on chromosome {} from Parent {} despite high linkage!",
+                    off_idx,
+                    chr_idx,
+                    p1_idx
+                );
+                // Similarly for Parent 2 and the offspring's second homologous chromosome
+                let matches_p2_h0 = off_homolog_1 == p2_homolog_0;
+                let matches_p2_h1 = off_homolog_1 == p2_homolog_1;
+                assert!(
+                    matches_p2_h0 || matches_p2_h1,
+                    "Offspring {} experienced a crossover on chromosome {} from Parent {} despite high linkage!",
+                    off_idx,
+                    chr_idx,
+                    p2_idx
+                );
+            }
+        }
     }
 }
