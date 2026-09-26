@@ -664,6 +664,8 @@ impl Data {
         )?;
         Ok(offsprings)
     }
+    // TODO: simulate loci-allele effects on phenotypes...
+    // TODO: simulate and update phenotype_data on Data...
 }
 
 #[cfg(test)]
