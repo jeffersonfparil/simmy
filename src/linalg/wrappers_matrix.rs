@@ -233,12 +233,12 @@ mod tests {
 
     fn vector(ctx: &GpuContext, n: usize) -> Result<GpuTensor> {
         let data: Vec<f32> = (0..n).map(|i| (i + 1) as f32).collect();
-        GpuTensor::from_f32(ctx, &data, vec![n as u32], None, None)
+        GpuTensor::from_f32(ctx, &data, &[n as u32], None, None)
     }
 
     fn matrix(ctx: &GpuContext, rows: usize, cols: usize) -> Result<GpuTensor> {
         let data: Vec<f32> = (0..rows * cols).map(|i| (i + 1) as f32).collect();
-        GpuTensor::from_f32(ctx, &data, vec![rows as u32, cols as u32], None, None)
+        GpuTensor::from_f32(ctx, &data, &[rows as u32, cols as u32], None, None)
     }
     ////////////////////////////////////////////
     // Unary parameter builder
