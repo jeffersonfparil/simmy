@@ -219,11 +219,15 @@ impl GpuTensor {
     /// * GPU execution fails during readback.
     /// * The mapped data cannot be interpreted as `f32` values.
     pub fn to_vec_f32(&self, ctx: &GpuContext) -> Result<Vec<f32>> {
+        let num_elements: usize = self.shape.iter().map(|&d| d as usize).product();
+        if self.buffer.size() == 0 || self.shape.contains(&0) || num_elements == 0 {
+            return Ok(Vec::new());
+        }
         let size = self.buffer.size();
         let temp_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("tensor-readback"),
             size,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ, // critical to be MAP_READ and not COPY_DST as in `from_f32`
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
         let mut encoder = ctx
@@ -240,7 +244,13 @@ impl GpuTensor {
         ctx.device.poll(wgpu::PollType::wait_indefinitely())?;
         rx.recv()??;
         let mapped = temp_buffer.get_mapped_range(..)?;
-        let values = bytemuck::cast_slice::<u8, f32>(&mapped).to_vec();
+        let raw_values = bytemuck::cast_slice::<u8, f32>(&mapped);
+        let mut values = Vec::with_capacity(num_elements);
+        for logical_idx in 0..num_elements {
+            let coords = self.tensor_coords(logical_idx);
+            let phys_idx = self.linear_index(&coords);
+            values.push(raw_values[phys_idx]);
+        }
         drop(mapped);
         temp_buffer.unmap();
         Ok(values)

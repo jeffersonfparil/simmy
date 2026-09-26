@@ -147,4 +147,62 @@ mod tests {
         // Valid boundary slice
         assert!(tensor.slice_mut(&[(0, 3), (0, 4)]).is_ok());
     }
+    ///////////////////////
+    // SLICE EXTRACTION TO VEC
+    ///////////////////////
+    #[test]
+    fn test_slice_view_to_vec_f32_2d() -> Result<()> {
+        let ctx = context();
+        // 4x4 matrix flattened (16 elements)
+        let data: Vec<f32> = (0..16).map(|x| x as f32).collect();
+        /*
+         * Original Matrix:
+         *  0,  1,  2,  3
+         *  4,  5,  6,  7
+         *  8,  9, 10, 11
+         * 12, 13, 14, 15
+         */
+        let tensor = GpuTensor::from_f32(&ctx, &data, &[4, 4], None, None)?;
+        // Slice inner 2x2 matrix (rows 1-3, cols 1-3)
+        // Expected view elements: 5, 6, 9, 10
+        let view = tensor.slice_view(&[(1, 3), (1, 3)])?;
+        // to_vec_f32 should automatically compact the strided view
+        let extracted = view.to_vec_f32(&ctx)?;
+        assert_eq!(extracted, vec![5.0, 6.0, 9.0, 10.0]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_slice_view_to_vec_f32_1d_column() -> Result<()> {
+        let ctx = context();
+        let data: Vec<f32> = (0..12).map(|x| x as f32).collect();
+        /*
+         * Original Matrix (3x4):
+         *  0,  1,  2,  3
+         *  4,  5,  6,  7
+         *  8,  9, 10, 11
+         */
+        let tensor = GpuTensor::from_f32(&ctx, &data, &[3, 4], None, None)?;
+        // Slice to get ONLY the 3rd column (index 2) across all rows
+        let view = tensor.slice_view(&[(0, 3), (2, 3)])?;
+        let extracted = view.to_vec_f32(&ctx)?;
+        assert_eq!(extracted, vec![2.0, 6.0, 10.0]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_slice_view_to_vec_f32_empty() -> Result<()> {
+        let ctx = context();
+        let data: Vec<f32> = (0..16).map(|x| x as f32).collect();
+        let tensor = GpuTensor::from_f32(&ctx, &data, &[4, 4], None, None)?;
+        // Slice a region with zero rows (1 to 1)
+        let view = tensor.slice_view(&[(1, 1), (0, 4)])?;
+        let extracted = view.to_vec_f32(&ctx)?;
+        assert_eq!(
+            extracted,
+            Vec::<f32>::new(),
+            "Empty slice should extract to empty vector"
+        );
+        Ok(())
+    }
 }

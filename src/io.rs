@@ -10,8 +10,7 @@ use std::fmt;
 #[derive(Debug, Clone)]
 pub struct Chromosome {
     pub name: String,
-    pub lengths: (usize, usize), // homologous chromosome lengths
-    pub centromere_positions: (usize, usize), // centromere positions in corresponding homologous chromosomes
+    pub lengths: (usize, usize),  // homologous chromosome lengths
     pub ld_decay_distance: usize, // will be used in mating assuming r(d) = exp(-d/L), where d is the distance between a pair of loci in bases and L is ld_decay_distance.
     pub is_sex_chromosome: bool,
 }
@@ -112,7 +111,7 @@ impl Data {
         n_traits: usize,
         ploidy: usize,
         with_sex: bool,
-        seed: usize,
+        seed: u64,
     ) -> Result<Self> {
         // This is intended as a generic not totally biologically realistic initialiser for the Data struct,
         // where future methods will mutate the resulting struct with more biologically realistic information.
@@ -159,13 +158,12 @@ impl Data {
             genome.push(Chromosome {
                 name: format!("chromosome_{:0>n_digits$}", i),
                 lengths: (1_000_000, 1_000_000),
-                centromere_positions: (500_000, 500_000),
                 ld_decay_distance: 10_000,
                 is_sex_chromosome: with_sex && (i == (n_chromosomes - 1)),
             });
         }
         // Loci
-        let mut rng = ChaCha8Rng::seed_from_u64(seed as u64);
+        let mut rng = ChaCha8Rng::seed_from_u64(seed);
         // Divy up the loci into chromosomes
         let mut positions_per_chromosome: Vec<Vec<usize>> = Vec::with_capacity(n_chromosomes);
         let n_chrom_base = n_loci / n_chromosomes;
@@ -432,8 +430,65 @@ impl Data {
         }
         Ok(mating_pairs)
     }
-    // TODO: sample_mating_pairs unit tests...
     // TODO: mating with LD...
+    pub fn prob_linkage(&self, idx_locus_1: usize, idx_locus_2: usize) -> Result<f64> {
+        self.check_dimensions()?;
+        ensure!(
+            self.loci[idx_locus_1].chromosome_id == self.loci[idx_locus_2].chromosome_id,
+            "The two loci need to be in the same chromosome!"
+        );
+        let idx_chromosome: usize = self.loci[idx_locus_1].chromosome_id;
+        let ld_decay_distance: f64 = self.genome[idx_chromosome].ld_decay_distance as f64;
+        let distance: f64 = {
+            let position_1: usize = self.loci[idx_locus_1].position;
+            let position_2: usize = self.loci[idx_locus_2].position;
+            (position_1 as f64 - position_2 as f64).abs()
+        };
+        let r: f64 = (-distance / ld_decay_distance).exp().max(0.5); // ranges from 0.5 (no linkage) to 1.0 (complete linkage)
+        Ok(r)
+    }
+    // pub fn mate(
+    //     &self,
+    //     mating_pairs: Vec<(usize, usize)>,
+    //     ctx: &GpuContext,
+    //     seed: u64,
+    // ) -> Result<Self> {
+    //     self.check_dimensions()?;
+    //     let n_offsprings: usize = mating_pairs.len();
+    //     let n_chromosomes: usize = self.genome.len();
+    //     let n_loci: usize = self.loci.len();
+    //     let n_loci_alleles: usize = self.loci.iter().fold(0, |sum, x| sum + x.col_idx.len());
+    //     let n_traits: usize = self.traits.len();
+    //     let mut offsprings: Self = Data::new(
+    //         ctx,
+    //         n_offsprings,
+    //         n_chromosomes,
+    //         n_loci,
+    //         n_traits,
+    //         self.ploidy,
+    //         self.sexes[0] != Sex::Hermaphrodite,
+    //         seed,
+    //     )?;
+    //     // TODO: entries ==> rename?
+    //     // TODO: ploidy ==> OK
+    //     // TODO: sexes ==> use in recombination of the sex chromosomes
+    //     offsprings.genome = self.genome.clone();
+    //     offsprings.loci = self.loci.clone();
+    //     offsprings.traits = self.traits.clone();
+    //     let mut genotype_data_tmp: Vec<f32> = Vec::with_capacity(n_offsprings * n_loci_alleles * 2);
+    //     // TODO: phenotype_data will be simulated in some other method...
+    //     let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    //     for i in 0..n_offsprings {
+    //         let mut idx_parent_1_homologous_chrom: usize = rng.random_range(0..2);
+    //         let mut idx_parent_2_homologous_chrom: usize = rng.random_range(0..2);
+    //         genotype_data_tmp[i * 2 * n_loci_alleles + ]
+    //         for j in 1..n_loci {
+
+    //         }
+    //     }
+
+    //     todo!()
+    // }
 }
 
 #[cfg(test)]
