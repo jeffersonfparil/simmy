@@ -666,40 +666,37 @@ impl Data {
         )?;
         Ok(offsprings)
     }
-    pub fn sim_phenotypes(
+    pub fn sim_allele_effects(
         &mut self,
         ctx: &GpuContext,
-        p_mu_sd_ersd: &[(usize, f32, f32, f32)],
+        p_mu_sd: &[(usize, f32, f32)],
         seed: u64,
     ) -> Result<GpuTensor> {
         self.check_dimensions()?;
-        let n_entries: usize = self.entries.len();
         let n_loci: usize = self.loci.len();
         let n_loci_alleles: usize = self.loci.iter().map(|l| l.col_idx.len()).sum();
         let n_traits: usize = self.traits.len();
         ensure!(
-            p_mu_sd_ersd.len() == n_traits,
+            p_mu_sd.len() == n_traits,
             "The number of trait parameters does not match the number of traits!"
         );
-        for par in p_mu_sd_ersd {
+        for (i, &par) in p_mu_sd.iter().enumerate() {
             ensure!(
                 par.0 <= n_loci,
-                "The number of loci with effects is greater than the number of loci!"
+                "The number of loci with effects for trait {} is greater than the number of loci!",
+                i
             );
             ensure!(
                 par.2 > 0.0,
-                "The 3rd trait parameter is the standard deviation of the trait effect which should be positive!"
-            );
-            ensure!(
-                par.3 > 0.0,
-                "The 4th trait parameter is the standard deviation of the trait error which should be positive!"
+                "The standard deviation of the effects for trait {} should be positive!",
+                i
             );
         }
         let mut rng = ChaCha8Rng::seed_from_u64(seed);
         // Simulate allele effects across traits
         let mut effects_tmp: Vec<f32> = vec![0.0; n_loci_alleles * n_traits];
-        for (j, &par) in p_mu_sd_ersd.iter().enumerate() {
-            let (n_loci_with_effects, mean, sd, _ersd) = par;
+        for (j, &par) in p_mu_sd.iter().enumerate() {
+            let (n_loci_with_effects, mean, sd) = par;
             let normal = Normal::new(mean, sd).expect("Error initialising a normal distribution!");
             let idx_loci_with_effects: Vec<usize> =
                 index::sample(&mut rng, n_loci, n_loci_with_effects).into_vec();
@@ -717,12 +714,36 @@ impl Data {
             None,
             None,
         )?;
+        Ok(effects)
+    }
+    pub fn sim_phenotypes(
+        &mut self,
+        effects: &GpuTensor,
+        ctx: &GpuContext,
+        error_sds: &[f32],
+        seed: u64,
+    ) -> Result<()> {
+        self.check_dimensions()?;
+        let n_entries: usize = self.entries.len();
+        let n_loci_alleles: usize = self.loci.iter().map(|l| l.col_idx.len()).sum();
+        let n_traits: usize = self.traits.len();
+        ensure!(
+            error_sds.len() == n_traits,
+            "The number of error standard deviations does not match the number of traits!"
+        );
+        for (i, &sd) in error_sds.iter().enumerate() {
+            ensure!(
+                sd > 0.0,
+                "The error standard deviation of the trait {} which should be positive!",
+                i
+            );
+        }
+        let mut rng = ChaCha8Rng::seed_from_u64(seed);
         // Simulate error effects
         let mut errors_tmp: Vec<f32> = vec![0.0; n_entries * n_traits];
-        for (j, &par) in p_mu_sd_ersd.iter().enumerate() {
-            let (_n_loci_with_effects, _mean, _sd, ersd) = par;
+        for (j, &sd) in error_sds.iter().enumerate() {
             let normal =
-                Normal::new(0.0, ersd).expect("Error initialising a standard normal distribution!");
+                Normal::new(0.0, sd).expect("Error initialising a standard normal distribution!");
             for i in 0..n_entries {
                 let idx = (i * n_traits) + j;
                 errors_tmp[idx] = normal.sample(&mut rng);
@@ -735,33 +756,24 @@ impl Data {
             None,
             None,
         )?;
-        // // Ploidy to divide the matrix multiplication result because we used allele dosages and we want allele frequencies and this does that essentially but with less memory as we
-        // let ploidy_tmp: Vec<f32> = vec![self.ploidy as f32; n_entries * n_traits];
-        // let ploidy: GpuTensor = GpuTensor::from_vec_f32(
-        //     ctx,
-        //     &ploidy_tmp,
-        //     &[n_entries as u32, n_traits as u32],
-        //     None,
-        //     None,
-        // )?;
         // Update the phenotype data
         let kernel = GpuKernel::new(ctx);
         let y0 = kernel.contract(
             &self
                 .genotype_data
                 .slice_view(&[(0, n_entries), (0, n_loci_alleles), (0, 1)])?,
-            &effects,
+            effects,
         )?;
         let y1 = kernel.contract(
             &self
                 .genotype_data
                 .slice_view(&[(0, n_entries), (0, n_loci_alleles), (1, 2)])?,
-            &effects,
+            effects,
         )?;
         self.phenotype_data = kernel.div_scalar(&kernel.add(&y0, &y1)?, self.ploidy as f32)?;
         self.phenotype_data = kernel.add(&self.phenotype_data, &errors)?;
         // Output in addition to the mutated phenotype data tensor
-        Ok(effects)
+        Ok(())
     }
 }
 
@@ -1341,48 +1353,62 @@ mod tests {
         );
     }
     #[test]
-    fn sim_phenotypes_rejects_invalid_parameters() {
+    fn sim_allele_effects_rejects_invalid_parameters() {
         let ctx = context();
-        // 20 loci, 2 traits
         let mut data = Data::new(&ctx, 10, 2, 20, 2, 2, false, 42).unwrap();
         // Mismatched trait count (expected 2, passed 1)
-        let res_len = data.sim_phenotypes(&ctx, &[(5, 0.0, 1.0, 1.0)], 123);
+        let res_len = data.sim_allele_effects(&ctx, &[(5, 0.0, 1.0)], 123);
         assert!(res_len.is_err());
         assert_eq!(
             res_len.unwrap_err().to_string(),
             "The number of trait parameters does not match the number of traits!"
         );
         // Out of bounds loci count (21 > 20)
-        let res_loci = data.sim_phenotypes(&ctx, &[(21, 0.0, 1.0, 1.0), (5, 0.0, 1.0, 1.0)], 123);
+        let res_loci = data.sim_allele_effects(&ctx, &[(21, 0.0, 1.0), (5, 0.0, 1.0)], 123);
         assert!(res_loci.is_err());
         assert_eq!(
             res_loci.unwrap_err().to_string(),
-            "The number of loci with effects is greater than the number of loci!"
+            "The number of loci with effects for trait 0 is greater than the number of loci!"
         );
         // Negative genetic standard deviation
-        let res_sd = data.sim_phenotypes(&ctx, &[(5, 0.0, -1.0, 1.0), (5, 0.0, 1.0, 1.0)], 123);
+        let res_sd = data.sim_allele_effects(&ctx, &[(5, 0.0, -1.0), (5, 0.0, 1.0)], 123);
         assert!(res_sd.is_err());
         assert_eq!(
             res_sd.unwrap_err().to_string(),
-            "The 3rd trait parameter is the standard deviation of the trait effect which should be positive!"
-        );
-        // Negative environmental standard deviation (New Check)
-        let res_ersd = data.sim_phenotypes(&ctx, &[(5, 0.0, 1.0, -1.0), (5, 0.0, 1.0, 1.0)], 123);
-        assert!(res_ersd.is_err());
-        assert_eq!(
-            res_ersd.unwrap_err().to_string(),
-            "The 4th trait parameter is the standard deviation of the trait error which should be positive!"
+            "The standard deviation of the effects for trait 0 should be positive!"
         );
     }
     #[test]
-    fn sim_phenotypes_applies_sparse_effects_correctly() {
+    fn sim_phenotypes_rejects_invalid_parameters() {
+        let ctx = context();
+        let mut data = Data::new(&ctx, 10, 2, 20, 2, 2, false, 42).unwrap();
+        let effects = data
+            .sim_allele_effects(&ctx, &[(5, 0.0, 1.0), (5, 0.0, 1.0)], 123)
+            .unwrap();
+        // Mismatched trait count (expected 2, passed 1)
+        let res_len = data.sim_phenotypes(&effects, &ctx, &[1.0], 123);
+        assert!(res_len.is_err());
+        assert_eq!(
+            res_len.unwrap_err().to_string(),
+            "The number of error standard deviations does not match the number of traits!"
+        );
+        // Negative environmental standard deviation
+        let res_ersd = data.sim_phenotypes(&effects, &ctx, &[-1.0, 1.0], 123);
+        assert!(res_ersd.is_err());
+        assert_eq!(
+            res_ersd.unwrap_err().to_string(),
+            "The error standard deviation of the trait 0 which should be positive!"
+        );
+    }
+    #[test]
+    fn sim_allele_effects_applies_sparse_effects_correctly() {
         let ctx = context();
         let n_traits = 2;
         let mut data = Data::new(&ctx, 10, 2, 20, n_traits, 2, false, 42).unwrap();
         let n_loci_alleles: usize = data.loci.iter().map(|l| l.col_idx.len()).sum();
         // Trait 0 gets 5 loci, Trait 1 gets 3 loci
-        let params = [(5, 0.0, 1.0, 1.0), (3, 0.0, 1.0, 1.0)];
-        let effects_tensor = data.sim_phenotypes(&ctx, &params, 123).unwrap();
+        let params = [(5, 0.0, 1.0), (3, 0.0, 1.0)];
+        let effects_tensor = data.sim_allele_effects(&ctx, &params, 123).unwrap();
         // 1. Verify tensor dimensions
         assert_eq!(effects_tensor.shape[0] as usize, n_loci_alleles);
         assert_eq!(effects_tensor.shape[1] as usize, n_traits);
@@ -1425,15 +1451,26 @@ mod tests {
         let ctx = context();
         let mut data1 = Data::new(&ctx, 10, 2, 20, 2, 2, false, 42).unwrap();
         let mut data2 = Data::new(&ctx, 10, 2, 20, 2, 2, false, 42).unwrap();
-        let params = [(5, 0.0, 1.0, 1.0), (5, 0.0, 1.0, 1.0)];
+        let genetic_params = [(5, 0.0, 1.0), (5, 0.0, 1.0)];
+        let env_params = [1.0, 1.0];
         // Run simulation with the same seed
-        let effects1_tensor = data1.sim_phenotypes(&ctx, &params, 123).unwrap();
-        let effects2_tensor = data2.sim_phenotypes(&ctx, &params, 123).unwrap();
-        let effects1 = effects1_tensor.to_vec_f32(&ctx).unwrap();
-        let effects2 = effects2_tensor.to_vec_f32(&ctx).unwrap();
+        let effects1 = data1
+            .sim_allele_effects(&ctx, &genetic_params, 123)
+            .unwrap();
+        let effects2 = data2
+            .sim_allele_effects(&ctx, &genetic_params, 123)
+            .unwrap();
+        data1
+            .sim_phenotypes(&effects1, &ctx, &env_params, 456)
+            .unwrap();
+        data2
+            .sim_phenotypes(&effects2, &ctx, &env_params, 456)
+            .unwrap();
         // 1. Check Effects Determinism
+        let eff_vec1 = effects1.to_vec_f32(&ctx).unwrap();
+        let eff_vec2 = effects2.to_vec_f32(&ctx).unwrap();
         assert_eq!(
-            effects1, effects2,
+            eff_vec1, eff_vec2,
             "Sampling with the same seed must produce identical effect vectors."
         );
         // 2. Check Resulting Phenotypes Determinism
@@ -1455,9 +1492,11 @@ mod tests {
         let n_loci = 200;
         let n_traits = 1;
         let mut data = Data::new(&ctx, n_entries, 5, n_loci, n_traits, 2, false, 42).unwrap();
-        // 100 loci with effects, mean=0.0, genetic sd=1.0, error sd=1.0
-        let params = [(100, 0.0, 1.0, 1.0)];
-        data.sim_phenotypes(&ctx, &params, 123).unwrap();
+        // 100 loci with effects, mean=0.0, genetic sd=1.0
+        let genetic_params = [(100, 0.0, 1.0)];
+        let effects = data.sim_allele_effects(&ctx, &genetic_params, 123).unwrap();
+        // env error sd=1.0
+        data.sim_phenotypes(&effects, &ctx, &[1.0], 456).unwrap();
         let phenotypes = data.phenotype_data.to_vec_f32(&ctx).unwrap();
         assert_eq!(phenotypes.len(), n_entries);
         // 1. Calculate Mean
