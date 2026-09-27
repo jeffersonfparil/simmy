@@ -57,6 +57,7 @@ pub struct Data {
     pub sexes: Vec<Sex>,
     pub genome: Vec<Chromosome>,
     pub loci: Vec<Locus>,
+    pub linkage_probs: Vec<f32>, // Probability of linkage between adjacent loci computed as: `(-distance / ld_decay_distance).exp().max(0.5)` which ranges from 0.5 (no linkage) to 1.0 (complete linkage). This which starts with 0.5 for the first locus.
     pub traits: Vec<Trait>,
     pub genotype_data: GpuTensor, // 3D tensor with shape: n_entries x n_loci_alleles x maternal+paternal haplotypes
     pub phenotype_data: GpuTensor, // 2D tensor with shape: n_entries x n_traits (additionally monogametic = 0.0 and heterogametic = 1.0)
@@ -96,6 +97,7 @@ impl fmt::Display for Data {
         writeln!(f, "\t- Chromosomes: {}", self.genome.len())?;
         writeln!(f, "\t- Loci: {}", self.loci.len())?;
         writeln!(f, "\t- Locus Alleles: {}", n_loci_alleles)?;
+        writeln!(f, "\t- Linkage probabilities between adjacent loci pairs: {}", self.linkage_probs.len())?;
         writeln!(f, "\t- Traits: {}", self.traits.len())?;
         writeln!(f, "\t  ---------------------------------")?;
         writeln!(f, "\t- Genotype Tensor Shape: {}", self.genotype_data)?;
@@ -151,6 +153,27 @@ struct WGSLLocusData {
     /// * Bit 1 (`2`): Indicates if the locus is the start of a new chromosome
     ///   (forcing independent assortment).
     metadata: u32,
+}
+
+pub fn prob_linkage(
+    genome: &[Chromosome],
+    loci: &[Locus],
+    idx_locus_1: usize,
+    idx_locus_2: usize,
+) -> Result<f64> {
+    let r: f64 = if loci[idx_locus_1].chromosome_id == loci[idx_locus_2].chromosome_id {
+        let idx_chromosome: usize = loci[idx_locus_1].chromosome_id;
+        let ld_decay_distance: f64 = genome[idx_chromosome].ld_decay_distance as f64;
+        let distance: f64 = {
+            let position_1: usize = loci[idx_locus_1].position;
+            let position_2: usize = loci[idx_locus_2].position;
+            (position_1 as f64 - position_2 as f64).abs()
+        };
+        (-distance / ld_decay_distance).exp().max(0.5) // ranges from 0.5 (no linkage) to 1.0 (complete linkage)
+    } else {
+        0.5
+    };
+    Ok(r)
 }
 
 impl Data {
@@ -259,6 +282,16 @@ impl Data {
                 });
                 n_loci_alleles += n_alleles;
             }
+        }
+        // Linkage probabilities between adjacent loci pairs
+        let mut linkage_probs: Vec<f32> = Vec::with_capacity(n_loci);
+        for j in 0..n_loci {
+            let r = if j == 0 {
+                0.5
+            } else {
+                prob_linkage(&genome, &loci, j - 1, j)? as f32
+            };
+            linkage_probs.push(r);
         }
         // Traits
         let mut traits: Vec<Trait> = Vec::with_capacity(n_traits);
@@ -375,6 +408,7 @@ impl Data {
             sexes,
             genome,
             loci,
+            linkage_probs,
             traits,
             genotype_data,
             phenotype_data,
@@ -482,23 +516,6 @@ impl Data {
         }
         Ok(mating_pairs)
     }
-    pub fn prob_linkage(&self, idx_locus_1: usize, idx_locus_2: usize) -> Result<f64> {
-        self.check_dimensions()?;
-        let r: f64 = if self.loci[idx_locus_1].chromosome_id == self.loci[idx_locus_2].chromosome_id
-        {
-            let idx_chromosome: usize = self.loci[idx_locus_1].chromosome_id;
-            let ld_decay_distance: f64 = self.genome[idx_chromosome].ld_decay_distance as f64;
-            let distance: f64 = {
-                let position_1: usize = self.loci[idx_locus_1].position;
-                let position_2: usize = self.loci[idx_locus_2].position;
-                (position_1 as f64 - position_2 as f64).abs()
-            };
-            (-distance / ld_decay_distance).exp().max(0.5) // ranges from 0.5 (no linkage) to 1.0 (complete linkage)
-        } else {
-            0.5
-        };
-        Ok(r)
-    }
     pub fn mate(
         &self,
         mating_pairs: Vec<(usize, usize)>,
@@ -514,11 +531,6 @@ impl Data {
         for j in 0..n_loci {
             let start_col = *self.loci[j].col_idx.first().unwrap() as u32;
             let end_col = (*self.loci[j].col_idx.last().unwrap() as u32) + 1;
-            let r = if j == 0 {
-                0.5
-            } else {
-                self.prob_linkage(j - 1, j)? as f32
-            };
             let mut metadata = 0u32;
             let chr_id = self.loci[j].chromosome_id;
             if self.genome[chr_id].is_sex_chromosome {
@@ -530,7 +542,7 @@ impl Data {
             locus_data_packed.push(WGSLLocusData {
                 start_col,
                 end_col,
-                r,
+                r: self.linkage_probs[j],
                 metadata,
             });
         }
@@ -1054,7 +1066,7 @@ mod tests {
         // Force locus 0 to chromosome 0 and locus 1 to chromosome 1
         data.loci[0].chromosome_id = 0;
         data.loci[1].chromosome_id = 1;
-        let r = data.prob_linkage(0, 1).unwrap();
+        let r = prob_linkage(&data.genome, &data.loci, 0, 1).unwrap();
         assert_eq!(
             r, 0.5,
             "Loci on different chromosomes must assort independently (r=0.5)"
@@ -1069,7 +1081,7 @@ mod tests {
         data.loci[0].position = 1000;
         data.loci[1].chromosome_id = 0;
         data.loci[1].position = 1000;
-        let r = data.prob_linkage(0, 1).unwrap();
+        let r = prob_linkage(&data.genome, &data.loci, 0, 1).unwrap();
         assert_eq!(
             r, 1.0,
             "Loci at the exact same position must have complete linkage (r=1.0)"
@@ -1088,7 +1100,7 @@ mod tests {
         // Mathematical expectation:
         // distance / ld_decay = 2231 / 10000 = 0.2231
         // r = exp(-0.2231) ≈ 0.8
-        let r = data.prob_linkage(0, 1).unwrap();
+        let r = prob_linkage(&data.genome, &data.loci, 0, 1).unwrap();
         let expected = (-0.2231f64).exp();
         assert!(
             (r - expected).abs() < 1e-6,
@@ -1108,7 +1120,7 @@ mod tests {
         data.loci[1].position = 100_000; // distance = 100,000
         // exp(-100,000 / 10,000) = exp(-10) ≈ 0.000045
         // This must be bounded to 0.5 by .max(0.5)
-        let r = data.prob_linkage(0, 1).unwrap();
+        let r = prob_linkage(&data.genome, &data.loci, 0, 1).unwrap();
         assert_eq!(
             r, 0.5,
             "Loci separated by vast distances should be capped at independent assortment (r=0.5)"
