@@ -57,7 +57,7 @@ pub struct Data {
     pub sexes: Vec<Sex>,
     pub genome: Vec<Chromosome>,
     pub loci: Vec<Locus>,
-    pub linkage_probs: Vec<f32>, // Probability of linkage between adjacent loci computed as: `(-distance / ld_decay_distance).exp().max(0.5)` which ranges from 0.5 (no linkage) to 1.0 (complete linkage). This which starts with 0.5 for the first locus.
+    pub haplotype_persistence_probs: Vec<f32>, // Probability of linkage between adjacent loci computed as: `(-distance / ld_decay_distance).exp().max(0.5)` which ranges from 0.5 (no linkage) to 1.0 (complete linkage). This which starts with 0.5 for the first locus.
     pub traits: Vec<Trait>,
     pub genotype_data: GpuTensor, // 3D tensor with shape: n_entries x n_loci_alleles x maternal+paternal haplotypes
     pub phenotype_data: GpuTensor, // 2D tensor with shape: n_entries x n_traits (additionally monogametic = 0.0 and heterogametic = 1.0)
@@ -97,7 +97,12 @@ impl fmt::Display for Data {
         writeln!(f, "\t- Chromosomes: {}", self.genome.len())?;
         writeln!(f, "\t- Loci: {}", self.loci.len())?;
         writeln!(f, "\t- Locus Alleles: {}", n_loci_alleles)?;
-        writeln!(f, "\t- Linkage probabilities between adjacent loci pairs: {}", self.linkage_probs.len())?;
+        writeln!(f, "\t- Haplotype persistence probability")?;
+        writeln!(
+            f,
+            "\t  (probabilities of adjacent loci pairs being inherited together): {}",
+            self.haplotype_persistence_probs.len()
+        )?;
         writeln!(f, "\t- Traits: {}", self.traits.len())?;
         writeln!(f, "\t  ---------------------------------")?;
         writeln!(f, "\t- Genotype Tensor Shape: {}", self.genotype_data)?;
@@ -155,25 +160,307 @@ struct WGSLLocusData {
     metadata: u32,
 }
 
-pub fn prob_linkage(
+pub fn sim_entries(n_entries: usize) -> Result<Vec<Entry>> {
+    ensure!(
+        n_entries > 0,
+        "The number of entries need to be greater than zero!"
+    );
+    let mut entries: Vec<Entry> = Vec::with_capacity(n_entries);
+    let n_digits: usize = format!("{}", n_entries - 1).len();
+    for i in 0..n_entries {
+        entries.push(Entry {
+            name: format!("entry_{:0>n_digits$}", i),
+            species: "".to_owned(),
+            group: "".to_owned(),
+            notes: "".to_owned(),
+        });
+    }
+    Ok(entries)
+}
+
+pub fn sim_genome(n_chromosomes: usize, with_sex: bool) -> Result<Vec<Chromosome>> {
+    ensure!(
+        n_chromosomes > 0,
+        "The number of chromosomes need to be greater than zero!"
+    );
+    let mut genome: Vec<Chromosome> = Vec::with_capacity(n_chromosomes);
+    let n_digits: usize = format!("{}", n_chromosomes - 1).len();
+    for i in 0..n_chromosomes {
+        genome.push(Chromosome {
+            name: format!("chromosome_{:0>n_digits$}", i),
+            length: 1_000_000,
+            ld_decay_distance: 10_000,
+            is_sex_chromosome: with_sex && (i == (n_chromosomes - 1)),
+        });
+    }
+    Ok(genome)
+}
+
+pub fn sim_traits(n_traits: usize) -> Result<Vec<Trait>> {
+    ensure!(
+        n_traits > 0,
+        "The number of traits need to be greater than zero!"
+    );
+    let mut traits: Vec<Trait> = Vec::with_capacity(n_traits);
+    let n_digits: usize = format!("{}", n_traits).len();
+    for i in 0..n_traits {
+        traits.push(Trait {
+            name: format!("trait_{:0>n_digits$}", i),
+            description: "".to_owned(),
+        });
+    }
+    Ok(traits)
+}
+
+pub fn sim_sexes(n_entries: usize, with_sex: bool, seed: u64) -> Result<Vec<Sex>> {
+    let mut sexes: Vec<Sex> = Vec::with_capacity(n_entries);
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    for _ in 0..n_entries {
+        let sex = if !with_sex {
+            Sex::Hermaphrodite
+        } else {
+            if rng.random_bool(0.5) {
+                Sex::Homogametic
+            } else {
+                Sex::Heterogametic
+            }
+        };
+        sexes.push(sex);
+    }
+    Ok(sexes)
+}
+
+pub fn sim_loci(genome: &[Chromosome], n_loci: usize, seed: u64) -> Result<Vec<Locus>> {
+    ensure!(
+        n_loci > 0,
+        "The number of loci need to be greater than zero!"
+    );
+    let n_chromosomes = genome.len();
+    ensure!(
+        n_loci >= n_chromosomes,
+        "The number of loci need to be at least as many as the number of chromosomes!"
+    );
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    // Divy up the loci into chromosomes
+    let mut positions_per_chromosome: Vec<Vec<usize>> = Vec::with_capacity(n_chromosomes);
+    let n_chrom_base = n_loci / n_chromosomes;
+    let n_chrom_remainder = n_loci % n_chromosomes;
+    for (i, chromosome) in genome.iter().enumerate() {
+        let m = if i < n_chrom_remainder {
+            n_chrom_base + 1
+        } else {
+            n_chrom_base
+        };
+        let n = chromosome.length;
+        let mut pos: Vec<usize> = Vec::with_capacity(m);
+        for j in 0..m {
+            pos.push(j * n / m);
+        }
+        positions_per_chromosome.push(pos);
+    }
+    // Simulate loci-alleles
+    // TODO: add more alleles but for now we only have SNPs, i.e. A, T, C, G, and D (note that these are still SNPs even though we can have multi-allelic loci because the variations remain single nucleotides)
+    let choice_of_alleles = &["A", "T", "C", "G", "D"];
+    let mut loci: Vec<Locus> = Vec::with_capacity(n_loci);
+    let mut n_loci_alleles: usize = 0;
+    let exponential = Exp::new(1.0).expect("Failed to initialise exponential distribution!");
+    for (i, positions) in positions_per_chromosome.iter().enumerate() {
+        for &pos in positions {
+            let n_alleles: usize = if !genome[i].is_sex_chromosome {
+                let a: f64 = exponential.sample(&mut rng) + 2.0;
+                a.round().min(5.0) as usize
+            } else {
+                2
+            };
+            loci.push(Locus {
+                chromosome_id: i,
+                position: pos,
+                alleles: choice_of_alleles[0..n_alleles]
+                    .iter()
+                    .map(|&x| x.to_owned())
+                    .collect::<Vec<String>>(),
+                length: 1,
+                col_idx: (n_loci_alleles..(n_loci_alleles + n_alleles)).collect::<Vec<usize>>(),
+            });
+            n_loci_alleles += n_alleles;
+        }
+    }
+    Ok(loci)
+}
+
+pub fn haplotype_persistence_probabilities(
     genome: &[Chromosome],
     loci: &[Locus],
-    idx_locus_1: usize,
-    idx_locus_2: usize,
-) -> Result<f64> {
-    let r: f64 = if loci[idx_locus_1].chromosome_id == loci[idx_locus_2].chromosome_id {
-        let idx_chromosome: usize = loci[idx_locus_1].chromosome_id;
-        let ld_decay_distance: f64 = genome[idx_chromosome].ld_decay_distance as f64;
-        let distance: f64 = {
-            let position_1: usize = loci[idx_locus_1].position;
-            let position_2: usize = loci[idx_locus_2].position;
-            (position_1 as f64 - position_2 as f64).abs()
-        };
-        (-distance / ld_decay_distance).exp().max(0.5) // ranges from 0.5 (no linkage) to 1.0 (complete linkage)
-    } else {
-        0.5
-    };
-    Ok(r)
+) -> Result<Vec<f32>> {
+    // Chromosome-specific `ld_decay_distance` is the effective haplotype persistence distance:
+    // r(d) = exp(-d / L)
+    // where:
+    // d = physical distance between adjacent loci
+    // L = ld_decay_distance
+    //
+    // Larger values of L produce longer haplotype blocks and stronger
+    // inheritance of neighbouring loci together, while smaller values
+    // produce shorter blocks and more frequent recombination events.
+    //
+    // The resulting linkage probability is bounded to [0.5, 1.0]:
+    // 1.0 -> complete linkage (no crossover)
+    // 0.5 -> independent assortment
+    let n_loci = loci.len();
+    let mut haplotype_persistence_probs: Vec<f32> = Vec::with_capacity(n_loci);
+    for j in 0..n_loci {
+        let idx_locus_1 = if j == 0 { 0 } else { j - 1 };
+        let idx_locus_2 = j;
+        let r: f32 =
+            if (j == 0) || (loci[idx_locus_1].chromosome_id != loci[idx_locus_2].chromosome_id) {
+                0.5
+            } else {
+                let idx_chromosome: usize = loci[idx_locus_1].chromosome_id;
+                let ld_decay_distance: f64 = genome[idx_chromosome].ld_decay_distance as f64;
+                let distance: f64 = {
+                    let position_1: usize = loci[idx_locus_1].position;
+                    let position_2: usize = loci[idx_locus_2].position;
+                    (position_1 as f64 - position_2 as f64).abs()
+                };
+                (-distance / ld_decay_distance).exp().max(0.5) as f32 // ranges from 0.5 (no linkage) to 1.0 (complete linkage)
+            };
+        haplotype_persistence_probs.push(r);
+    }
+    Ok(haplotype_persistence_probs)
+}
+
+pub fn sim_genotype_data(
+    ctx: &GpuContext,
+    entries: &[Entry],
+    genome: &[Chromosome],
+    loci: &[Locus],
+    sexes: &[Sex],
+    ploidy: usize,
+    seed: u64,
+) -> Result<GpuTensor> {
+    let n_entries: usize = entries.len();
+    let n_chromosomes: usize = genome.len();
+    let n_loci: usize = loci.len();
+    let n_loci_alleles: usize = loci.iter().map(|x| x.col_idx.len()).sum();
+    ensure!(
+        n_entries > 0,
+        "The number of entries need to be greater than zero!"
+    );
+    ensure!(
+        n_chromosomes > 0,
+        "The number of chromosomes need to be greater than zero!"
+    );
+    ensure!(
+        n_loci > 0,
+        "The number of loci need to be greater than zero!"
+    );
+    ensure!(
+        n_loci >= n_chromosomes,
+        "The number of loci need to be at least as many as the number of chromosomes!"
+    );
+
+    ensure!(ploidy > 0, "Ploidy need to be greater than zero!");
+    ensure!(
+        ploidy.is_multiple_of(2),
+        "We do not support odd ploidies at the moment!"
+    );
+    // Genotype data
+    // Note that we are not simulating LD between loci pairs yet, i.e. assuming the resulting alleles are historical effects
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    let mut genotype_data_tmp: Vec<f32> = vec![0.0; n_entries * n_loci_alleles * 2];
+    let beta_n: Beta<f32> =
+        Beta::new(2.0, 5.0).expect("Failed to initialise a Beta distribution (a=2; b=5)!"); // We will sample allele indices per locus from a skewed distribution, i.e. biased towards the first allele which is more realistic than uniform distribution.
+    let beta_u: Beta<f32> =
+        Beta::new(0.5, 0.5).expect("Failed to initialise a Beta distribution (a=b=0.5)!"); // We will sample from a realistic U shaped distribution for genomewide loci on a single population.
+    for (i, &sex) in sexes.iter().enumerate() {
+        let idx_entry = i * 2 * n_loci_alleles;
+        for locus in loci {
+            if !genome[locus.chromosome_id].is_sex_chromosome {
+                let n_alleles = locus.col_idx.len();
+                // Sample alleles and their dosages per homologous chromosome or parent,
+                // where the same allele may be sampled and hence fixed on a homologous chromosome and so we add to the initialised 0.0 dosages.
+                for j in 0..2 {
+                    // Each allele for each ploidy is sampled here
+                    for _ in 0..(ploidy / 2) {
+                        let idx_allele_1: usize = locus.col_idx
+                            [(beta_n.sample(&mut rng) * ((n_alleles - 1) as f32)).round() as usize];
+                        let idx_allele_2: usize = locus.col_idx
+                            [(beta_n.sample(&mut rng) * ((n_alleles - 1) as f32)).round() as usize];
+                        let allele_1_dosage_parent_j = beta_u.sample(&mut rng).round();
+                        let allele_2_dosage_parent_j = 1.00 - allele_1_dosage_parent_j;
+                        genotype_data_tmp[idx_entry + (2 * idx_allele_1) + j] +=
+                            allele_1_dosage_parent_j;
+                        genotype_data_tmp[idx_entry + (2 * idx_allele_2) + j] +=
+                            allele_2_dosage_parent_j;
+                    }
+                }
+            } else {
+                let idx_allele_1: usize = locus.col_idx[0];
+                let idx_allele_2: usize = locus.col_idx[1];
+                match sex {
+                    Sex::Homogametic => {
+                        genotype_data_tmp[idx_entry + (2 * idx_allele_1)] += (ploidy / 2) as f32;
+                        genotype_data_tmp[idx_entry + (2 * idx_allele_1) + 1] += 0.0;
+                        genotype_data_tmp[idx_entry + (2 * idx_allele_2)] += (ploidy / 2) as f32;
+                        genotype_data_tmp[idx_entry + (2 * idx_allele_2) + 1] += 0.0;
+                    }
+                    Sex::Heterogametic => {
+                        genotype_data_tmp[idx_entry + (2 * idx_allele_1)] += (ploidy / 2) as f32;
+                        genotype_data_tmp[idx_entry + (2 * idx_allele_1) + 1] += 0.0;
+                        genotype_data_tmp[idx_entry + (2 * idx_allele_2)] += 0.0;
+                        genotype_data_tmp[idx_entry + (2 * idx_allele_2) + 1] +=
+                            (ploidy / 2) as f32;
+                    }
+                    Sex::Hermaphrodite => bail!(
+                        "Hermaphrodite sexes are not expected because we have sex chromosomes!"
+                    ),
+                }
+            }
+        }
+    }
+    GpuTensor::from_vec_f32(
+        ctx,
+        &genotype_data_tmp,
+        &[n_entries as u32, n_loci_alleles as u32, 2],
+        None,
+        None,
+    )
+}
+
+pub fn sim_phenotype_data(
+    ctx: &GpuContext,
+    entries: &[Entry],
+    traits: &[Trait],
+    seed: u64,
+) -> Result<GpuTensor> {
+    // Phenotype data
+    // Note that we are not linking the phenotype with the genotype data in this initialisation method
+    // Similarly, sex-related phenotypes are not defined regardless of the presense of sex chromosomes and homo- and heterogametic entries
+    let n_entries: usize = entries.len();
+    let n_traits: usize = traits.len();
+    ensure!(
+        n_entries > 0,
+        "The number of entries need to be greater than zero!"
+    );
+    ensure!(
+        n_traits > 0,
+        "The number of traits need to be greater than zero!"
+    );
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    let mut phenotype_data_tmp: Vec<f32> = vec![0.0; n_entries * n_traits];
+    let normal =
+        Normal::new(0.0, 1.0).expect("Failed to initialise a standard normal distribution!");
+    for i in 0..n_entries {
+        for j in 0..n_traits {
+            phenotype_data_tmp[(i * n_traits) + j] = normal.sample(&mut rng);
+        }
+    }
+    GpuTensor::from_vec_f32(
+        ctx,
+        &phenotype_data_tmp,
+        &[n_entries as u32, n_traits as u32],
+        None,
+        None,
+    )
 }
 
 impl Data {
@@ -190,217 +477,14 @@ impl Data {
     ) -> Result<Self> {
         // This is intended as a generic not totally biologically realistic initialiser for the Data struct,
         // where future methods will mutate the resulting struct with more biologically realistic information.
-        ensure!(
-            n_entries > 0,
-            "The number of entries need to be greater than zero!"
-        );
-        ensure!(
-            n_chromosomes > 0,
-            "The number of chromosomes need to be greater than zero!"
-        );
-        ensure!(
-            n_loci > 0,
-            "The number of loci need to be greater than zero!"
-        );
-        ensure!(
-            n_loci >= n_chromosomes,
-            "The number of loci need to be at least as many as the number of chromosomes!"
-        );
-        ensure!(
-            n_traits > 0,
-            "The number of traits need to be greater than zero!"
-        );
-        ensure!(ploidy > 0, "Ploidy need to be greater than zero!");
-        ensure!(
-            ploidy.is_multiple_of(2),
-            "We do not support odd ploidies at the moment!"
-        );
-        // Entries
-        let mut entries: Vec<Entry> = Vec::with_capacity(n_entries);
-        let n_digits: usize = format!("{}", n_entries - 1).len();
-        for i in 0..n_entries {
-            entries.push(Entry {
-                name: format!("entry_{:0>n_digits$}", i),
-                species: "".to_owned(),
-                group: "".to_owned(),
-                notes: "".to_owned(),
-            });
-        }
-        // Genome
-        let mut genome: Vec<Chromosome> = Vec::with_capacity(n_chromosomes);
-        let n_digits: usize = format!("{}", n_chromosomes - 1).len();
-        for i in 0..n_chromosomes {
-            genome.push(Chromosome {
-                name: format!("chromosome_{:0>n_digits$}", i),
-                length: 1_000_000,
-                ld_decay_distance: 10_000,
-                is_sex_chromosome: with_sex && (i == (n_chromosomes - 1)),
-            });
-        }
-        // Loci
-        let mut rng = ChaCha8Rng::seed_from_u64(seed);
-        // Divy up the loci into chromosomes
-        let mut positions_per_chromosome: Vec<Vec<usize>> = Vec::with_capacity(n_chromosomes);
-        let n_chrom_base = n_loci / n_chromosomes;
-        let n_chrom_remainder = n_loci % n_chromosomes;
-        for (i, chromosome) in genome.iter().enumerate() {
-            let m = if i < n_chrom_remainder {
-                n_chrom_base + 1
-            } else {
-                n_chrom_base
-            };
-            let n = chromosome.length;
-            let mut pos: Vec<usize> = Vec::with_capacity(m);
-            for j in 0..m {
-                pos.push(j * n / m);
-            }
-            positions_per_chromosome.push(pos);
-        }
-        // Simulate loci-alleles
-        // TODO: add more alleles but for now we only have SNPs, i.e. A, T, C, G, and D (note that these are still SNPs even though we can have multi-allelic loci because the variations remain single nucleotides)
-        let choice_of_alleles = &["A", "T", "C", "G", "D"];
-        let mut loci: Vec<Locus> = Vec::with_capacity(n_loci);
-        let mut n_loci_alleles: usize = 0;
-        let exponential = Exp::new(1.0).expect("Failed to initialise exponential distribution!");
-        for (i, positions) in positions_per_chromosome.iter().enumerate() {
-            for &pos in positions {
-                let n_alleles: usize = if !genome[i].is_sex_chromosome {
-                    let a: f64 = exponential.sample(&mut rng) + 2.0;
-                    a.round().min(5.0) as usize
-                } else {
-                    2
-                };
-                loci.push(Locus {
-                    chromosome_id: i,
-                    position: pos,
-                    alleles: choice_of_alleles[0..n_alleles]
-                        .iter()
-                        .map(|&x| x.to_owned())
-                        .collect::<Vec<String>>(),
-                    length: 1,
-                    col_idx: (n_loci_alleles..(n_loci_alleles + n_alleles)).collect::<Vec<usize>>(),
-                });
-                n_loci_alleles += n_alleles;
-            }
-        }
-        // Linkage probabilities between adjacent loci pairs
-        let mut linkage_probs: Vec<f32> = Vec::with_capacity(n_loci);
-        for j in 0..n_loci {
-            let r = if j == 0 {
-                0.5
-            } else {
-                prob_linkage(&genome, &loci, j - 1, j)? as f32
-            };
-            linkage_probs.push(r);
-        }
-        // Traits
-        let mut traits: Vec<Trait> = Vec::with_capacity(n_traits);
-        let n_digits: usize = format!("{}", n_traits).len();
-        for i in 0..n_traits {
-            traits.push(Trait {
-                name: format!("trait_{:0>n_digits$}", i),
-                description: "".to_owned(),
-            });
-        }
-        // Sexes
-        let mut sexes: Vec<Sex> = Vec::with_capacity(n_entries);
-        for _ in 0..n_entries {
-            let sex = if !with_sex {
-                Sex::Hermaphrodite
-            } else {
-                if rng.random_bool(0.5) {
-                    Sex::Homogametic
-                } else {
-                    Sex::Heterogametic
-                }
-            };
-            sexes.push(sex);
-        }
-        // Genotype data
-        // Note that we are not simulating LD between loci pairs yet, i.e. assuming the resulting alleles are historical effects
-        let mut genotype_data_tmp: Vec<f32> = vec![0.0; n_entries * n_loci_alleles * 2];
-        let beta_n =
-            Beta::new(2.0, 5.0).expect("Failed to initialise a Beta distribution (a=2; b=5)!"); // We will sample allele indices per locus from a skewed distribution, i.e. biased towards the first allele which is more realistic than uniform distribution.
-        let beta_u =
-            Beta::new(0.5, 0.5).expect("Failed to initialise a Beta distribution (a=b=0.5)!"); // We will sample from a realistic U shaped distribution for genomewide loci on a single population.
-        for (i, &sex) in sexes.iter().enumerate() {
-            let idx_entry = i * 2 * n_loci_alleles;
-            for locus in &loci {
-                if !genome[locus.chromosome_id].is_sex_chromosome {
-                    let n_alleles = locus.col_idx.len();
-                    // Sample alleles and their dosages per homologous chromosome or parent,
-                    // where the same allele may be sampled and hence fixed on a homologous chromosome and so we add to the initialised 0.0 dosages.
-                    for j in 0..2 {
-                        // Each allele from each ploidy is sampled here
-                        for _ in 0..(ploidy / 2) {
-                            let idx_allele_1: usize = locus.col_idx[(beta_n.sample(&mut rng)
-                                * ((n_alleles - 1) as f32))
-                                .round()
-                                as usize];
-                            let idx_allele_2: usize = locus.col_idx[(beta_n.sample(&mut rng)
-                                * ((n_alleles - 1) as f32))
-                                .round()
-                                as usize];
-                            let allele_1_dosage_parent_j = (beta_u.sample(&mut rng) as f32).round();
-                            let allele_2_dosage_parent_j = 1.00 - allele_1_dosage_parent_j;
-                            genotype_data_tmp[idx_entry + (2 * idx_allele_1) + j] +=
-                                allele_1_dosage_parent_j;
-                            genotype_data_tmp[idx_entry + (2 * idx_allele_2) + j] +=
-                                allele_2_dosage_parent_j;
-                        }
-                    }
-                } else {
-                    let idx_allele_1: usize = locus.col_idx[0];
-                    let idx_allele_2: usize = locus.col_idx[1];
-                    match sex {
-                        Sex::Homogametic => {
-                            genotype_data_tmp[idx_entry + (2 * idx_allele_1)] +=
-                                (ploidy / 2) as f32;
-                            genotype_data_tmp[idx_entry + (2 * idx_allele_1) + 1] += 0.0;
-                            genotype_data_tmp[idx_entry + (2 * idx_allele_2)] +=
-                                (ploidy / 2) as f32;
-                            genotype_data_tmp[idx_entry + (2 * idx_allele_2) + 1] += 0.0;
-                        }
-                        Sex::Heterogametic => {
-                            genotype_data_tmp[idx_entry + (2 * idx_allele_1)] +=
-                                (ploidy / 2) as f32;
-                            genotype_data_tmp[idx_entry + (2 * idx_allele_1) + 1] += 0.0;
-                            genotype_data_tmp[idx_entry + (2 * idx_allele_2)] += 0.0;
-                            genotype_data_tmp[idx_entry + (2 * idx_allele_2) + 1] +=
-                                (ploidy / 2) as f32;
-                        }
-                        Sex::Hermaphrodite => bail!(
-                            "Hermaphrodite sexes are not expected because we have sex chromosomes!"
-                        ),
-                    }
-                }
-            }
-        }
-        let genotype_data = GpuTensor::from_vec_f32(
-            ctx,
-            &genotype_data_tmp,
-            &[n_entries as u32, n_loci_alleles as u32, 2],
-            None,
-            None,
-        )?;
-        // Phenotype data
-        // Note that we are not linking the phenotype with the genotype data in this initialisation method
-        // Similarly, sex-related phenotypes are not defined regardless of the presense of sex chromosomes and homo- and heterogametic entries
-        let mut phenotype_data_tmp: Vec<f32> = vec![0.0; n_entries * n_traits];
-        let normal =
-            Normal::new(0.0, 1.0).expect("Failed to initialise a standard normal distribution!");
-        for i in 0..n_entries {
-            for j in 0..n_traits {
-                phenotype_data_tmp[(i * n_traits) + j] = normal.sample(&mut rng);
-            }
-        }
-        let phenotype_data = GpuTensor::from_vec_f32(
-            ctx,
-            &phenotype_data_tmp,
-            &[n_entries as u32, n_traits as u32],
-            None,
-            None,
-        )?;
+        let entries = sim_entries(n_entries)?;
+        let genome = sim_genome(n_chromosomes, with_sex)?;
+        let traits = sim_traits(n_traits)?;
+        let sexes = sim_sexes(n_entries, with_sex, seed)?;
+        let loci = sim_loci(&genome, n_loci, seed)?;
+        let haplotype_persistence_probs = haplotype_persistence_probabilities(&genome, &loci)?;
+        let genotype_data = sim_genotype_data(ctx, &entries, &genome, &loci, &sexes, ploidy, seed)?;
+        let phenotype_data = sim_phenotype_data(ctx, &entries, &traits, seed)?;
         // Output
         Ok(Self {
             entries,
@@ -408,7 +492,7 @@ impl Data {
             sexes,
             genome,
             loci,
-            linkage_probs,
+            haplotype_persistence_probs,
             traits,
             genotype_data,
             phenotype_data,
@@ -417,6 +501,7 @@ impl Data {
     pub fn check_dimensions(&self) -> Result<()> {
         let n_entries: usize = self.entries.len();
         let n_loci: usize = self.loci.len();
+        let n_haplotype_persistence_probs: usize = self.haplotype_persistence_probs.len();
         let n_loci_alleles: usize = self.loci.iter().map(|l| l.col_idx.len()).sum();
         let n_traits: usize = self.traits.len();
         let n_chromosomes: usize = self.genome.len();
@@ -439,6 +524,10 @@ impl Data {
         ensure!(
             n_loci >= n_chromosomes,
             "The number of loci need to be at least as many as the number of chromosomes!"
+        );
+        ensure!(
+            n_loci == n_haplotype_persistence_probs,
+            "The number of loci and haplotype_persistence_probabilities do not match!"
         );
         ensure!(
             n_traits > 0,
@@ -542,7 +631,7 @@ impl Data {
             locus_data_packed.push(WGSLLocusData {
                 start_col,
                 end_col,
-                r: self.linkage_probs[j],
+                r: self.haplotype_persistence_probs[j],
                 metadata,
             });
         }
@@ -798,6 +887,284 @@ mod tests {
     use crate::linalg::context::GpuContext;
     fn context() -> GpuContext {
         pollster::block_on(GpuContext::new()).expect("Failed to create GPU context")
+    }
+    #[test]
+    fn sim_entries_rejects_zero() {
+        assert!(sim_entries(0).is_err());
+    }
+    #[test]
+    fn sim_entries_creates_expected_names() {
+        let entries = sim_entries(10).unwrap();
+        assert_eq!(entries.len(), 10);
+        assert_eq!(entries[0].name, "entry_0");
+        assert_eq!(entries[9].name, "entry_9");
+    }
+    #[test]
+    fn sim_entries_initialises_empty_metadata() {
+        let entries = sim_entries(5).unwrap();
+        for entry in entries {
+            assert!(entry.species.is_empty());
+            assert!(entry.group.is_empty());
+            assert!(entry.notes.is_empty());
+        }
+    }
+    #[test]
+    fn sim_genome_rejects_zero_chromosomes() {
+        assert!(sim_genome(0, false).is_err());
+    }
+    #[test]
+    fn sim_genome_creates_expected_number_of_chromosomes() {
+        let genome = sim_genome(5, false).unwrap();
+        assert_eq!(genome.len(), 5);
+    }
+    #[test]
+    fn sim_genome_assigns_default_lengths() {
+        let genome = sim_genome(5, false).unwrap();
+        for chr in genome {
+            assert_eq!(chr.length, 1_000_000);
+            assert_eq!(chr.ld_decay_distance, 10_000);
+        }
+    }
+    #[test]
+    fn sim_genome_has_no_sex_chromosomes_when_disabled() {
+        let genome = sim_genome(5, false).unwrap();
+        assert!(genome.iter().all(|x| !x.is_sex_chromosome));
+    }
+    #[test]
+    fn sim_genome_marks_last_chromosome_as_sex_chromosome() {
+        let genome = sim_genome(5, true).unwrap();
+        assert!(!genome[0].is_sex_chromosome);
+        assert!(!genome[1].is_sex_chromosome);
+        assert!(!genome[2].is_sex_chromosome);
+        assert!(!genome[3].is_sex_chromosome);
+        assert!(genome[4].is_sex_chromosome);
+    }
+    #[test]
+    fn sim_traits_rejects_zero() {
+        assert!(sim_traits(0).is_err());
+    }
+    #[test]
+    fn sim_traits_creates_expected_number() {
+        let traits = sim_traits(7).unwrap();
+        assert_eq!(traits.len(), 7);
+    }
+    #[test]
+    fn sim_traits_initialises_empty_descriptions() {
+        let traits = sim_traits(10).unwrap();
+        assert!(traits.iter().all(|x| x.description.is_empty()));
+    }
+    #[test]
+    fn sim_sexes_is_deterministic() {
+        let s1 = sim_sexes(100, true, 42).unwrap();
+        let s2 = sim_sexes(100, true, 42).unwrap();
+        assert_eq!(s1, s2);
+    }
+    #[test]
+    fn sim_sexes_returns_all_hermaphrodites_when_disabled() {
+        let sexes = sim_sexes(100, false, 42).unwrap();
+        assert!(sexes.iter().all(|x| *x == Sex::Hermaphrodite));
+    }
+    #[test]
+    fn sim_sexes_returns_expected_count() {
+        let sexes = sim_sexes(123, true, 42).unwrap();
+        assert_eq!(sexes.len(), 123);
+    }
+    #[test]
+    fn sim_sexes_produces_both_sexes_when_enabled() {
+        let sexes = sim_sexes(1000, true, 42).unwrap();
+        assert!(sexes.contains(&Sex::Homogametic));
+        assert!(sexes.contains(&Sex::Heterogametic));
+    }
+    #[test]
+    fn sim_loci_rejects_zero_loci() {
+        let genome = sim_genome(5, false).unwrap();
+        assert!(sim_loci(&genome, 0, 42).is_err());
+    }
+    #[test]
+    fn sim_loci_rejects_fewer_loci_than_chromosomes() {
+        let genome = sim_genome(10, false).unwrap();
+        assert!(sim_loci(&genome, 5, 42).is_err());
+    }
+    #[test]
+    fn sim_loci_is_deterministic() {
+        let genome = sim_genome(5, false).unwrap();
+        let loci1 = sim_loci(&genome, 100, 42).unwrap();
+        let loci2 = sim_loci(&genome, 100, 42).unwrap();
+        assert_eq!(loci1.len(), loci2.len());
+        for (a, b) in loci1.iter().zip(loci2.iter()) {
+            assert_eq!(a.chromosome_id, b.chromosome_id);
+            assert_eq!(a.position, b.position);
+            assert_eq!(a.alleles, b.alleles);
+            assert_eq!(a.col_idx, b.col_idx);
+        }
+    }
+    #[test]
+    fn sim_loci_creates_expected_number() {
+        let genome = sim_genome(5, false).unwrap();
+        let loci = sim_loci(&genome, 100, 42).unwrap();
+        assert_eq!(loci.len(), 100);
+    }
+    #[test]
+    fn sim_loci_assigns_every_chromosome_at_least_one_locus() {
+        let genome = sim_genome(10, false).unwrap();
+        let loci = sim_loci(&genome, 10, 42).unwrap();
+        let mut counts = [0usize; 10];
+        for locus in loci {
+            counts[locus.chromosome_id] += 1;
+        }
+        assert!(counts.iter().all(|&x| x > 0));
+    }
+    #[test]
+    fn sim_loci_positions_are_sorted_within_chromosomes() {
+        let genome = sim_genome(5, false).unwrap();
+        let loci = sim_loci(&genome, 100, 42).unwrap();
+        for chr in 0..genome.len() {
+            let positions: Vec<_> = loci
+                .iter()
+                .filter(|x| x.chromosome_id == chr)
+                .map(|x| x.position)
+                .collect();
+            assert!(positions.windows(2).all(|w| w[0] <= w[1]));
+        }
+    }
+    #[test]
+    fn sim_loci_column_indices_are_contiguous() {
+        let genome = sim_genome(5, false).unwrap();
+        let loci = sim_loci(&genome, 100, 42).unwrap();
+        let mut all: Vec<usize> = loci
+            .iter()
+            .flat_map(|x| x.col_idx.iter())
+            .copied()
+            .collect();
+        all.sort_unstable();
+        for (i, idx) in all.iter().enumerate() {
+            assert_eq!(*idx, i);
+        }
+    }
+    #[test]
+    fn sim_loci_allele_counts_match_columns() {
+        let genome = sim_genome(5, false).unwrap();
+        let loci = sim_loci(&genome, 100, 42).unwrap();
+        for locus in loci {
+            assert_eq!(locus.alleles.len(), locus.col_idx.len());
+        }
+    }
+    #[test]
+    fn haplotype_persistence_probabilities_match_loci_count() {
+        let genome = sim_genome(5, false).unwrap();
+        let loci = sim_loci(&genome, 100, 42).unwrap();
+        let probs = haplotype_persistence_probabilities(&genome, &loci).unwrap();
+        assert_eq!(probs.len(), loci.len());
+    }
+    #[test]
+    fn haplotype_persistence_probabilities_are_bounded() {
+        let genome = sim_genome(5, false).unwrap();
+        let loci = sim_loci(&genome, 100, 42).unwrap();
+        let probs = haplotype_persistence_probabilities(&genome, &loci).unwrap();
+        for p in probs {
+            assert!((0.5..=1.0).contains(&p));
+        }
+    }
+    #[test]
+    fn haplotype_persistence_first_probability_is_half() {
+        let genome = sim_genome(5, false).unwrap();
+        let loci = sim_loci(&genome, 100, 42).unwrap();
+        let probs = haplotype_persistence_probabilities(&genome, &loci).unwrap();
+        assert_eq!(probs[0], 0.5);
+    }
+    #[test]
+    fn haplotype_persistence_is_half_at_chromosome_boundaries() {
+        let genome = sim_genome(5, false).unwrap();
+        let loci = sim_loci(&genome, 100, 42).unwrap();
+        let probs = haplotype_persistence_probabilities(&genome, &loci).unwrap();
+        for j in 1..loci.len() {
+            if loci[j].chromosome_id != loci[j - 1].chromosome_id {
+                assert_eq!(probs[j], 0.5);
+            }
+        }
+    }
+    #[test]
+    fn haplotype_persistence_increases_with_ld_decay_distance() {
+        let genome_small = sim_genome(1, false).unwrap();
+        let mut genome_large = genome_small.clone();
+        genome_large[0].ld_decay_distance = 1_000_000;
+        let loci = sim_loci(&genome_small, 100, 42).unwrap();
+        let p_small = haplotype_persistence_probabilities(&genome_small, &loci).unwrap();
+        let p_large = haplotype_persistence_probabilities(&genome_large, &loci).unwrap();
+        let sum_small: f32 = p_small.iter().sum();
+        let sum_large: f32 = p_large.iter().sum();
+        assert!(sum_large >= sum_small);
+    }
+    #[test]
+    fn sim_genotype_data_rejects_zero_entries() {
+        let ctx = context();
+        let genome = sim_genome(1, false).unwrap();
+        let loci = sim_loci(&genome, 1, 42).unwrap();
+        let tensor = sim_genotype_data(&ctx, &[], &genome, &loci, &[], 2, 42);
+        assert!(tensor.is_err());
+    }
+    #[test]
+    fn sim_genotype_data_rejects_zero_ploidy() {
+        let ctx = context();
+        let entries = sim_entries(10).unwrap();
+        let genome = sim_genome(1, false).unwrap();
+        let loci = sim_loci(&genome, 10, 42).unwrap();
+        let sexes = sim_sexes(10, false, 42).unwrap();
+        assert!(sim_genotype_data(&ctx, &entries, &genome, &loci, &sexes, 0, 42).is_err());
+    }
+    #[test]
+    fn sim_genotype_data_is_deterministic() {
+        let ctx = context();
+        let entries = sim_entries(20).unwrap();
+        let genome = sim_genome(5, true).unwrap();
+        let loci = sim_loci(&genome, 100, 42).unwrap();
+        let sexes = sim_sexes(20, true, 42).unwrap();
+        let g1 = sim_genotype_data(&ctx, &entries, &genome, &loci, &sexes, 2, 123).unwrap();
+        let g2 = sim_genotype_data(&ctx, &entries, &genome, &loci, &sexes, 2, 123).unwrap();
+        assert_eq!(g1.to_vec_f32(&ctx).unwrap(), g2.to_vec_f32(&ctx).unwrap());
+    }
+    #[test]
+    fn sim_genotype_data_has_expected_shape() {
+        let ctx = context();
+        let entries = sim_entries(20).unwrap();
+        let genome = sim_genome(5, false).unwrap();
+        let loci = sim_loci(&genome, 50, 42).unwrap();
+        let sexes = sim_sexes(20, false, 42).unwrap();
+        let n_loci_alleles: usize = loci.iter().map(|x| x.col_idx.len()).sum();
+        let tensor = sim_genotype_data(&ctx, &entries, &genome, &loci, &sexes, 2, 42).unwrap();
+        assert_eq!(tensor.shape[0] as usize, 20);
+        assert_eq!(tensor.shape[1] as usize, n_loci_alleles);
+        assert_eq!(tensor.shape[2], 2);
+    }
+    #[test]
+    fn sim_phenotype_data_rejects_empty_entries() {
+        let ctx = context();
+        let traits = sim_traits(5).unwrap();
+        assert!(sim_phenotype_data(&ctx, &[], &traits, 42).is_err());
+    }
+    #[test]
+    fn sim_phenotype_data_rejects_empty_traits() {
+        let ctx = context();
+        let entries = sim_entries(10).unwrap();
+        assert!(sim_phenotype_data(&ctx, &entries, &[], 42).is_err());
+    }
+    #[test]
+    fn sim_phenotype_data_is_deterministic() {
+        let ctx = context();
+        let entries = sim_entries(100).unwrap();
+        let traits = sim_traits(10).unwrap();
+        let p1 = sim_phenotype_data(&ctx, &entries, &traits, 42).unwrap();
+        let p2 = sim_phenotype_data(&ctx, &entries, &traits, 42).unwrap();
+        assert_eq!(p1.to_vec_f32(&ctx).unwrap(), p2.to_vec_f32(&ctx).unwrap());
+    }
+    #[test]
+    fn sim_phenotype_data_has_expected_shape() {
+        let ctx = context();
+        let entries = sim_entries(25).unwrap();
+        let traits = sim_traits(7).unwrap();
+        let tensor = sim_phenotype_data(&ctx, &entries, &traits, 42).unwrap();
+        assert_eq!(tensor.shape[0] as usize, 25);
+        assert_eq!(tensor.shape[1] as usize, 7);
     }
     #[test]
     fn rejects_zero_entries() {
@@ -1060,73 +1427,6 @@ mod tests {
         );
     }
     #[test]
-    fn prob_linkage_different_chromosomes_returns_half() {
-        let ctx = context();
-        let mut data = Data::new(&ctx, 10, 2, 10, 1, 2, false, 42).unwrap();
-        // Force locus 0 to chromosome 0 and locus 1 to chromosome 1
-        data.loci[0].chromosome_id = 0;
-        data.loci[1].chromosome_id = 1;
-        let r = prob_linkage(&data.genome, &data.loci, 0, 1).unwrap();
-        assert_eq!(
-            r, 0.5,
-            "Loci on different chromosomes must assort independently (r=0.5)"
-        );
-    }
-    #[test]
-    fn prob_linkage_same_chromosome_zero_distance_returns_one() {
-        let ctx = context();
-        let mut data = Data::new(&ctx, 10, 1, 10, 1, 2, false, 42).unwrap();
-        // Force loci to the exact same position on the same chromosome
-        data.loci[0].chromosome_id = 0;
-        data.loci[0].position = 1000;
-        data.loci[1].chromosome_id = 0;
-        data.loci[1].position = 1000;
-        let r = prob_linkage(&data.genome, &data.loci, 0, 1).unwrap();
-        assert_eq!(
-            r, 1.0,
-            "Loci at the exact same position must have complete linkage (r=1.0)"
-        );
-    }
-    #[test]
-    fn prob_linkage_same_chromosome_intermediate_distance() {
-        let ctx = context();
-        let mut data = Data::new(&ctx, 10, 1, 10, 1, 2, false, 42).unwrap();
-        // Set a clean decay distance for predictable math
-        data.genome[0].ld_decay_distance = 10_000;
-        data.loci[0].chromosome_id = 0;
-        data.loci[0].position = 10_000;
-        data.loci[1].chromosome_id = 0;
-        data.loci[1].position = 12_231; // distance = 2231
-        // Mathematical expectation:
-        // distance / ld_decay = 2231 / 10000 = 0.2231
-        // r = exp(-0.2231) ≈ 0.8
-        let r = prob_linkage(&data.genome, &data.loci, 0, 1).unwrap();
-        let expected = (-0.2231f64).exp();
-        assert!(
-            (r - expected).abs() < 1e-6,
-            "Expected intermediate linkage {}, got {}",
-            expected,
-            r
-        );
-    }
-    #[test]
-    fn prob_linkage_large_distance_capped_at_half() {
-        let ctx = context();
-        let mut data = Data::new(&ctx, 10, 1, 10, 1, 2, false, 42).unwrap();
-        data.genome[0].ld_decay_distance = 10_000;
-        data.loci[0].chromosome_id = 0;
-        data.loci[0].position = 0;
-        data.loci[1].chromosome_id = 0;
-        data.loci[1].position = 100_000; // distance = 100,000
-        // exp(-100,000 / 10,000) = exp(-10) ≈ 0.000045
-        // This must be bounded to 0.5 by .max(0.5)
-        let r = prob_linkage(&data.genome, &data.loci, 0, 1).unwrap();
-        assert_eq!(
-            r, 0.5,
-            "Loci separated by vast distances should be capped at independent assortment (r=0.5)"
-        );
-    }
-    #[test]
     fn mate_creates_correct_dimensions() {
         let ctx = context();
         let parent_data = Data::new(&ctx, 10, 2, 20, 2, 2, true, 42).unwrap();
@@ -1221,70 +1521,53 @@ mod tests {
         }
     }
     #[test]
-    fn mate_high_linkage_prevents_crossovers() {
+    fn mate_high_haplotype_persistence_prevents_crossovers() {
         let ctx = context();
-        // Create parent population (using false for sex to simplify to hermaphrodites for the test)
         let mut parent_data = Data::new(&ctx, 10, 3, 30, 2, 2, false, 42).unwrap();
-        // Force extremely high linkage on all chromosomes to completely suppress crossovers
-        for chr in &mut parent_data.genome {
-            // A massive LD decay distance ensures `r` evaluates to 1.0 (complete linkage)
-            chr.ld_decay_distance = 1_000_000_000_000;
-        }
-        // Mate specific pairs
+        let _ = &mut parent_data.haplotype_persistence_probs.fill(1.0);
         let pairs = vec![(0, 1), (2, 3), (4, 5)];
         let offspring_data = parent_data.mate(pairs.clone(), &ctx, 123).unwrap();
-        println!("offspring_data: {}", offspring_data);
-        // Download both tensors to host memory for comparison
         let parent_vec = parent_data.genotype_data.to_vec_f32(&ctx).unwrap();
         let offspring_vec = offspring_data.genotype_data.to_vec_f32(&ctx).unwrap();
         let n_loci_alleles = parent_data.genotype_data.shape[1] as usize;
         for (off_idx, &(p1_idx, p2_idx)) in pairs.iter().enumerate() {
             for chr_idx in 0..parent_data.genome.len() {
-                // Find all locus allele columns belonging to this specific chromosome
                 let mut chr_cols: Vec<usize> = Vec::new();
                 for locus in &parent_data.loci {
                     if locus.chromosome_id == chr_idx {
                         chr_cols.extend(&locus.col_idx);
                     }
                 }
-                let mut p1_homolog_0 = Vec::new();
-                let mut p1_homolog_1 = Vec::new();
-                let mut p2_homolog_0 = Vec::new();
-                let mut p2_homolog_1 = Vec::new();
-                let mut off_homolog_0 = Vec::new();
-                let mut off_homolog_1 = Vec::new();
                 let p1_base = p1_idx * n_loci_alleles * 2;
                 let p2_base = p2_idx * n_loci_alleles * 2;
                 let off_base = off_idx * n_loci_alleles * 2;
-                // Extract the haplotypes for this entire chromosome
+                let mut p1_h0 = Vec::new();
+                let mut p1_h1 = Vec::new();
+                let mut p2_h0 = Vec::new();
+                let mut p2_h1 = Vec::new();
+                let mut off_h0 = Vec::new();
+                let mut off_h1 = Vec::new();
                 for &col in &chr_cols {
-                    p1_homolog_0.push(parent_vec[p1_base + (2 * col)]);
-                    p1_homolog_1.push(parent_vec[p1_base + (2 * col) + 1]);
-                    p2_homolog_0.push(parent_vec[p2_base + (2 * col)]);
-                    p2_homolog_1.push(parent_vec[p2_base + (2 * col) + 1]);
-                    off_homolog_0.push(offspring_vec[off_base + (2 * col)]);
-                    off_homolog_1.push(offspring_vec[off_base + (2 * col) + 1]);
+                    p1_h0.push(parent_vec[p1_base + (2 * col)]);
+                    p1_h1.push(parent_vec[p1_base + (2 * col) + 1]);
+                    p2_h0.push(parent_vec[p2_base + (2 * col)]);
+                    p2_h1.push(parent_vec[p2_base + (2 * col) + 1]);
+                    off_h0.push(offspring_vec[off_base + (2 * col)]);
+                    off_h1.push(offspring_vec[off_base + (2 * col) + 1]);
                 }
-                // Since recombination was completely suppressed, the offspring's first
-                // homologous chromosome MUST be a perfect copy of one of Parent 1's homologs
-                let matches_p1_h0 = off_homolog_0 == p1_homolog_0;
-                let matches_p1_h1 = off_homolog_0 == p1_homolog_1;
                 assert!(
-                    matches_p1_h0 || matches_p1_h1,
-                    "Offspring {} experienced a crossover on chromosome {} from Parent {} despite high linkage!",
+                    off_h0 == p1_h0 || off_h0 == p1_h1,
+                    "Offspring {} inherited a recombinant haplotype from parent {} on chromosome {} despite complete haplotype persistence.",
                     off_idx,
-                    chr_idx,
-                    p1_idx
+                    p1_idx,
+                    chr_idx
                 );
-                // Similarly for Parent 2 and the offspring's second homologous chromosome
-                let matches_p2_h0 = off_homolog_1 == p2_homolog_0;
-                let matches_p2_h1 = off_homolog_1 == p2_homolog_1;
                 assert!(
-                    matches_p2_h0 || matches_p2_h1,
-                    "Offspring {} experienced a crossover on chromosome {} from Parent {} despite high linkage!",
+                    off_h1 == p2_h0 || off_h1 == p2_h1,
+                    "Offspring {} inherited a recombinant haplotype from parent {} on chromosome {} despite complete haplotype persistence.",
                     off_idx,
-                    chr_idx,
-                    p2_idx
+                    p2_idx,
+                    chr_idx
                 );
             }
         }
