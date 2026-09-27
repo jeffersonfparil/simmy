@@ -45,13 +45,16 @@ impl GpuKernel<'_> {
         a: &GpuTensor,
         b: Option<&GpuTensor>,
     ) -> Result<GpuTensor> {
-        if matches!(&params, Params::UnaryMatrix(..) | Params::UnaryTensor(..)) {
+        if matches!(
+            &params,
+            Params::UnaryMatrix(..)
+                | Params::UnaryTensor(..)
+                | Params::ScalarMatrix(..)
+                | Params::ScalarTensor(..)
+        ) {
             ensure!(b.is_none(), "The b matrix should be None!");
         } else {
             ensure!(!b.is_none(), "The b matrix should be supplied!");
-        }
-        if matches!(&params, Params::ScalarMatrix(..) | Params::ScalarTensor(..)) {
-            ensure!(b.is_none(), "The b matrix should be None!");
         }
         let (params_buffer, c_shape) = match &params {
             Params::UnaryMatrix(par) => (
