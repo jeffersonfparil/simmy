@@ -1165,4 +1165,82 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn mate_polyploid_conserves_multiallelic_identities() {
+        let ctx = context();
+        let ploidy = 4; // Tetraploid
+        // Initialize with multiple loci to ensure random assortment of multi-allelic states
+        let parent_data = Data::new(&ctx, 10, 2, 20, 1, ploidy, true, 42).unwrap();
+        let pairs = vec![(0, 1), (2, 3), (4, 5)];
+        let offspring_data = parent_data.mate(pairs.clone(), &ctx, 123).unwrap();
+        // Download tensors for CPU verification
+        let parent_vec = parent_data.genotype_data.to_vec_f32(&ctx).unwrap();
+        let offspring_vec = offspring_data.genotype_data.to_vec_f32(&ctx).unwrap();
+        let n_loci_alleles = parent_data.genotype_data.shape[1] as usize;
+        // Track whether we successfully generated and transferred a multi-allelic state
+        let mut found_multiallelic_offspring_locus = false;
+        for (off_idx, &(p1_idx, p2_idx)) in pairs.iter().enumerate() {
+            let p1_base = p1_idx * n_loci_alleles * 2;
+            let p2_base = p2_idx * n_loci_alleles * 2;
+            let off_base = off_idx * n_loci_alleles * 2;
+            for locus in &parent_data.loci {
+                let mut off_total_dosage = 0.0;
+                let mut distinct_alleles_present = 0;
+                // Evaluate every allele variant possible at this locus
+                for &col in &locus.col_idx {
+                    // Parent 1 (provides homolog 0)
+                    let p1_h0 = parent_vec[p1_base + (2 * col)];
+                    let p1_h1 = parent_vec[p1_base + (2 * col) + 1];
+                    // Parent 2 (provides homolog 1)
+                    let p2_h0 = parent_vec[p2_base + (2 * col)];
+                    let p2_h1 = parent_vec[p2_base + (2 * col) + 1];
+                    // Offspring
+                    let off_h0 = offspring_vec[off_base + (2 * col)];
+                    let off_h1 = offspring_vec[off_base + (2 * col) + 1];
+                    // 1. Conservation of Identity:
+                    // If Parent 1 doesn't have this allele on either homolog, Offspring Homolog 0 CANNOT have it.
+                    if p1_h0 == 0.0 && p1_h1 == 0.0 {
+                        assert_eq!(
+                            off_h0, 0.0,
+                            "Offspring {} inherited allele at column {} on homolog 0, but Parent {} doesn't possess it!",
+                            off_idx, col, p1_idx
+                        );
+                    }
+                    // If Parent 2 doesn't have this allele on either homolog, Offspring Homolog 1 CANNOT have it.
+                    if p2_h0 == 0.0 && p2_h1 == 0.0 {
+                        assert_eq!(
+                            off_h1, 0.0,
+                            "Offspring {} inherited allele at column {} on homolog 1, but Parent {} doesn't possess it!",
+                            off_idx, col, p2_idx
+                        );
+                    }
+                    let allele_dosage = off_h0 + off_h1;
+                    off_total_dosage += allele_dosage;
+                    if allele_dosage > 0.0 {
+                        distinct_alleles_present += 1;
+                    }
+                }
+                // 2. Track Multi-Allelic Presence:
+                if distinct_alleles_present > 1 {
+                    found_multiallelic_offspring_locus = true;
+                }
+                // 3. Conservation of Ploidy:
+                // Skip the total dosage check on sex chromosomes due to the dosage differences in heterogametic entries.
+                if !parent_data.genome[locus.chromosome_id].is_sex_chromosome {
+                    assert!(
+                        (off_total_dosage - ploidy as f32).abs() < 1e-4,
+                        "Multi-allelic locus {} lost or gained dosage during mating! Expected {}, got {}",
+                        locus.position,
+                        ploidy,
+                        off_total_dosage
+                    );
+                }
+            }
+        }
+        // 4. Assert that multi-allelic loci exist in the offspring
+        assert!(
+            found_multiallelic_offspring_locus,
+            "Failed to find any multi-allelic loci in the offspring! The simulation should generate and conserve multi-allelic states."
+        );
+    }
 }
