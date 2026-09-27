@@ -15,7 +15,7 @@ use wgpu::util::DeviceExt;
 #[derive(Debug, Clone)]
 pub struct Chromosome {
     pub name: String,
-    pub lengths: (usize, usize),  // homologous chromosome lengths
+    pub length: usize, // chromosome length (i.e. length of the largest homologous chromosome per pair)
     pub ld_decay_distance: usize, // will be used in mating assuming r(d) = exp(-d/L), where d is the distance between a pair of loci in bases and L is ld_decay_distance.
     pub is_sex_chromosome: bool,
 }
@@ -209,7 +209,7 @@ impl Data {
         for i in 0..n_chromosomes {
             genome.push(Chromosome {
                 name: format!("chromosome_{:0>n_digits$}", i),
-                lengths: (1_000_000, 1_000_000),
+                length: 1_000_000,
                 ld_decay_distance: 10_000,
                 is_sex_chromosome: with_sex && (i == (n_chromosomes - 1)),
             });
@@ -226,7 +226,7 @@ impl Data {
             } else {
                 n_chrom_base
             };
-            let n = chromosome.lengths.0;
+            let n = chromosome.length;
             let mut pos: Vec<usize> = Vec::with_capacity(m);
             for j in 0..m {
                 pos.push(j * n / m);
