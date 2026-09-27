@@ -194,7 +194,7 @@ impl Data {
         );
         // Entries
         let mut entries: Vec<Entry> = Vec::with_capacity(n_entries);
-        let n_digits: usize = format!("{}", n_entries).len();
+        let n_digits: usize = format!("{}", n_entries - 1).len();
         for i in 0..n_entries {
             entries.push(Entry {
                 name: format!("entry_{:0>n_digits$}", i),
@@ -205,7 +205,7 @@ impl Data {
         }
         // Genome
         let mut genome: Vec<Chromosome> = Vec::with_capacity(n_chromosomes);
-        let n_digits: usize = format!("{}", n_chromosomes).len();
+        let n_digits: usize = format!("{}", n_chromosomes - 1).len();
         for i in 0..n_chromosomes {
             genome.push(Chromosome {
                 name: format!("chromosome_{:0>n_digits$}", i),
@@ -774,6 +774,9 @@ impl Data {
         self.phenotype_data = kernel.add(&self.phenotype_data, &errors)?;
         // Output in addition to the mutated phenotype data tensor
         Ok(())
+    }
+    pub fn sim_population() {
+        todo!()
     }
 }
 
