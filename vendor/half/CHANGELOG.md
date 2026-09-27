@@ -148,7 +148,7 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
 - Added `const` conversion methods to both `f16` and `bf16`. These methods never use hardware
   intrinsics, unlike the current conversion methods, which is why they are separated into new
   methods. The following `const` methods were added:
-  - `from_f32_const`
+  - `from_vec_f32_const`
   - `from_f64_const`
   - `to_f32_const`
   - `to_f64_const`

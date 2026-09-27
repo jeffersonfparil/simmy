@@ -26,7 +26,7 @@ pub trait HalfFloatSliceExt: private::SealedHalfFloatSlice {
     ///
     /// ```rust
     /// # use half::prelude::*;
-    /// let float_buffer = [f16::from_f32(1.), f16::from_f32(2.), f16::from_f32(3.)];
+    /// let float_buffer = [f16::from_vec_f32(1.), f16::from_vec_f32(2.), f16::from_vec_f32(3.)];
     /// let int_buffer = float_buffer.reinterpret_cast();
     ///
     /// assert_eq!(int_buffer, [float_buffer[0].to_bits(), float_buffer[1].to_bits(), float_buffer[2].to_bits()]);
@@ -44,19 +44,19 @@ pub trait HalfFloatSliceExt: private::SealedHalfFloatSlice {
     ///
     /// ```rust
     /// # use half::prelude::*;
-    /// let mut float_buffer = [f16::from_f32(1.), f16::from_f32(2.), f16::from_f32(3.)];
+    /// let mut float_buffer = [f16::from_vec_f32(1.), f16::from_vec_f32(2.), f16::from_vec_f32(3.)];
     ///
     /// {
     ///     let int_buffer = float_buffer.reinterpret_cast_mut();
     ///
-    ///     assert_eq!(int_buffer, [f16::from_f32(1.).to_bits(), f16::from_f32(2.).to_bits(), f16::from_f32(3.).to_bits()]);
+    ///     assert_eq!(int_buffer, [f16::from_vec_f32(1.).to_bits(), f16::from_vec_f32(2.).to_bits(), f16::from_vec_f32(3.).to_bits()]);
     ///
     ///     // Mutating the u16 slice will mutating the original
     ///     int_buffer[0] = 0;
     /// }
     ///
     /// // Note that we need to drop int_buffer before using float_buffer again or we will get a borrow error.
-    /// assert_eq!(float_buffer, [f16::from_f32(0.), f16::from_f32(2.), f16::from_f32(3.)]);
+    /// assert_eq!(float_buffer, [f16::from_vec_f32(0.), f16::from_vec_f32(2.), f16::from_vec_f32(3.)]);
     /// ```
     #[must_use]
     fn reinterpret_cast_mut(&mut self) -> &mut [u16];
@@ -84,11 +84,11 @@ pub trait HalfFloatSliceExt: private::SealedHalfFloatSlice {
     /// let float_values = [1., 2., 3., 4.];
     ///
     /// // Now convert
-    /// buffer.convert_from_f32_slice(&float_values);
+    /// buffer.convert_from_vec_f32_slice(&float_values);
     ///
-    /// assert_eq!(buffer, [f16::from_f32(1.), f16::from_f32(2.), f16::from_f32(3.), f16::from_f32(4.)]);
+    /// assert_eq!(buffer, [f16::from_vec_f32(1.), f16::from_vec_f32(2.), f16::from_vec_f32(3.), f16::from_vec_f32(4.)]);
     /// ```
-    fn convert_from_f32_slice(&mut self, src: &[f32]);
+    fn convert_from_vec_f32_slice(&mut self, src: &[f32]);
 
     /// Converts all of the elements of a `[f64]` slice into [`struct@f16`] or [`struct@bf16`] values in `self`.
     ///
@@ -138,7 +138,7 @@ pub trait HalfFloatSliceExt: private::SealedHalfFloatSlice {
     /// // Initialize an empty buffer
     /// let mut buffer = [0f32; 4];
     ///
-    /// let half_values = [f16::from_f32(1.), f16::from_f32(2.), f16::from_f32(3.), f16::from_f32(4.)];
+    /// let half_values = [f16::from_vec_f32(1.), f16::from_vec_f32(2.), f16::from_vec_f32(3.), f16::from_vec_f32(4.)];
     ///
     /// // Now convert
     /// half_values.convert_to_f32_slice(&mut buffer);
@@ -190,7 +190,7 @@ pub trait HalfFloatSliceExt: private::SealedHalfFloatSlice {
     /// # Examples
     /// ```rust
     /// # use half::prelude::*;
-    /// let half_values = [f16::from_f32(1.), f16::from_f32(2.), f16::from_f32(3.), f16::from_f32(4.)];
+    /// let half_values = [f16::from_vec_f32(1.), f16::from_vec_f32(2.), f16::from_vec_f32(3.), f16::from_vec_f32(4.)];
     /// let vec = half_values.to_f32_vec();
     ///
     /// assert_eq!(vec, vec![1., 2., 3., 4.]);
@@ -237,10 +237,10 @@ pub trait HalfBitsSliceExt: private::SealedHalfBitsSlice {
     ///
     /// ```rust
     /// # use half::prelude::*;
-    /// let int_buffer = [f16::from_f32(1.).to_bits(), f16::from_f32(2.).to_bits(), f16::from_f32(3.).to_bits()];
+    /// let int_buffer = [f16::from_vec_f32(1.).to_bits(), f16::from_vec_f32(2.).to_bits(), f16::from_vec_f32(3.).to_bits()];
     /// let float_buffer: &[f16] = int_buffer.reinterpret_cast();
     ///
-    /// assert_eq!(float_buffer, [f16::from_f32(1.), f16::from_f32(2.), f16::from_f32(3.)]);
+    /// assert_eq!(float_buffer, [f16::from_vec_f32(1.), f16::from_vec_f32(2.), f16::from_vec_f32(3.)]);
     ///
     /// // You may have to specify the cast type directly if the compiler can't infer the type.
     /// // The following is also valid in Rust.
@@ -263,19 +263,19 @@ pub trait HalfBitsSliceExt: private::SealedHalfBitsSlice {
     ///
     /// ```rust
     /// # use half::prelude::*;
-    /// let mut int_buffer = [f16::from_f32(1.).to_bits(), f16::from_f32(2.).to_bits(), f16::from_f32(3.).to_bits()];
+    /// let mut int_buffer = [f16::from_vec_f32(1.).to_bits(), f16::from_vec_f32(2.).to_bits(), f16::from_vec_f32(3.).to_bits()];
     ///
     /// {
     ///     let float_buffer: &mut [f16] = int_buffer.reinterpret_cast_mut();
     ///
-    ///     assert_eq!(float_buffer, [f16::from_f32(1.), f16::from_f32(2.), f16::from_f32(3.)]);
+    ///     assert_eq!(float_buffer, [f16::from_vec_f32(1.), f16::from_vec_f32(2.), f16::from_vec_f32(3.)]);
     ///
     ///     // Mutating the f16 slice will mutating the original
-    ///     float_buffer[0] = f16::from_f32(0.);
+    ///     float_buffer[0] = f16::from_vec_f32(0.);
     /// }
     ///
     /// // Note that we need to drop float_buffer before using int_buffer again or we will get a borrow error.
-    /// assert_eq!(int_buffer, [f16::from_f32(0.).to_bits(), f16::from_f32(2.).to_bits(), f16::from_f32(3.).to_bits()]);
+    /// assert_eq!(int_buffer, [f16::from_vec_f32(0.).to_bits(), f16::from_vec_f32(2.).to_bits(), f16::from_vec_f32(3.).to_bits()]);
     ///
     /// // You may have to specify the cast type directly if the compiler can't infer the type.
     /// // The following is also valid in Rust.
@@ -310,7 +310,7 @@ impl HalfFloatSliceExt for [f16] {
     }
 
     #[inline]
-    fn convert_from_f32_slice(&mut self, src: &[f32]) {
+    fn convert_from_vec_f32_slice(&mut self, src: &[f32]) {
         assert_eq!(
             self.len(),
             src.len(),
@@ -384,7 +384,7 @@ impl HalfFloatSliceExt for [bf16] {
     }
 
     #[inline]
-    fn convert_from_f32_slice(&mut self, src: &[f32]) {
+    fn convert_from_vec_f32_slice(&mut self, src: &[f32]) {
         assert_eq!(
             self.len(),
             src.len(),
@@ -393,7 +393,7 @@ impl HalfFloatSliceExt for [bf16] {
 
         // Just use regular loop here until there's any bf16 SIMD support.
         for (i, f) in src.iter().enumerate() {
-            self[i] = bf16::from_f32(*f);
+            self[i] = bf16::from_vec_f32(*f);
         }
     }
 
@@ -560,14 +560,14 @@ mod test {
         // Exact chunks
         let vf32 = [1., 2., 3., 4., 5., 6., 7., 8.];
         let vf16 = [
-            f16::from_f32(1.),
-            f16::from_f32(2.),
-            f16::from_f32(3.),
-            f16::from_f32(4.),
-            f16::from_f32(5.),
-            f16::from_f32(6.),
-            f16::from_f32(7.),
-            f16::from_f32(8.),
+            f16::from_vec_f32(1.),
+            f16::from_vec_f32(2.),
+            f16::from_vec_f32(3.),
+            f16::from_vec_f32(4.),
+            f16::from_vec_f32(5.),
+            f16::from_vec_f32(6.),
+            f16::from_vec_f32(7.),
+            f16::from_vec_f32(8.),
         ];
         let mut buf32 = vf32;
         let mut buf16 = vf16;
@@ -575,21 +575,21 @@ mod test {
         vf16.convert_to_f32_slice(&mut buf32);
         assert_eq!(&vf32, &buf32);
 
-        buf16.convert_from_f32_slice(&vf32);
+        buf16.convert_from_vec_f32_slice(&vf32);
         assert_eq!(&vf16, &buf16);
 
         // Partial with chunks
         let vf32 = [1., 2., 3., 4., 5., 6., 7., 8., 9.];
         let vf16 = [
-            f16::from_f32(1.),
-            f16::from_f32(2.),
-            f16::from_f32(3.),
-            f16::from_f32(4.),
-            f16::from_f32(5.),
-            f16::from_f32(6.),
-            f16::from_f32(7.),
-            f16::from_f32(8.),
-            f16::from_f32(9.),
+            f16::from_vec_f32(1.),
+            f16::from_vec_f32(2.),
+            f16::from_vec_f32(3.),
+            f16::from_vec_f32(4.),
+            f16::from_vec_f32(5.),
+            f16::from_vec_f32(6.),
+            f16::from_vec_f32(7.),
+            f16::from_vec_f32(8.),
+            f16::from_vec_f32(9.),
         ];
         let mut buf32 = vf32;
         let mut buf16 = vf16;
@@ -597,19 +597,19 @@ mod test {
         vf16.convert_to_f32_slice(&mut buf32);
         assert_eq!(&vf32, &buf32);
 
-        buf16.convert_from_f32_slice(&vf32);
+        buf16.convert_from_vec_f32_slice(&vf32);
         assert_eq!(&vf16, &buf16);
 
         // Partial with chunks
         let vf32 = [1., 2.];
-        let vf16 = [f16::from_f32(1.), f16::from_f32(2.)];
+        let vf16 = [f16::from_vec_f32(1.), f16::from_vec_f32(2.)];
         let mut buf32 = vf32;
         let mut buf16 = vf16;
 
         vf16.convert_to_f32_slice(&mut buf32);
         assert_eq!(&vf32, &buf32);
 
-        buf16.convert_from_f32_slice(&vf32);
+        buf16.convert_from_vec_f32_slice(&vf32);
         assert_eq!(&vf16, &buf16);
     }
 
@@ -618,14 +618,14 @@ mod test {
         // Exact chunks
         let vf32 = [1., 2., 3., 4., 5., 6., 7., 8.];
         let vf16 = [
-            bf16::from_f32(1.),
-            bf16::from_f32(2.),
-            bf16::from_f32(3.),
-            bf16::from_f32(4.),
-            bf16::from_f32(5.),
-            bf16::from_f32(6.),
-            bf16::from_f32(7.),
-            bf16::from_f32(8.),
+            bf16::from_vec_f32(1.),
+            bf16::from_vec_f32(2.),
+            bf16::from_vec_f32(3.),
+            bf16::from_vec_f32(4.),
+            bf16::from_vec_f32(5.),
+            bf16::from_vec_f32(6.),
+            bf16::from_vec_f32(7.),
+            bf16::from_vec_f32(8.),
         ];
         let mut buf32 = vf32;
         let mut buf16 = vf16;
@@ -633,21 +633,21 @@ mod test {
         vf16.convert_to_f32_slice(&mut buf32);
         assert_eq!(&vf32, &buf32);
 
-        buf16.convert_from_f32_slice(&vf32);
+        buf16.convert_from_vec_f32_slice(&vf32);
         assert_eq!(&vf16, &buf16);
 
         // Partial with chunks
         let vf32 = [1., 2., 3., 4., 5., 6., 7., 8., 9.];
         let vf16 = [
-            bf16::from_f32(1.),
-            bf16::from_f32(2.),
-            bf16::from_f32(3.),
-            bf16::from_f32(4.),
-            bf16::from_f32(5.),
-            bf16::from_f32(6.),
-            bf16::from_f32(7.),
-            bf16::from_f32(8.),
-            bf16::from_f32(9.),
+            bf16::from_vec_f32(1.),
+            bf16::from_vec_f32(2.),
+            bf16::from_vec_f32(3.),
+            bf16::from_vec_f32(4.),
+            bf16::from_vec_f32(5.),
+            bf16::from_vec_f32(6.),
+            bf16::from_vec_f32(7.),
+            bf16::from_vec_f32(8.),
+            bf16::from_vec_f32(9.),
         ];
         let mut buf32 = vf32;
         let mut buf16 = vf16;
@@ -655,19 +655,19 @@ mod test {
         vf16.convert_to_f32_slice(&mut buf32);
         assert_eq!(&vf32, &buf32);
 
-        buf16.convert_from_f32_slice(&vf32);
+        buf16.convert_from_vec_f32_slice(&vf32);
         assert_eq!(&vf16, &buf16);
 
         // Partial with chunks
         let vf32 = [1., 2.];
-        let vf16 = [bf16::from_f32(1.), bf16::from_f32(2.)];
+        let vf16 = [bf16::from_vec_f32(1.), bf16::from_vec_f32(2.)];
         let mut buf32 = vf32;
         let mut buf16 = vf16;
 
         vf16.convert_to_f32_slice(&mut buf32);
         assert_eq!(&vf32, &buf32);
 
-        buf16.convert_from_f32_slice(&vf32);
+        buf16.convert_from_vec_f32_slice(&vf32);
         assert_eq!(&vf16, &buf16);
     }
 
@@ -789,10 +789,10 @@ mod test {
 
     #[test]
     #[should_panic]
-    fn convert_from_f32_slice_len_mismatch_panics() {
+    fn convert_from_vec_f32_slice_len_mismatch_panics() {
         let mut slice1 = [f16::ZERO; 3];
         let slice2 = [0f32; 4];
-        slice1.convert_from_f32_slice(&slice2);
+        slice1.convert_from_vec_f32_slice(&slice2);
     }
 
     #[test]

@@ -3615,7 +3615,7 @@ extern "C" {
     ///
     /// [MDN documentation](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/DataView/setFloat16)
     #[wasm_bindgen(method, js_name = setFloat16)]
-    pub fn set_float16_from_f32(this: &DataView, byte_offset: usize, value: f32);
+    pub fn set_float16_from_vec_f32(this: &DataView, byte_offset: usize, value: f32);
 
     /// The `setFloat16()` method stores a signed 16-bit float value from an
     /// `f32` at the specified byte offset from the start of the DataView.
@@ -3625,7 +3625,7 @@ extern "C" {
     ///
     /// [MDN documentation](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/DataView/setFloat16)
     #[wasm_bindgen(method, js_name = setFloat16)]
-    pub fn set_float16_endian_from_f32(
+    pub fn set_float16_endian_from_vec_f32(
         this: &DataView,
         byte_offset: usize,
         value: f32,
@@ -13749,7 +13749,7 @@ extern "C" {
     /// Sets the value at `idx` from an `f32`, equivalent to JavaScript
     /// `arr[idx] = value`.
     #[wasm_bindgen(method, indexing_setter)]
-    pub fn set_index_from_f32(this: &Float16Array, idx: u32, value: f32);
+    pub fn set_index_from_vec_f32(this: &Float16Array, idx: u32, value: f32);
 }
 
 impl Default for Float16Array {
@@ -13778,7 +13778,7 @@ impl Float16Array {
     /// use half::f16;
     /// use js_sys::Float16Array;
     ///
-    /// let values = [f16::from_f32(1.0), f16::from_f32(-2.0)];
+    /// let values = [f16::from_vec_f32(1.0), f16::from_vec_f32(-2.0)];
     /// let bits = values.map(f16::to_bits);
     /// let array = Float16Array::new_from_u16_slice(&bits);
     /// ```

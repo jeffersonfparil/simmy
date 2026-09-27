@@ -27,16 +27,27 @@ impl GpuTensor {
                 self.shape[i]
             );
         }
+
         let mut new_offset = self.offset;
+        let mut new_shape = Vec::new();
+        let mut new_strides = Vec::new();
+
         for (i, &(start, end)) in ranges.iter().enumerate() {
             // Math: The offset shifts by the start coordinate multiplied by the stride of that dimension.
             // new_offset = old_offset + sum_i (start_i * stride_i)
             new_offset += (start as u32) * self.strides[i];
-            // The new shape of this dimension is the length of the slice range.
-            self.shape[i] = (end - start) as u32;
+
+            let dim_len = (end - start) as u32;
+
+            // Reduce the rank if the length of the sliced dimension is 1
+            if dim_len != 1 {
+                new_shape.push(dim_len);
+                new_strides.push(self.strides[i]);
+            }
         }
-        // Strides remain completely unchanged because the step sizes along each dimension
-        // in memory are preserved [1].
+
+        self.shape = new_shape;
+        self.strides = new_strides;
         self.offset = new_offset;
         Ok(())
     }
@@ -71,7 +82,7 @@ mod tests {
         let ctx = context();
         let data = &[10.0f32, 11.0, 12.0, 13.0, 14.0];
         // Correct shape for 1D tensor with 5 elements
-        let mut tensor = GpuTensor::from_f32(&ctx, data, &[5], None, None)?;
+        let mut tensor = GpuTensor::from_vec_f32(&ctx, data, &[5], None, None)?;
         tensor.slice_mut(&[(1, 4)])?;
         assert_eq!(tensor.shape, &[3]); // 4 - 1 = 3
         assert_eq!(tensor.strides, &[1]); // row-major 1D stride
@@ -86,7 +97,7 @@ mod tests {
         let ctx = context();
         let data: Vec<f32> = (0..12).map(|x| x as f32).collect();
         // Correct shape: 3 rows × 4 columns
-        let mut tensor = GpuTensor::from_f32(&ctx, &data, &[3, 4], None, None)?;
+        let mut tensor = GpuTensor::from_vec_f32(&ctx, &data, &[3, 4], None, None)?;
         // Slice rows [1,3) and cols [1,3)
         tensor.slice_mut(&[(1, 3), (1, 3)])?;
         assert_eq!(tensor.shape, &[2, 2]); // (3-1, 3-1)
@@ -102,13 +113,70 @@ mod tests {
         let ctx = context();
         let data: Vec<f32> = (0..24).map(|x| x as f32).collect();
         // Correct shape: 2 × 3 × 4
-        let mut tensor = GpuTensor::from_f32(&ctx, &data, &[2, 3, 4], None, None)?;
+        let mut tensor = GpuTensor::from_vec_f32(&ctx, &data, &[2, 3, 4], None, None)?;
         // Slice: axis0 [1,2), axis1 [0,2), axis2 [1,4)
-        tensor.slice_mut(&[(1, 2), (0, 2), (1, 4)])?;
-        assert_eq!(tensor.shape, &[1, 2, 3]); // (2-1, 2-0, 4-1)
+        tensor.slice_mut(&[(0, 2), (0, 2), (1, 4)])?;
+        assert_eq!(tensor.shape, &[2, 2, 3]); // (2-0, 2-0, 4-1)
         assert_eq!(tensor.strides, &[12, 4, 1]); // row-major: [3*4, 4, 1]
-        // offset = 1*12 + 0*4 + 1*1 = 13
-        assert_eq!(tensor.offset, 13);
+        // offset = 0*12 + 0*4 + 1*1 = 1
+        assert_eq!(tensor.offset, 1);
+        Ok(())
+    }
+    ///////////////////////
+    // RANK REDUCTION SLICING
+    ///////////////////////
+    #[test]
+    fn test_slice_rank_reduction_to_1d() -> Result<()> {
+        let ctx = context();
+        let data: Vec<f32> = (0..12).map(|x| x as f32).collect();
+        /*
+         * Original Matrix (3x4):
+         *  0,  1,  2,  3
+         *  4,  5,  6,  7
+         *  8,  9, 10, 11
+         */
+        let mut tensor = GpuTensor::from_vec_f32(&ctx, &data, &[3, 4], None, None)?;
+        // Slice exactly row 1: axis0 [1, 2), axis1 [0, 4)
+        tensor.slice_mut(&[(1, 2), (0, 4)])?;
+        // Rank should be reduced from 2 to 1 because axis0 length is 1.
+        assert_eq!(tensor.shape, &[4]);
+        assert_eq!(tensor.strides, &[1]);
+        assert_eq!(tensor.offset, 4); // 1 * 4 + 0 * 1 = 4
+        // Verify extracted data matches row 1 exactly
+        let extracted = tensor.to_vec_f32(&ctx)?;
+        assert_eq!(extracted, vec![4.0, 5.0, 6.0, 7.0]);
+        Ok(())
+    }
+    #[test]
+    fn test_slice_rank_reduction_column_to_1d() -> Result<()> {
+        let ctx = context();
+        let data: Vec<f32> = (0..12).map(|x| x as f32).collect();
+        let mut tensor = GpuTensor::from_vec_f32(&ctx, &data, &[3, 4], None, None)?;
+        // Slice exactly column 2: axis0 [0, 3), axis1 [2, 3)
+        tensor.slice_mut(&[(0, 3), (2, 3)])?;
+        // Rank should be reduced from 2 to 1 because axis1 length is 1.
+        assert_eq!(tensor.shape, &[3]);
+        assert_eq!(tensor.strides, &[4]); // Stride corresponds to the remaining axis0
+        assert_eq!(tensor.offset, 2); // 0 * 4 + 2 * 1 = 2
+        let extracted = tensor.to_vec_f32(&ctx)?;
+        assert_eq!(extracted, vec![2.0, 6.0, 10.0]);
+        Ok(())
+    }
+    #[test]
+    fn test_slice_rank_reduction_to_scalar() -> Result<()> {
+        let ctx = context();
+        let data: Vec<f32> = (0..24).map(|x| x as f32).collect();
+        // 2x3x4 tensor
+        let mut tensor = GpuTensor::from_vec_f32(&ctx, &data, &[2, 3, 4], None, None)?;
+        // Slice exactly 1 element at coordinate (1, 2, 3)
+        tensor.slice_mut(&[(1, 2), (2, 3), (3, 4)])?;
+        // Rank should be reduced from 3 down to 0 because all dimensions have length 1.
+        assert_eq!(tensor.shape, &[] as &[u32]); // Empty shape indicates a 0-rank scalar
+        assert_eq!(tensor.strides, &[] as &[u32]);
+        assert_eq!(tensor.offset, 23); // 1*12 + 2*4 + 3*1 = 23
+        // Verify extracted data is just the scalar
+        let extracted = tensor.to_vec_f32(&ctx)?;
+        assert_eq!(extracted, vec![23.0]);
         Ok(())
     }
     ///////////////////////
@@ -118,7 +186,7 @@ mod tests {
     fn test_slice_view_shares_buffer() -> Result<()> {
         let ctx = context();
         let data: Vec<f32> = (0..12).map(|x| x as f32).collect();
-        let parent = GpuTensor::from_f32(&ctx, &data, &[3, 4], None, None)?;
+        let parent = GpuTensor::from_vec_f32(&ctx, &data, &[3, 4], None, None)?;
         let view = parent.slice_view(&[(1, 3), (1, 3)])?;
         // Parent unchanged
         assert_eq!(parent.shape, &[3, 4]);
@@ -137,7 +205,7 @@ mod tests {
     fn test_slice_validation_checks() {
         let ctx = context();
         let data = &[0.0f32; 12];
-        let mut tensor = GpuTensor::from_f32(&ctx, data, &[3, 4], None, None).unwrap();
+        let mut tensor = GpuTensor::from_vec_f32(&ctx, data, &[3, 4], None, None).unwrap();
         // Rank mismatch
         assert!(tensor.slice_mut(&[(0, 2)]).is_err());
         // start > end
@@ -162,7 +230,7 @@ mod tests {
          *  8,  9, 10, 11
          * 12, 13, 14, 15
          */
-        let tensor = GpuTensor::from_f32(&ctx, &data, &[4, 4], None, None)?;
+        let tensor = GpuTensor::from_vec_f32(&ctx, &data, &[4, 4], None, None)?;
         // Slice inner 2x2 matrix (rows 1-3, cols 1-3)
         // Expected view elements: 5, 6, 9, 10
         let view = tensor.slice_view(&[(1, 3), (1, 3)])?;
@@ -182,7 +250,7 @@ mod tests {
          *  4,  5,  6,  7
          *  8,  9, 10, 11
          */
-        let tensor = GpuTensor::from_f32(&ctx, &data, &[3, 4], None, None)?;
+        let tensor = GpuTensor::from_vec_f32(&ctx, &data, &[3, 4], None, None)?;
         // Slice to get ONLY the 3rd column (index 2) across all rows
         let view = tensor.slice_view(&[(0, 3), (2, 3)])?;
         let extracted = view.to_vec_f32(&ctx)?;
@@ -194,7 +262,7 @@ mod tests {
     fn test_slice_view_to_vec_f32_empty() -> Result<()> {
         let ctx = context();
         let data: Vec<f32> = (0..16).map(|x| x as f32).collect();
-        let tensor = GpuTensor::from_f32(&ctx, &data, &[4, 4], None, None)?;
+        let tensor = GpuTensor::from_vec_f32(&ctx, &data, &[4, 4], None, None)?;
         // Slice a region with zero rows (1 to 1)
         let view = tensor.slice_view(&[(1, 1), (0, 4)])?;
         let extracted = view.to_vec_f32(&ctx)?;

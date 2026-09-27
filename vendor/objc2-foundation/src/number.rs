@@ -234,7 +234,7 @@ impl PartialEq for NSNumber {
 // This is valid since the following pass (i.e. Objective-C says that two NaNs
 // are equal):
 // ```
-// let nan = NSNumber::from_f32(f32::NAN);
+// let nan = NSNumber::from_vec_f32(f32::NAN);
 // assert_eq!(nan, nan);
 // ```
 impl Eq for NSNumber {}

@@ -1526,7 +1526,7 @@ impl<'a> ConstantEvaluator<'a> {
             }
             crate::MathFunction::Saturate => component_wise_float(self, span, [arg], |e| match e {
                 Float::F16([e]) => Ok(Float::F16(
-                    [e.clamp(f16::from_f32(0.0), f16::from_f32(1.0))],
+                    [e.clamp(f16::from_vec_f32(0.0), f16::from_vec_f32(1.0))],
                 )),
                 Float::F32([e]) => Ok(Float::F32([e.clamp(0., 1.)])),
                 Float::Abstract([e]) => Ok(Float::Abstract([e.clamp(0., 1.)])),
@@ -1778,7 +1778,7 @@ impl<'a> ConstantEvaluator<'a> {
                 component_wise_float(self, span, [arg], |e| match e {
                     Float::Abstract([e]) => Ok(Float::Abstract([1. / e.sqrt()])),
                     Float::F32([e]) => Ok(Float::F32([1. / e.sqrt()])),
-                    Float::F16([e]) => Ok(Float::F16([f16::from_f32(1. / f32::from(e).sqrt())])),
+                    Float::F16([e]) => Ok(Float::F16([f16::from_vec_f32(1. / f32::from(e).sqrt())])),
                 })
             }
 
@@ -2487,11 +2487,11 @@ impl<'a> ConstantEvaluator<'a> {
                     }),
                     Sc::F16 => Literal::F16(match literal {
                         Literal::F16(v) => v,
-                        Literal::F32(v) => f16::from_f32(v),
+                        Literal::F32(v) => f16::from_vec_f32(v),
                         Literal::F64(v) => f16::from_f64(v),
                         Literal::Bool(v) => f16::from_u32(v as u32).unwrap(),
-                        Literal::I16(v) => f16::from_f32(v as f32),
-                        Literal::U16(v) => f16::from_f32(v as f32),
+                        Literal::I16(v) => f16::from_vec_f32(v as f32),
+                        Literal::U16(v) => f16::from_vec_f32(v as f32),
                         Literal::I64(v) => f16::from_i64(v).unwrap(),
                         Literal::U64(v) => f16::from_u64(v).unwrap(),
                         Literal::I32(v) => f16::from_i32(v).unwrap(),

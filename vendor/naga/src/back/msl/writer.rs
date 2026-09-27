@@ -1941,7 +1941,7 @@ impl<W: Write> Writer<W> {
                 } else if value.is_nan() {
                     write!(self.out, "NAN")?;
                 } else {
-                    let suffix = if value.fract() == f16::from_f32(0.0) {
+                    let suffix = if value.fract() == f16::from_vec_f32(0.0) {
                         ".0h"
                     } else {
                         "h"

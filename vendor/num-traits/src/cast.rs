@@ -472,7 +472,7 @@ pub trait FromPrimitive: Sized {
     /// Converts a `f32` to return an optional value of this type. If the
     /// value cannot be represented by this type, then `None` is returned.
     #[inline]
-    fn from_f32(n: f32) -> Option<Self> {
+    fn from_vec_f32(n: f32) -> Option<Self> {
         FromPrimitive::from_f64(From::from(n))
     }
 
@@ -546,7 +546,7 @@ macro_rules! impl_from_primitive {
             }
 
             #[inline]
-            fn from_f32(n: f32) -> Option<$T> {
+            fn from_vec_f32(n: f32) -> Option<$T> {
                 n.$to_ty()
             }
             #[inline]
@@ -629,7 +629,7 @@ impl<T: FromPrimitive> FromPrimitive for Wrapping<T> {
         fn from_u64(u64);
         fn from_u128(u128);
 
-        fn from_f32(f32);
+        fn from_vec_f32(f32);
         fn from_f64(f64);
     }
 }

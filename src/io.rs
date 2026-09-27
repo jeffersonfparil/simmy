@@ -1,9 +1,11 @@
 use crate::linalg::context::GpuContext;
+use crate::linalg::kernel::GpuKernel;
 use crate::linalg::tensor::GpuTensor;
 use anyhow::{Result, bail, ensure};
 use bytemuck::{Pod, Zeroable};
 use rand::RngExt;
 use rand::prelude::IndexedRandom;
+use rand::seq::index;
 use rand_chacha::{ChaCha8Rng, rand_core::SeedableRng};
 use rand_distr::{Beta, Distribution, Exp, Normal};
 use std::borrow::Cow;
@@ -106,7 +108,7 @@ impl fmt::Display for Data {
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
-struct MeiosisParams {
+struct WGSLMeiosisParams {
     /// The total number of allele columns across all loci in the genotype tensor.
     n_loci_alleles: u32,
     /// The total number of loci being simulated.
@@ -120,7 +122,7 @@ struct MeiosisParams {
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
-struct MatingPairData {
+struct WGSLMatingPairData {
     /// The row index of the first parent in the parental genotype tensor.
     p1_idx: u32,
     /// The row index of the second parent in the parental genotype tensor.
@@ -135,7 +137,7 @@ struct MatingPairData {
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
-struct LocusData {
+struct WGSLLocusData {
     /// The inclusive starting column index for this locus in the genotype tensor.
     start_col: u32,
     /// The exclusive ending column index for this locus in the genotype tensor.
@@ -341,7 +343,7 @@ impl Data {
                 }
             }
         }
-        let genotype_data = GpuTensor::from_f32(
+        let genotype_data = GpuTensor::from_vec_f32(
             ctx,
             &genotype_data_tmp,
             &[n_entries as u32, n_loci_alleles as u32, 2],
@@ -359,7 +361,7 @@ impl Data {
                 phenotype_data_tmp[(i * n_traits) + j] = normal.sample(&mut rng);
             }
         }
-        let phenotype_data = GpuTensor::from_f32(
+        let phenotype_data = GpuTensor::from_vec_f32(
             ctx,
             &phenotype_data_tmp,
             &[n_entries as u32, n_traits as u32],
@@ -525,7 +527,7 @@ impl Data {
             if j == 0 || chr_id != self.loci[j - 1].chromosome_id {
                 metadata |= 2;
             }
-            locus_data_packed.push(LocusData {
+            locus_data_packed.push(WGSLLocusData {
                 start_col,
                 end_col,
                 r,
@@ -545,7 +547,7 @@ impl Data {
                 Sex::Homogametic => 1,
                 Sex::Heterogametic => 2,
             };
-            pairs_data_packed.push(MatingPairData {
+            pairs_data_packed.push(WGSLMatingPairData {
                 p1_idx: p1 as u32,
                 p2_idx: p2 as u32,
                 sex_p1,
@@ -564,7 +566,7 @@ impl Data {
             contents: bytemuck::cast_slice(&locus_data_packed),
             usage: wgpu::BufferUsages::STORAGE,
         });
-        let params = MeiosisParams {
+        let params = WGSLMeiosisParams {
             n_loci_alleles: n_loci_alleles as u32,
             n_loci: n_loci as u32,
             seed: seed as u32,
@@ -664,8 +666,88 @@ impl Data {
         )?;
         Ok(offsprings)
     }
-    // TODO: simulate loci-allele effects on phenotypes...
-    // TODO: simulate and update phenotype_data on Data...
+    pub fn sim_phenotypes(
+        &mut self,
+        ctx: &GpuContext,
+        p_mu_sd_ersd: &[(usize, f32, f32, f32)],
+        seed: u64,
+    ) -> Result<GpuTensor> {
+        self.check_dimensions()?;
+        let n_entries: usize = self.entries.len();
+        let n_loci: usize = self.loci.len();
+        let n_loci_alleles: usize = self.loci.iter().map(|l| l.col_idx.len()).sum();
+        let n_traits: usize = self.traits.len();
+        ensure!(
+            p_mu_sd_ersd.len() == n_traits,
+            "The number of trait parameters does not match the number of traits!"
+        );
+        for par in p_mu_sd_ersd {
+            ensure!(
+                par.0 <= n_loci,
+                "The number of loci with effects is greater than the number of loci!"
+            );
+            ensure!(
+                par.2 > 0.0,
+                "The 3rd trait parameter is the standard deviation of the trait effect which should be positive!"
+            );
+            ensure!(
+                par.3 > 0.0,
+                "The 4th trait parameter is the standard deviation of the trait error which should be positive!"
+            );
+        }
+        let mut rng = ChaCha8Rng::seed_from_u64(seed);
+        // Simulate allele effects across traits
+        let mut effects_tmp: Vec<f32> = vec![0.0; n_loci_alleles * n_traits];
+        for (j, &par) in p_mu_sd_ersd.iter().enumerate() {
+            let (n_loci_with_effects, mean, sd, _ersd) = par;
+            let normal = Normal::new(mean, sd).expect("Error initialising a normal distribution!");
+            let idx_loci_with_effects: Vec<usize> =
+                index::sample(&mut rng, n_loci, n_loci_with_effects).into_vec();
+            for idx_locus in idx_loci_with_effects {
+                for &idx_locus_allele in &self.loci[idx_locus].col_idx {
+                    let idx = (idx_locus_allele * n_traits) + j;
+                    effects_tmp[idx] = normal.sample(&mut rng);
+                }
+            }
+        }
+        let effects: GpuTensor = GpuTensor::from_vec_f32(
+            ctx,
+            &effects_tmp,
+            &[n_loci_alleles as u32, n_traits as u32],
+            None,
+            None,
+        )?;
+        // Simulate error effects
+        let mut errors_tmp: Vec<f32> = vec![0.0; n_entries * n_traits];
+        for (j, &par) in p_mu_sd_ersd.iter().enumerate() {
+            let (_n_loci_with_effects, _mean, _sd, ersd) = par;
+            let normal =
+                Normal::new(0.0, ersd).expect("Error initialising a standard normal distribution!");
+            for i in 0..n_entries {
+                let idx = (i * n_traits) + j;
+                errors_tmp[idx] = normal.sample(&mut rng);
+            }
+        }
+        let errors: GpuTensor = GpuTensor::from_vec_f32(
+            ctx,
+            &errors_tmp,
+            &[n_entries as u32, n_traits as u32],
+            None,
+            None,
+        )?;
+        // Update the phenotype data
+        // TODO:rectify contraction, i.e. like matrix multiplication for these 3D tensors...
+        let kernel = GpuKernel::new(ctx);
+        self.phenotype_data = kernel.contract(
+            &self
+                .genotype_data
+                .slice_view(&[(0, n_entries), (0, n_loci_alleles), (0, 1)])?,
+            &effects,
+        )?;
+        self.phenotype_data = kernel.add(&self.phenotype_data, &errors)?;
+        // Output in addition to the mutated phenotype data tensor
+        Ok(effects)
+    }
 }
 
 #[cfg(test)]
@@ -1242,5 +1324,112 @@ mod tests {
             found_multiallelic_offspring_locus,
             "Failed to find any multi-allelic loci in the offspring! The simulation should generate and conserve multi-allelic states."
         );
+    }
+    #[test]
+    fn sim_phenotypes_rejects_invalid_parameters() {
+        let ctx = context();
+        // 20 loci, 2 traits
+        let mut data = Data::new(&ctx, 10, 2, 20, 2, 2, false, 42).unwrap();
+        // Mismatched trait count (expected 2, passed 1)
+        let res_len = data.sim_phenotypes(&ctx, &[(5, 0.0, 1.0, 1.0)], 123);
+        assert!(res_len.is_err());
+        assert_eq!(
+            res_len.unwrap_err().to_string(),
+            "The number of trait parameters does not match the number of traits!"
+        );
+        // Out of bounds loci count (21 > 20)
+        let res_loci = data.sim_phenotypes(&ctx, &[(21, 0.0, 1.0, 1.0), (5, 0.0, 1.0, 1.0)], 123);
+        assert!(res_loci.is_err());
+        assert_eq!(
+            res_loci.unwrap_err().to_string(),
+            "The number of loci with effects is greater than the number of loci!"
+        );
+        // Negative genetic standard deviation
+        let res_sd = data.sim_phenotypes(&ctx, &[(5, 0.0, -1.0, 1.0), (5, 0.0, 1.0, 1.0)], 123);
+        assert!(res_sd.is_err());
+        assert_eq!(
+            res_sd.unwrap_err().to_string(),
+            "The 3rd trait parameter is the standard deviation of the trait effect which should be positive!"
+        );
+        // Negative environmental standard deviation (New Check)
+        let res_ersd = data.sim_phenotypes(&ctx, &[(5, 0.0, 1.0, -1.0), (5, 0.0, 1.0, 1.0)], 123);
+        assert!(res_ersd.is_err());
+        assert_eq!(
+            res_ersd.unwrap_err().to_string(),
+            "The 4th trait parameter is the standard deviation of the trait error which should be positive!"
+        );
+    }
+    #[test]
+    fn sim_phenotypes_applies_sparse_effects_correctly() {
+        let ctx = context();
+        let n_traits = 2;
+        let mut data = Data::new(&ctx, 10, 2, 20, n_traits, 2, false, 42).unwrap();
+        let n_loci_alleles: usize = data.loci.iter().map(|l| l.col_idx.len()).sum();
+        // Trait 0 gets 5 loci, Trait 1 gets 3 loci
+        let params = [(5, 0.0, 1.0, 1.0), (3, 0.0, 1.0, 1.0)];
+        let effects_tensor = data.sim_phenotypes(&ctx, &params, 123).unwrap();
+        // 1. Verify tensor dimensions
+        assert_eq!(effects_tensor.shape[0] as usize, n_loci_alleles);
+        assert_eq!(effects_tensor.shape[1] as usize, n_traits);
+        let effects = effects_tensor.to_vec_f32(&ctx).unwrap();
+        // 2. Verify sparse effect distribution per trait
+        for t in 0..n_traits {
+            let mut affected_loci_count = 0;
+            for locus in &data.loci {
+                let first_allele_idx = locus.col_idx[0];
+                let has_effect = effects[(first_allele_idx * n_traits) + t] != 0.0;
+                if has_effect {
+                    affected_loci_count += 1;
+                    // If locus is selected, all its alleles must have non-zero effects for this trait
+                    for &col in &locus.col_idx {
+                        assert_ne!(
+                            effects[(col * n_traits) + t],
+                            0.0,
+                            "Selected locus allele lacked an effect for trait {}",
+                            t
+                        );
+                    }
+                } else {
+                    // If not selected, all its alleles must be strictly 0.0 for this trait
+                    for &col in &locus.col_idx {
+                        assert_eq!(
+                            effects[(col * n_traits) + t],
+                            0.0,
+                            "Unselected locus allele had non-zero effect for trait {}",
+                            t
+                        );
+                    }
+                }
+            }
+            // Verify exact number of loci were modified for this specific trait
+            assert_eq!(affected_loci_count, params[t].0);
+        }
+    }
+    #[test]
+    fn sim_phenotypes_is_deterministic_and_updates_data() {
+        let ctx = context();
+        let mut data1 = Data::new(&ctx, 10, 2, 20, 2, 2, false, 42).unwrap();
+        let mut data2 = Data::new(&ctx, 10, 2, 20, 2, 2, false, 42).unwrap();
+        let params = [(5, 0.0, 1.0, 1.0), (5, 0.0, 1.0, 1.0)];
+        // Run simulation with the same seed
+        let effects1_tensor = data1.sim_phenotypes(&ctx, &params, 123).unwrap();
+        let effects2_tensor = data2.sim_phenotypes(&ctx, &params, 123).unwrap();
+        let effects1 = effects1_tensor.to_vec_f32(&ctx).unwrap();
+        let effects2 = effects2_tensor.to_vec_f32(&ctx).unwrap();
+        // 1. Check Effects Determinism
+        assert_eq!(
+            effects1, effects2,
+            "Sampling with the same seed must produce identical effect vectors."
+        );
+        // 2. Check Resulting Phenotypes Determinism
+        let pheno1 = data1.phenotype_data.to_vec_f32(&ctx).unwrap();
+        let pheno2 = data2.phenotype_data.to_vec_f32(&ctx).unwrap();
+        assert_eq!(
+            pheno1, pheno2,
+            "Phenotype tensor computation must be perfectly deterministic."
+        );
+        // 3. Verify Phenotype Tensor Shape
+        assert_eq!(data1.phenotype_data.shape[0] as usize, data1.entries.len());
+        assert_eq!(data1.phenotype_data.shape[1] as usize, data1.traits.len());
     }
 }

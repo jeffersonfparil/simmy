@@ -143,11 +143,11 @@ fn not_nan32_from_primitive() {
     assert_eq!(NotNan::<f32>::from_u64(42u64), Some(not_nan(42.0)));
     assert_eq!(NotNan::<f32>::from_isize(42isize), Some(not_nan(42.0)));
     assert_eq!(NotNan::<f32>::from_usize(42usize), Some(not_nan(42.0)));
-    assert_eq!(NotNan::<f32>::from_f32(42f32), Some(not_nan(42.0)));
-    assert_eq!(NotNan::<f32>::from_f32(42f32), Some(not_nan(42.0)));
+    assert_eq!(NotNan::<f32>::from_vec_f32(42f32), Some(not_nan(42.0)));
+    assert_eq!(NotNan::<f32>::from_vec_f32(42f32), Some(not_nan(42.0)));
     assert_eq!(NotNan::<f32>::from_f64(42f64), Some(not_nan(42.0)));
     assert_eq!(NotNan::<f32>::from_f64(42f64), Some(not_nan(42.0)));
-    assert_eq!(NotNan::<f32>::from_f32(FloatCore::nan()), None);
+    assert_eq!(NotNan::<f32>::from_vec_f32(FloatCore::nan()), None);
     assert_eq!(NotNan::<f32>::from_f64(FloatCore::nan()), None);
 }
 

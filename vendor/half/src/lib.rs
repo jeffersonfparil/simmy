@@ -18,7 +18,7 @@
 //! Note that conversion from [`f32`]/[`f64`] to both [`struct@f16`] and [`struct@bf16`] are lossy operations, and
 //! just as converting a [`f64`] to [`f32`] is lossy and does not have `Into`/`From` trait
 //! implementations, so too do these smaller types not have those trait implementations either.
-//! Instead, use `from_f32`/`from_f64` functions for the types in this crate. If you don't care
+//! Instead, use `from_vec_f32`/`from_f64` functions for the types in this crate. If you don't care
 //! about lossy conversions and need trait conversions, use the appropriate [`num-traits`]
 //! traits that are implemented.
 //!

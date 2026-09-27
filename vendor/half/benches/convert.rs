@@ -19,8 +19,8 @@ fn bench_f32_to_f16(c: &mut Criterion) {
         f32::consts::E,
         f32::consts::PI,
     ] {
-        group.bench_with_input(BenchmarkId::new("f16::from_f32", val), val, |b, i| {
-            b.iter(|| f16::from_f32(*i))
+        group.bench_with_input(BenchmarkId::new("f16::from_vec_f32", val), val, |b, i| {
+            b.iter(|| f16::from_vec_f32(*i))
         });
     }
 }
@@ -112,9 +112,9 @@ fn bench_slice_f32_to_f16(c: &mut Criterion) {
         f32::consts::PI,
     ];
     c.bench_function(
-        "HalfFloatSliceExt::convert_from_f32_slice/constants",
+        "HalfFloatSliceExt::convert_from_vec_f32_slice/constants",
         |b: &mut Bencher<'_>| {
-            b.iter(|| black_box(&mut constant_buffer).convert_from_f32_slice(black_box(&constants)))
+            b.iter(|| black_box(&mut constant_buffer).convert_from_vec_f32_slice(black_box(&constants)))
         },
     );
 
@@ -125,9 +125,9 @@ fn bench_slice_f32_to_f16(c: &mut Criterion) {
         .collect();
     let mut large_buffer = [f16::ZERO; SIMD_LARGE_BENCH_SLICE_LEN];
     c.bench_function(
-        "HalfFloatSliceExt::convert_from_f32_slice/large",
+        "HalfFloatSliceExt::convert_from_vec_f32_slice/large",
         |b: &mut Bencher<'_>| {
-            b.iter(|| black_box(&mut large_buffer).convert_from_f32_slice(black_box(&large)))
+            b.iter(|| black_box(&mut large_buffer).convert_from_vec_f32_slice(black_box(&large)))
         },
     );
 }
@@ -192,7 +192,7 @@ fn bench_slice_f16_to_f32(c: &mut Criterion) {
 
     let large: Vec<_> = iter::repeat(0)
         .enumerate()
-        .map(|(i, _)| f16::from_f32(i as f32))
+        .map(|(i, _)| f16::from_vec_f32(i as f32))
         .take(SIMD_LARGE_BENCH_SLICE_LEN)
         .collect();
     let mut large_buffer = [0f32; SIMD_LARGE_BENCH_SLICE_LEN];
@@ -263,8 +263,8 @@ fn bench_f32_to_bf16(c: &mut Criterion) {
         f32::consts::E,
         f32::consts::PI,
     ] {
-        group.bench_with_input(BenchmarkId::new("bf16::from_f32", val), val, |b, i| {
-            b.iter(|| bf16::from_f32(*i))
+        group.bench_with_input(BenchmarkId::new("bf16::from_vec_f32", val), val, |b, i| {
+            b.iter(|| bf16::from_vec_f32(*i))
         });
     }
 }

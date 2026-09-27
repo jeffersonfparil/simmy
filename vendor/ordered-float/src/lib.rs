@@ -880,8 +880,8 @@ impl<T: FromPrimitive> FromPrimitive for OrderedFloat<T> {
     fn from_u32(n: u32) -> Option<Self> {
         T::from_u32(n).map(OrderedFloat)
     }
-    fn from_f32(n: f32) -> Option<Self> {
-        T::from_f32(n).map(OrderedFloat)
+    fn from_vec_f32(n: f32) -> Option<Self> {
+        T::from_vec_f32(n).map(OrderedFloat)
     }
     fn from_f64(n: f64) -> Option<Self> {
         T::from_f64(n).map(OrderedFloat)
@@ -1840,8 +1840,8 @@ impl<T: FloatCore + FromPrimitive> FromPrimitive for NotNan<T> {
     fn from_u32(n: u32) -> Option<Self> {
         T::from_u32(n).and_then(|n| NotNan::new(n).ok())
     }
-    fn from_f32(n: f32) -> Option<Self> {
-        T::from_f32(n).and_then(|n| NotNan::new(n).ok())
+    fn from_vec_f32(n: f32) -> Option<Self> {
+        T::from_vec_f32(n).and_then(|n| NotNan::new(n).ok())
     }
     fn from_f64(n: f64) -> Option<Self> {
         T::from_f64(n).and_then(|n| NotNan::new(n).ok())

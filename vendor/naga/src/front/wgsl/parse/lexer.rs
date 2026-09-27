@@ -777,7 +777,7 @@ fn test_numbers() {
             Token::Number(Ok(Number::AbstractFloat(0.01))),
             Token::Number(Ok(Number::AbstractFloat(12.34))),
             Token::Number(Ok(Number::F32(0.))),
-            Token::Number(Ok(Number::F16(f16::from_f32(0.)))),
+            Token::Number(Ok(Number::F16(f16::from_vec_f32(0.)))),
             Token::Number(Ok(Number::AbstractFloat(0.001))),
             Token::Number(Ok(Number::AbstractFloat(43.75))),
             Token::Number(Ok(Number::F32(16.))),

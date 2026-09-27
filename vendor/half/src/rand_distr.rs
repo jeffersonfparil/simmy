@@ -7,7 +7,7 @@ macro_rules! impl_distribution_via_f32 {
     ($Ty:ty, $Distr:ty) => {
         impl Distribution<$Ty> for $Distr {
             fn sample<R: Rng + ?Sized>(&self, rng: &mut R) -> $Ty {
-                <$Ty>::from_f32(<Self as Distribution<f32>>::sample(self, rng))
+                <$Ty>::from_vec_f32(<Self as Distribution<f32>>::sample(self, rng))
             }
         }
     };
@@ -75,7 +75,7 @@ impl rand_distr::uniform::UniformSampler for Float16Sampler {
         )?))
     }
     fn sample<R: Rng + ?Sized>(&self, rng: &mut R) -> Self::X {
-        f16::from_f32(self.0.sample(rng))
+        f16::from_vec_f32(self.0.sample(rng))
     }
 }
 
@@ -109,7 +109,7 @@ impl rand_distr::uniform::UniformSampler for BFloat16Sampler {
         )?))
     }
     fn sample<R: Rng + ?Sized>(&self, rng: &mut R) -> Self::X {
-        bf16::from_f32(self.0.sample(rng))
+        bf16::from_vec_f32(self.0.sample(rng))
     }
 }
 
@@ -126,10 +126,10 @@ mod tests {
         let mut rng = rng();
         let _: f16 = rng.sample(StandardUniform);
         let _: f16 = rng.sample(StandardNormal);
-        let _: f16 = rng.sample(Uniform::new(f16::from_f32(0.0), f16::from_f32(1.0)).unwrap());
+        let _: f16 = rng.sample(Uniform::new(f16::from_vec_f32(0.0), f16::from_vec_f32(1.0)).unwrap());
         #[cfg(feature = "num-traits")]
         let _: f16 =
-            rng.sample(rand_distr::Normal::new(f16::from_f32(0.0), f16::from_f32(1.0)).unwrap());
+            rng.sample(rand_distr::Normal::new(f16::from_vec_f32(0.0), f16::from_vec_f32(1.0)).unwrap());
     }
 
     #[test]
@@ -137,9 +137,9 @@ mod tests {
         let mut rng = rng();
         let _: bf16 = rng.sample(StandardUniform);
         let _: bf16 = rng.sample(StandardNormal);
-        let _: bf16 = rng.sample(Uniform::new(bf16::from_f32(0.0), bf16::from_f32(1.0)).unwrap());
+        let _: bf16 = rng.sample(Uniform::new(bf16::from_vec_f32(0.0), bf16::from_vec_f32(1.0)).unwrap());
         #[cfg(feature = "num-traits")]
         let _: bf16 =
-            rng.sample(rand_distr::Normal::new(bf16::from_f32(0.0), bf16::from_f32(1.0)).unwrap());
+            rng.sample(rand_distr::Normal::new(bf16::from_vec_f32(0.0), bf16::from_vec_f32(1.0)).unwrap());
     }
 }

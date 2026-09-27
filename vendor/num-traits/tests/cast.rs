@@ -338,7 +338,7 @@ fn newtype_from_primitive() {
     fn check<T: PartialEq + Debug + FromPrimitive>() {
         assert_eq_from!(from_i8 from_i16 from_i32 from_i64 from_isize);
         assert_eq_from!(from_u8 from_u16 from_u32 from_u64 from_usize);
-        assert_eq_from!(from_f32 from_f64);
+        assert_eq_from!(from_vec_f32 from_f64);
     }
 
     macro_rules! check {

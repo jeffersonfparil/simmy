@@ -60,14 +60,14 @@ impl bf16 {
     /// other values are truncated and rounded to the nearest representable value.
     #[inline]
     #[must_use]
-    pub fn from_f32(value: f32) -> bf16 {
-        Self::from_f32_const(value)
+    pub fn from_vec_f32(value: f32) -> bf16 {
+        Self::from_vec_f32_const(value)
     }
 
     /// Constructs a [`struct@bf16`] value from a 32-bit floating point value.
     ///
-    /// This function is identical to [`from_f32`][Self::from_f32] except it never uses hardware
-    /// intrinsics, which allows it to be `const`. [`from_f32`][Self::from_f32] should be preferred
+    /// This function is identical to [`from_vec_f32`][Self::from_vec_f32] except it never uses hardware
+    /// intrinsics, which allows it to be `const`. [`from_vec_f32`][Self::from_vec_f32] should be preferred
     /// in any non-`const` context.
     ///
     /// This operation is lossy. If the 32-bit value is too large to fit, ±∞ will result. NaN values
@@ -75,7 +75,7 @@ impl bf16 {
     /// other values are truncated and rounded to the nearest representable value.
     #[inline]
     #[must_use]
-    pub const fn from_f32_const(value: f32) -> bf16 {
+    pub const fn from_vec_f32_const(value: f32) -> bf16 {
         bf16(convert::f32_to_bf16(value))
     }
 
@@ -121,7 +121,7 @@ impl bf16 {
     ///
     /// ```rust
     /// # use half::prelude::*;
-    /// let bytes = bf16::from_f32(12.5).to_le_bytes();
+    /// let bytes = bf16::from_vec_f32(12.5).to_le_bytes();
     /// assert_eq!(bytes, [0x48, 0x41]);
     /// ```
     #[inline]
@@ -137,7 +137,7 @@ impl bf16 {
     ///
     /// ```rust
     /// # use half::prelude::*;
-    /// let bytes = bf16::from_f32(12.5).to_be_bytes();
+    /// let bytes = bf16::from_vec_f32(12.5).to_be_bytes();
     /// assert_eq!(bytes, [0x41, 0x48]);
     /// ```
     #[inline]
@@ -157,7 +157,7 @@ impl bf16 {
     ///
     /// ```rust
     /// # use half::prelude::*;
-    /// let bytes = bf16::from_f32(12.5).to_ne_bytes();
+    /// let bytes = bf16::from_vec_f32(12.5).to_ne_bytes();
     /// assert_eq!(bytes, if cfg!(target_endian = "big") {
     ///     [0x41, 0x48]
     /// } else {
@@ -177,7 +177,7 @@ impl bf16 {
     /// ```rust
     /// # use half::prelude::*;
     /// let value = bf16::from_le_bytes([0x48, 0x41]);
-    /// assert_eq!(value, bf16::from_f32(12.5));
+    /// assert_eq!(value, bf16::from_vec_f32(12.5));
     /// ```
     #[inline]
     #[must_use]
@@ -192,7 +192,7 @@ impl bf16 {
     /// ```rust
     /// # use half::prelude::*;
     /// let value = bf16::from_be_bytes([0x41, 0x48]);
-    /// assert_eq!(value, bf16::from_f32(12.5));
+    /// assert_eq!(value, bf16::from_vec_f32(12.5));
     /// ```
     #[inline]
     #[must_use]
@@ -215,7 +215,7 @@ impl bf16 {
     /// } else {
     ///     [0x48, 0x41]
     /// });
-    /// assert_eq!(value, bf16::from_f32(12.5));
+    /// assert_eq!(value, bf16::from_vec_f32(12.5));
     /// ```
     #[inline]
     #[must_use]
@@ -275,7 +275,7 @@ impl bf16 {
     /// # use half::prelude::*;
     ///
     /// let nan = bf16::NAN;
-    /// let f = bf16::from_f32(7.0_f32);
+    /// let f = bf16::from_vec_f32(7.0_f32);
     ///
     /// assert!(nan.is_nan());
     /// assert!(!f.is_nan());
@@ -293,7 +293,7 @@ impl bf16 {
     /// ```rust
     /// # use half::prelude::*;
     ///
-    /// let f = bf16::from_f32(7.0f32);
+    /// let f = bf16::from_vec_f32(7.0f32);
     /// let inf = bf16::INFINITY;
     /// let neg_inf = bf16::NEG_INFINITY;
     /// let nan = bf16::NAN;
@@ -317,7 +317,7 @@ impl bf16 {
     /// ```rust
     /// # use half::prelude::*;
     ///
-    /// let f = bf16::from_f32(7.0f32);
+    /// let f = bf16::from_vec_f32(7.0f32);
     /// let inf = bf16::INFINITY;
     /// let neg_inf = bf16::NEG_INFINITY;
     /// let nan = bf16::NAN;
@@ -343,8 +343,8 @@ impl bf16 {
     ///
     /// let min = bf16::MIN_POSITIVE;
     /// let max = bf16::MAX;
-    /// let lower_than_min = bf16::from_f32(1.0e-39_f32);
-    /// let zero = bf16::from_f32(0.0_f32);
+    /// let lower_than_min = bf16::from_vec_f32(1.0e-39_f32);
+    /// let zero = bf16::from_vec_f32(0.0_f32);
     ///
     /// assert!(min.is_normal());
     /// assert!(max.is_normal());
@@ -373,7 +373,7 @@ impl bf16 {
     /// use std::num::FpCategory;
     /// # use half::prelude::*;
     ///
-    /// let num = bf16::from_f32(12.4_f32);
+    /// let num = bf16::from_vec_f32(12.4_f32);
     /// let inf = bf16::INFINITY;
     ///
     /// assert_eq!(num.classify(), FpCategory::Normal);
@@ -403,10 +403,10 @@ impl bf16 {
     /// ```rust
     /// # use half::prelude::*;
     ///
-    /// let f = bf16::from_f32(3.5_f32);
+    /// let f = bf16::from_vec_f32(3.5_f32);
     ///
-    /// assert_eq!(f.signum(), bf16::from_f32(1.0));
-    /// assert_eq!(bf16::NEG_INFINITY.signum(), bf16::from_f32(-1.0));
+    /// assert_eq!(f.signum(), bf16::from_vec_f32(1.0));
+    /// assert_eq!(bf16::NEG_INFINITY.signum(), bf16::from_vec_f32(-1.0));
     ///
     /// assert!(bf16::NAN.signum().is_nan());
     /// ```
@@ -430,8 +430,8 @@ impl bf16 {
     /// # use half::prelude::*;
     ///
     /// let nan = bf16::NAN;
-    /// let f = bf16::from_f32(7.0_f32);
-    /// let g = bf16::from_f32(-7.0_f32);
+    /// let f = bf16::from_vec_f32(7.0_f32);
+    /// let g = bf16::from_vec_f32(-7.0_f32);
     ///
     /// assert!(f.is_sign_positive());
     /// assert!(!g.is_sign_positive());
@@ -453,8 +453,8 @@ impl bf16 {
     /// # use half::prelude::*;
     ///
     /// let nan = bf16::NAN;
-    /// let f = bf16::from_f32(7.0f32);
-    /// let g = bf16::from_f32(-7.0f32);
+    /// let f = bf16::from_vec_f32(7.0f32);
+    /// let g = bf16::from_vec_f32(-7.0f32);
     ///
     /// assert!(!f.is_sign_negative());
     /// assert!(g.is_sign_negative());
@@ -476,14 +476,14 @@ impl bf16 {
     ///
     /// ```
     /// # use half::prelude::*;
-    /// let f = bf16::from_f32(3.5);
+    /// let f = bf16::from_vec_f32(3.5);
     ///
-    /// assert_eq!(f.copysign(bf16::from_f32(0.42)), bf16::from_f32(3.5));
-    /// assert_eq!(f.copysign(bf16::from_f32(-0.42)), bf16::from_f32(-3.5));
-    /// assert_eq!((-f).copysign(bf16::from_f32(0.42)), bf16::from_f32(3.5));
-    /// assert_eq!((-f).copysign(bf16::from_f32(-0.42)), bf16::from_f32(-3.5));
+    /// assert_eq!(f.copysign(bf16::from_vec_f32(0.42)), bf16::from_vec_f32(3.5));
+    /// assert_eq!(f.copysign(bf16::from_vec_f32(-0.42)), bf16::from_vec_f32(-3.5));
+    /// assert_eq!((-f).copysign(bf16::from_vec_f32(0.42)), bf16::from_vec_f32(3.5));
+    /// assert_eq!((-f).copysign(bf16::from_vec_f32(-0.42)), bf16::from_vec_f32(-3.5));
     ///
-    /// assert!(bf16::NAN.copysign(bf16::from_f32(1.0)).is_nan());
+    /// assert!(bf16::NAN.copysign(bf16::from_vec_f32(1.0)).is_nan());
     /// ```
     #[inline]
     #[must_use]
@@ -499,8 +499,8 @@ impl bf16 {
     ///
     /// ```
     /// # use half::prelude::*;
-    /// let x = bf16::from_f32(1.0);
-    /// let y = bf16::from_f32(2.0);
+    /// let x = bf16::from_vec_f32(1.0);
+    /// let y = bf16::from_vec_f32(2.0);
     ///
     /// assert_eq!(x.max(y), y);
     /// ```
@@ -522,8 +522,8 @@ impl bf16 {
     ///
     /// ```
     /// # use half::prelude::*;
-    /// let x = bf16::from_f32(1.0);
-    /// let y = bf16::from_f32(2.0);
+    /// let x = bf16::from_vec_f32(1.0);
+    /// let y = bf16::from_vec_f32(2.0);
     ///
     /// assert_eq!(x.min(y), x);
     /// ```
@@ -551,10 +551,10 @@ impl bf16 {
     ///
     /// ```
     /// # use half::prelude::*;
-    /// assert!(bf16::from_f32(-3.0).clamp(bf16::from_f32(-2.0), bf16::from_f32(1.0)) == bf16::from_f32(-2.0));
-    /// assert!(bf16::from_f32(0.0).clamp(bf16::from_f32(-2.0), bf16::from_f32(1.0)) == bf16::from_f32(0.0));
-    /// assert!(bf16::from_f32(2.0).clamp(bf16::from_f32(-2.0), bf16::from_f32(1.0)) == bf16::from_f32(1.0));
-    /// assert!(bf16::NAN.clamp(bf16::from_f32(-2.0), bf16::from_f32(1.0)).is_nan());
+    /// assert!(bf16::from_vec_f32(-3.0).clamp(bf16::from_vec_f32(-2.0), bf16::from_vec_f32(1.0)) == bf16::from_vec_f32(-2.0));
+    /// assert!(bf16::from_vec_f32(0.0).clamp(bf16::from_vec_f32(-2.0), bf16::from_vec_f32(1.0)) == bf16::from_vec_f32(0.0));
+    /// assert!(bf16::from_vec_f32(2.0).clamp(bf16::from_vec_f32(-2.0), bf16::from_vec_f32(1.0)) == bf16::from_vec_f32(1.0));
+    /// assert!(bf16::NAN.clamp(bf16::from_vec_f32(-2.0), bf16::from_vec_f32(1.0)).is_nan());
     /// ```
     #[inline]
     #[must_use]
@@ -803,7 +803,7 @@ impl From<i8> for bf16 {
     #[inline]
     fn from(x: i8) -> bf16 {
         // Convert to f32, then to bf16
-        bf16::from_f32(f32::from(x))
+        bf16::from_vec_f32(f32::from(x))
     }
 }
 
@@ -811,7 +811,7 @@ impl From<u8> for bf16 {
     #[inline]
     fn from(x: u8) -> bf16 {
         // Convert to f32, then to f16
-        bf16::from_f32(f32::from(x))
+        bf16::from_vec_f32(f32::from(x))
     }
 }
 
@@ -918,7 +918,7 @@ impl PartialOrd for bf16 {
 impl FromStr for bf16 {
     type Err = ParseFloatError;
     fn from_str(src: &str) -> Result<bf16, ParseFloatError> {
-        f32::from_str(src).map(bf16::from_f32)
+        f32::from_str(src).map(bf16::from_vec_f32)
     }
 }
 
@@ -999,7 +999,7 @@ impl Add for bf16 {
     type Output = Self;
 
     fn add(self, rhs: Self) -> Self::Output {
-        Self::from_f32(Self::to_f32(self) + Self::to_f32(rhs))
+        Self::from_vec_f32(Self::to_f32(self) + Self::to_f32(rhs))
     }
 }
 
@@ -1048,7 +1048,7 @@ impl Sub for bf16 {
     type Output = Self;
 
     fn sub(self, rhs: Self) -> Self::Output {
-        Self::from_f32(Self::to_f32(self) - Self::to_f32(rhs))
+        Self::from_vec_f32(Self::to_f32(self) - Self::to_f32(rhs))
     }
 }
 
@@ -1097,7 +1097,7 @@ impl Mul for bf16 {
     type Output = Self;
 
     fn mul(self, rhs: Self) -> Self::Output {
-        Self::from_f32(Self::to_f32(self) * Self::to_f32(rhs))
+        Self::from_vec_f32(Self::to_f32(self) * Self::to_f32(rhs))
     }
 }
 
@@ -1146,7 +1146,7 @@ impl Div for bf16 {
     type Output = Self;
 
     fn div(self, rhs: Self) -> Self::Output {
-        Self::from_f32(Self::to_f32(self) / Self::to_f32(rhs))
+        Self::from_vec_f32(Self::to_f32(self) / Self::to_f32(rhs))
     }
 }
 
@@ -1195,7 +1195,7 @@ impl Rem for bf16 {
     type Output = Self;
 
     fn rem(self, rhs: Self) -> Self::Output {
-        Self::from_f32(Self::to_f32(self) % Self::to_f32(rhs))
+        Self::from_vec_f32(Self::to_f32(self) % Self::to_f32(rhs))
     }
 }
 
@@ -1243,28 +1243,28 @@ impl RemAssign<&bf16> for bf16 {
 impl Product for bf16 {
     #[inline]
     fn product<I: Iterator<Item = Self>>(iter: I) -> Self {
-        bf16::from_f32(iter.map(|f| f.to_f32()).product())
+        bf16::from_vec_f32(iter.map(|f| f.to_f32()).product())
     }
 }
 
 impl<'a> Product<&'a bf16> for bf16 {
     #[inline]
     fn product<I: Iterator<Item = &'a bf16>>(iter: I) -> Self {
-        bf16::from_f32(iter.map(|f| f.to_f32()).product())
+        bf16::from_vec_f32(iter.map(|f| f.to_f32()).product())
     }
 }
 
 impl Sum for bf16 {
     #[inline]
     fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
-        bf16::from_f32(iter.map(|f| f.to_f32()).sum())
+        bf16::from_vec_f32(iter.map(|f| f.to_f32()).sum())
     }
 }
 
 impl<'a> Sum<&'a bf16> for bf16 {
     #[inline]
     fn sum<I: Iterator<Item = &'a bf16>>(iter: I) -> Self {
-        bf16::from_f32(iter.map(|f| f.to_f32()).sum())
+        bf16::from_vec_f32(iter.map(|f| f.to_f32()).sum())
     }
 }
 
@@ -1309,7 +1309,7 @@ impl<'de> serde::de::Visitor<'de> for Visitor {
     where
         E: serde::de::Error,
     {
-        Ok(bf16::from_f32(v))
+        Ok(bf16::from_vec_f32(v))
     }
 
     fn visit_f64<E>(self, v: f64) -> Result<Self::Value, E>
@@ -1337,7 +1337,7 @@ mod test {
     #[cfg(feature = "num-traits")]
     #[test]
     fn as_primitive() {
-        let two = bf16::from_f32(2.0);
+        let two = bf16::from_vec_f32(2.0);
         assert_eq!(<i32 as AsPrimitive<bf16>>::as_(2), two);
         assert_eq!(<bf16 as AsPrimitive<i32>>::as_(two), 2);
 
@@ -1351,7 +1351,7 @@ mod test {
     #[cfg(feature = "num-traits")]
     #[test]
     fn to_primitive() {
-        let two = bf16::from_f32(2.0);
+        let two = bf16::from_vec_f32(2.0);
         assert_eq!(ToPrimitive::to_i32(&two).unwrap(), 2i32);
         assert_eq!(ToPrimitive::to_f32(&two).unwrap(), 2.0f32);
         assert_eq!(ToPrimitive::to_f64(&two).unwrap(), 2.0f64);
@@ -1360,16 +1360,16 @@ mod test {
     #[cfg(feature = "num-traits")]
     #[test]
     fn from_primitive() {
-        let two = bf16::from_f32(2.0);
+        let two = bf16::from_vec_f32(2.0);
         assert_eq!(<bf16 as FromPrimitive>::from_i32(2).unwrap(), two);
-        assert_eq!(<bf16 as FromPrimitive>::from_f32(2.0).unwrap(), two);
+        assert_eq!(<bf16 as FromPrimitive>::from_vec_f32(2.0).unwrap(), two);
         assert_eq!(<bf16 as FromPrimitive>::from_f64(2.0).unwrap(), two);
     }
 
     #[cfg(feature = "num-traits")]
     #[test]
     fn to_and_from_bytes() {
-        let two = bf16::from_f32(2.0);
+        let two = bf16::from_vec_f32(2.0);
         assert_eq!(<bf16 as ToBytes>::to_le_bytes(&two), [0, 64]);
         assert_eq!(<bf16 as FromBytes>::from_le_bytes(&[0, 64]), two);
         assert_eq!(<bf16 as ToBytes>::to_be_bytes(&two), [64, 0]);
@@ -1377,14 +1377,14 @@ mod test {
     }
 
     #[test]
-    fn test_bf16_consts_from_f32() {
-        let one = bf16::from_f32(1.0);
-        let zero = bf16::from_f32(0.0);
-        let neg_zero = bf16::from_f32(-0.0);
-        let neg_one = bf16::from_f32(-1.0);
-        let inf = bf16::from_f32(core::f32::INFINITY);
-        let neg_inf = bf16::from_f32(core::f32::NEG_INFINITY);
-        let nan = bf16::from_f32(core::f32::NAN);
+    fn test_bf16_consts_from_vec_f32() {
+        let one = bf16::from_vec_f32(1.0);
+        let zero = bf16::from_vec_f32(0.0);
+        let neg_zero = bf16::from_vec_f32(-0.0);
+        let neg_one = bf16::from_vec_f32(-1.0);
+        let inf = bf16::from_vec_f32(core::f32::INFINITY);
+        let neg_inf = bf16::from_vec_f32(core::f32::NEG_INFINITY);
+        let nan = bf16::from_vec_f32(core::f32::NAN);
 
         assert_eq!(bf16::ONE, one);
         assert_eq!(bf16::ZERO, zero);
@@ -1398,26 +1398,26 @@ mod test {
         assert!(nan.is_nan());
         assert!(bf16::NAN.is_nan());
 
-        let e = bf16::from_f32(core::f32::consts::E);
-        let pi = bf16::from_f32(core::f32::consts::PI);
-        let frac_1_pi = bf16::from_f32(core::f32::consts::FRAC_1_PI);
-        let frac_1_sqrt_2 = bf16::from_f32(core::f32::consts::FRAC_1_SQRT_2);
-        let frac_2_pi = bf16::from_f32(core::f32::consts::FRAC_2_PI);
-        let frac_2_sqrt_pi = bf16::from_f32(core::f32::consts::FRAC_2_SQRT_PI);
-        let frac_pi_2 = bf16::from_f32(core::f32::consts::FRAC_PI_2);
-        let frac_pi_3 = bf16::from_f32(core::f32::consts::FRAC_PI_3);
-        let frac_pi_4 = bf16::from_f32(core::f32::consts::FRAC_PI_4);
-        let frac_pi_6 = bf16::from_f32(core::f32::consts::FRAC_PI_6);
-        let frac_pi_8 = bf16::from_f32(core::f32::consts::FRAC_PI_8);
-        let ln_10 = bf16::from_f32(core::f32::consts::LN_10);
-        let ln_2 = bf16::from_f32(core::f32::consts::LN_2);
-        let log10_e = bf16::from_f32(core::f32::consts::LOG10_E);
+        let e = bf16::from_vec_f32(core::f32::consts::E);
+        let pi = bf16::from_vec_f32(core::f32::consts::PI);
+        let frac_1_pi = bf16::from_vec_f32(core::f32::consts::FRAC_1_PI);
+        let frac_1_sqrt_2 = bf16::from_vec_f32(core::f32::consts::FRAC_1_SQRT_2);
+        let frac_2_pi = bf16::from_vec_f32(core::f32::consts::FRAC_2_PI);
+        let frac_2_sqrt_pi = bf16::from_vec_f32(core::f32::consts::FRAC_2_SQRT_PI);
+        let frac_pi_2 = bf16::from_vec_f32(core::f32::consts::FRAC_PI_2);
+        let frac_pi_3 = bf16::from_vec_f32(core::f32::consts::FRAC_PI_3);
+        let frac_pi_4 = bf16::from_vec_f32(core::f32::consts::FRAC_PI_4);
+        let frac_pi_6 = bf16::from_vec_f32(core::f32::consts::FRAC_PI_6);
+        let frac_pi_8 = bf16::from_vec_f32(core::f32::consts::FRAC_PI_8);
+        let ln_10 = bf16::from_vec_f32(core::f32::consts::LN_10);
+        let ln_2 = bf16::from_vec_f32(core::f32::consts::LN_2);
+        let log10_e = bf16::from_vec_f32(core::f32::consts::LOG10_E);
         // core::f32::consts::LOG10_2 requires rustc 1.43.0
-        let log10_2 = bf16::from_f32(2f32.log10());
-        let log2_e = bf16::from_f32(core::f32::consts::LOG2_E);
+        let log10_2 = bf16::from_vec_f32(2f32.log10());
+        let log2_e = bf16::from_vec_f32(core::f32::consts::LOG2_E);
         // core::f32::consts::LOG2_10 requires rustc 1.43.0
-        let log2_10 = bf16::from_f32(10f32.log2());
-        let sqrt_2 = bf16::from_f32(core::f32::consts::SQRT_2);
+        let log2_10 = bf16::from_vec_f32(10f32.log2());
+        let sqrt_2 = bf16::from_vec_f32(core::f32::consts::SQRT_2);
 
         assert_eq!(bf16::E, e);
         assert_eq!(bf16::PI, pi);
@@ -1507,8 +1507,8 @@ mod test {
         let neg_nan32_from_64 = neg_nan64 as f32;
         let nan16_from_64 = bf16::from_f64(nan64);
         let neg_nan16_from_64 = bf16::from_f64(neg_nan64);
-        let nan16_from_32 = bf16::from_f32(nan32);
-        let neg_nan16_from_32 = bf16::from_f32(neg_nan32);
+        let nan16_from_32 = bf16::from_vec_f32(nan32);
+        let neg_nan16_from_32 = bf16::from_vec_f32(neg_nan32);
 
         assert!(nan64.is_nan() && nan64.is_sign_positive());
         assert!(neg_nan64.is_nan() && neg_nan64.is_sign_negative());
@@ -1553,11 +1553,11 @@ mod test {
 
     #[test]
     fn test_bf16_to_f32() {
-        let f = bf16::from_f32(7.0);
+        let f = bf16::from_vec_f32(7.0);
         assert_eq!(f.to_f32(), 7.0f32);
 
         // 7.1 is NOT exactly representable in 16-bit, it's rounded
-        let f = bf16::from_f32(7.1);
+        let f = bf16::from_vec_f32(7.1);
         let diff = (f.to_f32() - 7.1f32).abs();
         // diff must be <= 4 * EPSILON, as 7 has two more significant bits than 1
         assert!(diff <= 4.0 * bf16::EPSILON.to_f32());
@@ -1566,8 +1566,8 @@ mod test {
         assert_eq!(bf16::from_bits(0x0001).to_f32(), tiny32);
         assert_eq!(bf16::from_bits(0x0005).to_f32(), 5.0 * tiny32);
 
-        assert_eq!(bf16::from_bits(0x0001), bf16::from_f32(tiny32));
-        assert_eq!(bf16::from_bits(0x0005), bf16::from_f32(5.0 * tiny32));
+        assert_eq!(bf16::from_bits(0x0001), bf16::from_vec_f32(tiny32));
+        assert_eq!(bf16::from_bits(0x0005), bf16::from_vec_f32(5.0 * tiny32));
     }
 
     #[test]
@@ -1650,22 +1650,22 @@ mod test {
         // smallest positive subnormal = 0b0.0000_001 * 2^-126 = 2^-133
         let min_sub = bf16::from_bits(1);
         let min_sub_f = (-133f32).exp2();
-        assert_eq!(bf16::from_f32(min_sub_f).to_bits(), min_sub.to_bits());
+        assert_eq!(bf16::from_vec_f32(min_sub_f).to_bits(), min_sub.to_bits());
         assert_eq!(f32::from(min_sub).to_bits(), min_sub_f.to_bits());
 
         // 0.0000000_011111 rounded to 0.0000000 (< tie, no rounding)
         // 0.0000000_100000 rounded to 0.0000000 (tie and even, remains at even)
         // 0.0000000_100001 rounded to 0.0000001 (> tie, rounds up)
         assert_eq!(
-            bf16::from_f32(min_sub_f * 0.49).to_bits(),
+            bf16::from_vec_f32(min_sub_f * 0.49).to_bits(),
             min_sub.to_bits() * 0
         );
         assert_eq!(
-            bf16::from_f32(min_sub_f * 0.50).to_bits(),
+            bf16::from_vec_f32(min_sub_f * 0.50).to_bits(),
             min_sub.to_bits() * 0
         );
         assert_eq!(
-            bf16::from_f32(min_sub_f * 0.51).to_bits(),
+            bf16::from_vec_f32(min_sub_f * 0.51).to_bits(),
             min_sub.to_bits() * 1
         );
 
@@ -1673,15 +1673,15 @@ mod test {
         // 0.0000001_100000 rounded to 0.0000010 (tie and odd, rounds up to even)
         // 0.0000001_100001 rounded to 0.0000010 (> tie, rounds up)
         assert_eq!(
-            bf16::from_f32(min_sub_f * 1.49).to_bits(),
+            bf16::from_vec_f32(min_sub_f * 1.49).to_bits(),
             min_sub.to_bits() * 1
         );
         assert_eq!(
-            bf16::from_f32(min_sub_f * 1.50).to_bits(),
+            bf16::from_vec_f32(min_sub_f * 1.50).to_bits(),
             min_sub.to_bits() * 2
         );
         assert_eq!(
-            bf16::from_f32(min_sub_f * 1.51).to_bits(),
+            bf16::from_vec_f32(min_sub_f * 1.51).to_bits(),
             min_sub.to_bits() * 2
         );
 
@@ -1689,53 +1689,53 @@ mod test {
         // 0.0000010_100000 rounded to 0.0000010 (tie and even, remains at even)
         // 0.0000010_100001 rounded to 0.0000011 (> tie, rounds up)
         assert_eq!(
-            bf16::from_f32(min_sub_f * 2.49).to_bits(),
+            bf16::from_vec_f32(min_sub_f * 2.49).to_bits(),
             min_sub.to_bits() * 2
         );
         assert_eq!(
-            bf16::from_f32(min_sub_f * 2.50).to_bits(),
+            bf16::from_vec_f32(min_sub_f * 2.50).to_bits(),
             min_sub.to_bits() * 2
         );
         assert_eq!(
-            bf16::from_f32(min_sub_f * 2.51).to_bits(),
+            bf16::from_vec_f32(min_sub_f * 2.51).to_bits(),
             min_sub.to_bits() * 3
         );
 
         assert_eq!(
-            bf16::from_f32(250.49f32).to_bits(),
-            bf16::from_f32(250.0).to_bits()
+            bf16::from_vec_f32(250.49f32).to_bits(),
+            bf16::from_vec_f32(250.0).to_bits()
         );
         assert_eq!(
-            bf16::from_f32(250.50f32).to_bits(),
-            bf16::from_f32(250.0).to_bits()
+            bf16::from_vec_f32(250.50f32).to_bits(),
+            bf16::from_vec_f32(250.0).to_bits()
         );
         assert_eq!(
-            bf16::from_f32(250.51f32).to_bits(),
-            bf16::from_f32(251.0).to_bits()
+            bf16::from_vec_f32(250.51f32).to_bits(),
+            bf16::from_vec_f32(251.0).to_bits()
         );
         assert_eq!(
-            bf16::from_f32(251.49f32).to_bits(),
-            bf16::from_f32(251.0).to_bits()
+            bf16::from_vec_f32(251.49f32).to_bits(),
+            bf16::from_vec_f32(251.0).to_bits()
         );
         assert_eq!(
-            bf16::from_f32(251.50f32).to_bits(),
-            bf16::from_f32(252.0).to_bits()
+            bf16::from_vec_f32(251.50f32).to_bits(),
+            bf16::from_vec_f32(252.0).to_bits()
         );
         assert_eq!(
-            bf16::from_f32(251.51f32).to_bits(),
-            bf16::from_f32(252.0).to_bits()
+            bf16::from_vec_f32(251.51f32).to_bits(),
+            bf16::from_vec_f32(252.0).to_bits()
         );
         assert_eq!(
-            bf16::from_f32(252.49f32).to_bits(),
-            bf16::from_f32(252.0).to_bits()
+            bf16::from_vec_f32(252.49f32).to_bits(),
+            bf16::from_vec_f32(252.0).to_bits()
         );
         assert_eq!(
-            bf16::from_f32(252.50f32).to_bits(),
-            bf16::from_f32(252.0).to_bits()
+            bf16::from_vec_f32(252.50f32).to_bits(),
+            bf16::from_vec_f32(252.0).to_bits()
         );
         assert_eq!(
-            bf16::from_f32(252.51f32).to_bits(),
-            bf16::from_f32(253.0).to_bits()
+            bf16::from_vec_f32(252.51f32).to_bits(),
+            bf16::from_vec_f32(253.0).to_bits()
         );
     }
 
@@ -1838,7 +1838,7 @@ mod test {
     #[cfg(feature = "std")]
     #[test]
     fn formatting() {
-        let f = bf16::from_f32(0.1152344);
+        let f = bf16::from_vec_f32(0.1152344);
 
         assert_eq!(format!("{:.3}", f), "0.115");
         assert_eq!(format!("{:.4}", f), "0.1152");
@@ -1859,7 +1859,7 @@ mod test {
 
     #[quickcheck]
     fn qc_roundtrip_bf16_f32_is_identity(f: bf16) -> bool {
-        let roundtrip = bf16::from_f32(f.to_f32());
+        let roundtrip = bf16::from_vec_f32(f.to_f32());
         if f.is_nan() {
             roundtrip.is_nan() && f.is_sign_negative() == roundtrip.is_sign_negative()
         } else {
@@ -1879,19 +1879,19 @@ mod test {
 
     #[test]
     fn test_max() {
-        let a = bf16::from_f32(0.0);
-        let b = bf16::from_f32(42.0);
+        let a = bf16::from_vec_f32(0.0);
+        let b = bf16::from_vec_f32(42.0);
         assert_eq!(a.max(b), b);
 
-        let a = bf16::from_f32(42.0);
-        let b = bf16::from_f32(0.0);
+        let a = bf16::from_vec_f32(42.0);
+        let b = bf16::from_vec_f32(0.0);
         assert_eq!(a.max(b), a);
 
         let a = bf16::NAN;
-        let b = bf16::from_f32(42.0);
+        let b = bf16::from_vec_f32(42.0);
         assert_eq!(a.max(b), b);
 
-        let a = bf16::from_f32(42.0);
+        let a = bf16::from_vec_f32(42.0);
         let b = bf16::NAN;
         assert_eq!(a.max(b), a);
 
@@ -1902,19 +1902,19 @@ mod test {
 
     #[test]
     fn test_min() {
-        let a = bf16::from_f32(0.0);
-        let b = bf16::from_f32(42.0);
+        let a = bf16::from_vec_f32(0.0);
+        let b = bf16::from_vec_f32(42.0);
         assert_eq!(a.min(b), a);
 
-        let a = bf16::from_f32(42.0);
-        let b = bf16::from_f32(0.0);
+        let a = bf16::from_vec_f32(42.0);
+        let b = bf16::from_vec_f32(0.0);
         assert_eq!(a.min(b), b);
 
         let a = bf16::NAN;
-        let b = bf16::from_f32(42.0);
+        let b = bf16::from_vec_f32(42.0);
         assert_eq!(a.min(b), b);
 
-        let a = bf16::from_f32(42.0);
+        let a = bf16::from_vec_f32(42.0);
         let b = bf16::NAN;
         assert_eq!(a.min(b), a);
 

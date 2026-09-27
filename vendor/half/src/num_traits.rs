@@ -52,39 +52,39 @@ impl ToPrimitive for f16 {
 impl FromPrimitive for f16 {
     #[inline]
     fn from_i64(n: i64) -> Option<Self> {
-        n.to_f32().map(Self::from_f32)
+        n.to_f32().map(Self::from_vec_f32)
     }
     #[inline]
     fn from_u64(n: u64) -> Option<Self> {
-        n.to_f32().map(Self::from_f32)
+        n.to_f32().map(Self::from_vec_f32)
     }
     #[inline]
     fn from_i8(n: i8) -> Option<Self> {
-        n.to_f32().map(Self::from_f32)
+        n.to_f32().map(Self::from_vec_f32)
     }
     #[inline]
     fn from_u8(n: u8) -> Option<Self> {
-        n.to_f32().map(Self::from_f32)
+        n.to_f32().map(Self::from_vec_f32)
     }
     #[inline]
     fn from_i16(n: i16) -> Option<Self> {
-        n.to_f32().map(Self::from_f32)
+        n.to_f32().map(Self::from_vec_f32)
     }
     #[inline]
     fn from_u16(n: u16) -> Option<Self> {
-        n.to_f32().map(Self::from_f32)
+        n.to_f32().map(Self::from_vec_f32)
     }
     #[inline]
     fn from_i32(n: i32) -> Option<Self> {
-        n.to_f32().map(Self::from_f32)
+        n.to_f32().map(Self::from_vec_f32)
     }
     #[inline]
     fn from_u32(n: u32) -> Option<Self> {
-        n.to_f32().map(Self::from_f32)
+        n.to_f32().map(Self::from_vec_f32)
     }
     #[inline]
-    fn from_f32(n: f32) -> Option<Self> {
-        n.to_f32().map(Self::from_f32)
+    fn from_vec_f32(n: f32) -> Option<Self> {
+        n.to_f32().map(Self::from_vec_f32)
     }
     #[inline]
     fn from_f64(n: f64) -> Option<Self> {
@@ -97,7 +97,7 @@ impl Num for f16 {
 
     #[inline]
     fn from_str_radix(str: &str, radix: u32) -> Result<Self, Self::FromStrRadixErr> {
-        Ok(Self::from_f32(f32::from_str_radix(str, radix)?))
+        Ok(Self::from_vec_f32(f32::from_str_radix(str, radix)?))
     }
 }
 
@@ -123,7 +123,7 @@ impl Zero for f16 {
 impl NumCast for f16 {
     #[inline]
     fn from<T: ToPrimitive>(n: T) -> Option<Self> {
-        n.to_f32().map(Self::from_f32)
+        n.to_f32().map(Self::from_vec_f32)
     }
 }
 
@@ -195,27 +195,27 @@ impl num_traits::float::FloatCore for f16 {
 
     #[inline]
     fn floor(self) -> Self {
-        Self::from_f32(self.to_f32().floor())
+        Self::from_vec_f32(self.to_f32().floor())
     }
 
     #[inline]
     fn ceil(self) -> Self {
-        Self::from_f32(self.to_f32().ceil())
+        Self::from_vec_f32(self.to_f32().ceil())
     }
 
     #[inline]
     fn round(self) -> Self {
-        Self::from_f32(self.to_f32().round())
+        Self::from_vec_f32(self.to_f32().round())
     }
 
     #[inline]
     fn trunc(self) -> Self {
-        Self::from_f32(self.to_f32().trunc())
+        Self::from_vec_f32(self.to_f32().trunc())
     }
 
     #[inline]
     fn fract(self) -> Self {
-        Self::from_f32(self.to_f32().fract())
+        Self::from_vec_f32(self.to_f32().fract())
     }
 
     #[inline]
@@ -268,22 +268,22 @@ impl num_traits::float::FloatCore for f16 {
 
     #[inline]
     fn recip(self) -> Self {
-        Self::from_f32(self.to_f32().recip())
+        Self::from_vec_f32(self.to_f32().recip())
     }
 
     #[inline]
     fn powi(self, exp: i32) -> Self {
-        Self::from_f32(self.to_f32().powi(exp))
+        Self::from_vec_f32(self.to_f32().powi(exp))
     }
 
     #[inline]
     fn to_degrees(self) -> Self {
-        Self::from_f32(self.to_f32().to_degrees())
+        Self::from_vec_f32(self.to_f32().to_degrees())
     }
 
     #[inline]
     fn to_radians(self) -> Self {
-        Self::from_f32(self.to_f32().to_radians())
+        Self::from_vec_f32(self.to_f32().to_radians())
     }
 
     #[inline]
@@ -360,37 +360,37 @@ impl num_traits::float::Float for f16 {
 
     #[inline]
     fn floor(self) -> Self {
-        Self::from_f32(self.to_f32().floor())
+        Self::from_vec_f32(self.to_f32().floor())
     }
 
     #[inline]
     fn ceil(self) -> Self {
-        Self::from_f32(self.to_f32().ceil())
+        Self::from_vec_f32(self.to_f32().ceil())
     }
 
     #[inline]
     fn round(self) -> Self {
-        Self::from_f32(self.to_f32().round())
+        Self::from_vec_f32(self.to_f32().round())
     }
 
     #[inline]
     fn trunc(self) -> Self {
-        Self::from_f32(self.to_f32().trunc())
+        Self::from_vec_f32(self.to_f32().trunc())
     }
 
     #[inline]
     fn fract(self) -> Self {
-        Self::from_f32(self.to_f32().fract())
+        Self::from_vec_f32(self.to_f32().fract())
     }
 
     #[inline]
     fn abs(self) -> Self {
-        Self::from_f32(self.to_f32().abs())
+        Self::from_vec_f32(self.to_f32().abs())
     }
 
     #[inline]
     fn signum(self) -> Self {
-        Self::from_f32(self.to_f32().signum())
+        Self::from_vec_f32(self.to_f32().signum())
     }
 
     #[inline]
@@ -405,67 +405,67 @@ impl num_traits::float::Float for f16 {
 
     #[inline]
     fn mul_add(self, a: Self, b: Self) -> Self {
-        Self::from_f32(self.to_f32().mul_add(a.to_f32(), b.to_f32()))
+        Self::from_vec_f32(self.to_f32().mul_add(a.to_f32(), b.to_f32()))
     }
 
     #[inline]
     fn recip(self) -> Self {
-        Self::from_f32(self.to_f32().recip())
+        Self::from_vec_f32(self.to_f32().recip())
     }
 
     #[inline]
     fn powi(self, n: i32) -> Self {
-        Self::from_f32(self.to_f32().powi(n))
+        Self::from_vec_f32(self.to_f32().powi(n))
     }
 
     #[inline]
     fn powf(self, n: Self) -> Self {
-        Self::from_f32(self.to_f32().powf(n.to_f32()))
+        Self::from_vec_f32(self.to_f32().powf(n.to_f32()))
     }
 
     #[inline]
     fn sqrt(self) -> Self {
-        Self::from_f32(self.to_f32().sqrt())
+        Self::from_vec_f32(self.to_f32().sqrt())
     }
 
     #[inline]
     fn exp(self) -> Self {
-        Self::from_f32(self.to_f32().exp())
+        Self::from_vec_f32(self.to_f32().exp())
     }
 
     #[inline]
     fn exp2(self) -> Self {
-        Self::from_f32(self.to_f32().exp2())
+        Self::from_vec_f32(self.to_f32().exp2())
     }
 
     #[inline]
     fn ln(self) -> Self {
-        Self::from_f32(self.to_f32().ln())
+        Self::from_vec_f32(self.to_f32().ln())
     }
 
     #[inline]
     fn log(self, base: Self) -> Self {
-        Self::from_f32(self.to_f32().log(base.to_f32()))
+        Self::from_vec_f32(self.to_f32().log(base.to_f32()))
     }
 
     #[inline]
     fn log2(self) -> Self {
-        Self::from_f32(self.to_f32().log2())
+        Self::from_vec_f32(self.to_f32().log2())
     }
 
     #[inline]
     fn log10(self) -> Self {
-        Self::from_f32(self.to_f32().log10())
+        Self::from_vec_f32(self.to_f32().log10())
     }
 
     #[inline]
     fn to_degrees(self) -> Self {
-        Self::from_f32(self.to_f32().to_degrees())
+        Self::from_vec_f32(self.to_f32().to_degrees())
     }
 
     #[inline]
     fn to_radians(self) -> Self {
-        Self::from_f32(self.to_f32().to_radians())
+        Self::from_vec_f32(self.to_f32().to_radians())
     }
 
     #[inline]
@@ -480,98 +480,98 @@ impl num_traits::float::Float for f16 {
 
     #[inline]
     fn abs_sub(self, other: Self) -> Self {
-        Self::from_f32((self.to_f32() - other.to_f32()).max(0.0))
+        Self::from_vec_f32((self.to_f32() - other.to_f32()).max(0.0))
     }
 
     #[inline]
     fn cbrt(self) -> Self {
-        Self::from_f32(self.to_f32().cbrt())
+        Self::from_vec_f32(self.to_f32().cbrt())
     }
 
     #[inline]
     fn hypot(self, other: Self) -> Self {
-        Self::from_f32(self.to_f32().hypot(other.to_f32()))
+        Self::from_vec_f32(self.to_f32().hypot(other.to_f32()))
     }
 
     #[inline]
     fn sin(self) -> Self {
-        Self::from_f32(self.to_f32().sin())
+        Self::from_vec_f32(self.to_f32().sin())
     }
 
     #[inline]
     fn cos(self) -> Self {
-        Self::from_f32(self.to_f32().cos())
+        Self::from_vec_f32(self.to_f32().cos())
     }
 
     #[inline]
     fn tan(self) -> Self {
-        Self::from_f32(self.to_f32().tan())
+        Self::from_vec_f32(self.to_f32().tan())
     }
 
     #[inline]
     fn asin(self) -> Self {
-        Self::from_f32(self.to_f32().asin())
+        Self::from_vec_f32(self.to_f32().asin())
     }
 
     #[inline]
     fn acos(self) -> Self {
-        Self::from_f32(self.to_f32().acos())
+        Self::from_vec_f32(self.to_f32().acos())
     }
 
     #[inline]
     fn atan(self) -> Self {
-        Self::from_f32(self.to_f32().atan())
+        Self::from_vec_f32(self.to_f32().atan())
     }
 
     #[inline]
     fn atan2(self, other: Self) -> Self {
-        Self::from_f32(self.to_f32().atan2(other.to_f32()))
+        Self::from_vec_f32(self.to_f32().atan2(other.to_f32()))
     }
 
     #[inline]
     fn sin_cos(self) -> (Self, Self) {
         let (sin, cos) = self.to_f32().sin_cos();
-        (Self::from_f32(sin), Self::from_f32(cos))
+        (Self::from_vec_f32(sin), Self::from_vec_f32(cos))
     }
 
     #[inline]
     fn exp_m1(self) -> Self {
-        Self::from_f32(self.to_f32().exp_m1())
+        Self::from_vec_f32(self.to_f32().exp_m1())
     }
 
     #[inline]
     fn ln_1p(self) -> Self {
-        Self::from_f32(self.to_f32().ln_1p())
+        Self::from_vec_f32(self.to_f32().ln_1p())
     }
 
     #[inline]
     fn sinh(self) -> Self {
-        Self::from_f32(self.to_f32().sinh())
+        Self::from_vec_f32(self.to_f32().sinh())
     }
 
     #[inline]
     fn cosh(self) -> Self {
-        Self::from_f32(self.to_f32().cosh())
+        Self::from_vec_f32(self.to_f32().cosh())
     }
 
     #[inline]
     fn tanh(self) -> Self {
-        Self::from_f32(self.to_f32().tanh())
+        Self::from_vec_f32(self.to_f32().tanh())
     }
 
     #[inline]
     fn asinh(self) -> Self {
-        Self::from_f32(self.to_f32().asinh())
+        Self::from_vec_f32(self.to_f32().asinh())
     }
 
     #[inline]
     fn acosh(self) -> Self {
-        Self::from_f32(self.to_f32().acosh())
+        Self::from_vec_f32(self.to_f32().acosh())
     }
 
     #[inline]
     fn atanh(self) -> Self {
-        Self::from_f32(self.to_f32().atanh())
+        Self::from_vec_f32(self.to_f32().atanh())
     }
 
     #[inline]
@@ -732,17 +732,17 @@ macro_rules! impl_as_primitive_f16_from {
     };
 }
 
-impl_as_primitive_f16_from!(i64, from_f32);
-impl_as_primitive_f16_from!(u64, from_f32);
-impl_as_primitive_f16_from!(i8, from_f32);
-impl_as_primitive_f16_from!(u8, from_f32);
-impl_as_primitive_f16_from!(i16, from_f32);
-impl_as_primitive_f16_from!(u16, from_f32);
-impl_as_primitive_f16_from!(i32, from_f32);
-impl_as_primitive_f16_from!(u32, from_f32);
-impl_as_primitive_f16_from!(isize, from_f32);
-impl_as_primitive_f16_from!(usize, from_f32);
-impl_as_primitive_f16_from!(f32, from_f32);
+impl_as_primitive_f16_from!(i64, from_vec_f32);
+impl_as_primitive_f16_from!(u64, from_vec_f32);
+impl_as_primitive_f16_from!(i8, from_vec_f32);
+impl_as_primitive_f16_from!(u8, from_vec_f32);
+impl_as_primitive_f16_from!(i16, from_vec_f32);
+impl_as_primitive_f16_from!(u16, from_vec_f32);
+impl_as_primitive_f16_from!(i32, from_vec_f32);
+impl_as_primitive_f16_from!(u32, from_vec_f32);
+impl_as_primitive_f16_from!(isize, from_vec_f32);
+impl_as_primitive_f16_from!(usize, from_vec_f32);
+impl_as_primitive_f16_from!(f32, from_vec_f32);
 impl_as_primitive_f16_from!(f64, from_f64);
 
 impl ToBytes for f16 {
@@ -823,39 +823,39 @@ impl ToPrimitive for bf16 {
 impl FromPrimitive for bf16 {
     #[inline]
     fn from_i64(n: i64) -> Option<Self> {
-        n.to_f32().map(Self::from_f32)
+        n.to_f32().map(Self::from_vec_f32)
     }
     #[inline]
     fn from_u64(n: u64) -> Option<Self> {
-        n.to_f32().map(Self::from_f32)
+        n.to_f32().map(Self::from_vec_f32)
     }
     #[inline]
     fn from_i8(n: i8) -> Option<Self> {
-        n.to_f32().map(Self::from_f32)
+        n.to_f32().map(Self::from_vec_f32)
     }
     #[inline]
     fn from_u8(n: u8) -> Option<Self> {
-        n.to_f32().map(Self::from_f32)
+        n.to_f32().map(Self::from_vec_f32)
     }
     #[inline]
     fn from_i16(n: i16) -> Option<Self> {
-        n.to_f32().map(Self::from_f32)
+        n.to_f32().map(Self::from_vec_f32)
     }
     #[inline]
     fn from_u16(n: u16) -> Option<Self> {
-        n.to_f32().map(Self::from_f32)
+        n.to_f32().map(Self::from_vec_f32)
     }
     #[inline]
     fn from_i32(n: i32) -> Option<Self> {
-        n.to_f32().map(Self::from_f32)
+        n.to_f32().map(Self::from_vec_f32)
     }
     #[inline]
     fn from_u32(n: u32) -> Option<Self> {
-        n.to_f32().map(Self::from_f32)
+        n.to_f32().map(Self::from_vec_f32)
     }
     #[inline]
-    fn from_f32(n: f32) -> Option<Self> {
-        n.to_f32().map(Self::from_f32)
+    fn from_vec_f32(n: f32) -> Option<Self> {
+        n.to_f32().map(Self::from_vec_f32)
     }
     #[inline]
     fn from_f64(n: f64) -> Option<Self> {
@@ -868,7 +868,7 @@ impl Num for bf16 {
 
     #[inline]
     fn from_str_radix(str: &str, radix: u32) -> Result<Self, Self::FromStrRadixErr> {
-        Ok(Self::from_f32(f32::from_str_radix(str, radix)?))
+        Ok(Self::from_vec_f32(f32::from_str_radix(str, radix)?))
     }
 }
 
@@ -894,7 +894,7 @@ impl Zero for bf16 {
 impl NumCast for bf16 {
     #[inline]
     fn from<T: ToPrimitive>(n: T) -> Option<Self> {
-        n.to_f32().map(Self::from_f32)
+        n.to_f32().map(Self::from_vec_f32)
     }
 }
 
@@ -966,27 +966,27 @@ impl num_traits::float::FloatCore for bf16 {
 
     #[inline]
     fn floor(self) -> Self {
-        Self::from_f32(self.to_f32().floor())
+        Self::from_vec_f32(self.to_f32().floor())
     }
 
     #[inline]
     fn ceil(self) -> Self {
-        Self::from_f32(self.to_f32().ceil())
+        Self::from_vec_f32(self.to_f32().ceil())
     }
 
     #[inline]
     fn round(self) -> Self {
-        Self::from_f32(self.to_f32().round())
+        Self::from_vec_f32(self.to_f32().round())
     }
 
     #[inline]
     fn trunc(self) -> Self {
-        Self::from_f32(self.to_f32().trunc())
+        Self::from_vec_f32(self.to_f32().trunc())
     }
 
     #[inline]
     fn fract(self) -> Self {
-        Self::from_f32(self.to_f32().fract())
+        Self::from_vec_f32(self.to_f32().fract())
     }
 
     #[inline]
@@ -1039,22 +1039,22 @@ impl num_traits::float::FloatCore for bf16 {
 
     #[inline]
     fn recip(self) -> Self {
-        Self::from_f32(self.to_f32().recip())
+        Self::from_vec_f32(self.to_f32().recip())
     }
 
     #[inline]
     fn powi(self, exp: i32) -> Self {
-        Self::from_f32(self.to_f32().powi(exp))
+        Self::from_vec_f32(self.to_f32().powi(exp))
     }
 
     #[inline]
     fn to_degrees(self) -> Self {
-        Self::from_f32(self.to_f32().to_degrees())
+        Self::from_vec_f32(self.to_f32().to_degrees())
     }
 
     #[inline]
     fn to_radians(self) -> Self {
-        Self::from_f32(self.to_f32().to_radians())
+        Self::from_vec_f32(self.to_f32().to_radians())
     }
 
     #[inline]
@@ -1131,37 +1131,37 @@ impl num_traits::float::Float for bf16 {
 
     #[inline]
     fn floor(self) -> Self {
-        Self::from_f32(self.to_f32().floor())
+        Self::from_vec_f32(self.to_f32().floor())
     }
 
     #[inline]
     fn ceil(self) -> Self {
-        Self::from_f32(self.to_f32().ceil())
+        Self::from_vec_f32(self.to_f32().ceil())
     }
 
     #[inline]
     fn round(self) -> Self {
-        Self::from_f32(self.to_f32().round())
+        Self::from_vec_f32(self.to_f32().round())
     }
 
     #[inline]
     fn trunc(self) -> Self {
-        Self::from_f32(self.to_f32().trunc())
+        Self::from_vec_f32(self.to_f32().trunc())
     }
 
     #[inline]
     fn fract(self) -> Self {
-        Self::from_f32(self.to_f32().fract())
+        Self::from_vec_f32(self.to_f32().fract())
     }
 
     #[inline]
     fn abs(self) -> Self {
-        Self::from_f32(self.to_f32().abs())
+        Self::from_vec_f32(self.to_f32().abs())
     }
 
     #[inline]
     fn signum(self) -> Self {
-        Self::from_f32(self.to_f32().signum())
+        Self::from_vec_f32(self.to_f32().signum())
     }
 
     #[inline]
@@ -1176,67 +1176,67 @@ impl num_traits::float::Float for bf16 {
 
     #[inline]
     fn mul_add(self, a: Self, b: Self) -> Self {
-        Self::from_f32(self.to_f32().mul_add(a.to_f32(), b.to_f32()))
+        Self::from_vec_f32(self.to_f32().mul_add(a.to_f32(), b.to_f32()))
     }
 
     #[inline]
     fn recip(self) -> Self {
-        Self::from_f32(self.to_f32().recip())
+        Self::from_vec_f32(self.to_f32().recip())
     }
 
     #[inline]
     fn powi(self, n: i32) -> Self {
-        Self::from_f32(self.to_f32().powi(n))
+        Self::from_vec_f32(self.to_f32().powi(n))
     }
 
     #[inline]
     fn powf(self, n: Self) -> Self {
-        Self::from_f32(self.to_f32().powf(n.to_f32()))
+        Self::from_vec_f32(self.to_f32().powf(n.to_f32()))
     }
 
     #[inline]
     fn sqrt(self) -> Self {
-        Self::from_f32(self.to_f32().sqrt())
+        Self::from_vec_f32(self.to_f32().sqrt())
     }
 
     #[inline]
     fn exp(self) -> Self {
-        Self::from_f32(self.to_f32().exp())
+        Self::from_vec_f32(self.to_f32().exp())
     }
 
     #[inline]
     fn exp2(self) -> Self {
-        Self::from_f32(self.to_f32().exp2())
+        Self::from_vec_f32(self.to_f32().exp2())
     }
 
     #[inline]
     fn ln(self) -> Self {
-        Self::from_f32(self.to_f32().ln())
+        Self::from_vec_f32(self.to_f32().ln())
     }
 
     #[inline]
     fn log(self, base: Self) -> Self {
-        Self::from_f32(self.to_f32().log(base.to_f32()))
+        Self::from_vec_f32(self.to_f32().log(base.to_f32()))
     }
 
     #[inline]
     fn log2(self) -> Self {
-        Self::from_f32(self.to_f32().log2())
+        Self::from_vec_f32(self.to_f32().log2())
     }
 
     #[inline]
     fn log10(self) -> Self {
-        Self::from_f32(self.to_f32().log10())
+        Self::from_vec_f32(self.to_f32().log10())
     }
 
     #[inline]
     fn to_degrees(self) -> Self {
-        Self::from_f32(self.to_f32().to_degrees())
+        Self::from_vec_f32(self.to_f32().to_degrees())
     }
 
     #[inline]
     fn to_radians(self) -> Self {
-        Self::from_f32(self.to_f32().to_radians())
+        Self::from_vec_f32(self.to_f32().to_radians())
     }
 
     #[inline]
@@ -1251,98 +1251,98 @@ impl num_traits::float::Float for bf16 {
 
     #[inline]
     fn abs_sub(self, other: Self) -> Self {
-        Self::from_f32((self.to_f32() - other.to_f32()).max(0.0))
+        Self::from_vec_f32((self.to_f32() - other.to_f32()).max(0.0))
     }
 
     #[inline]
     fn cbrt(self) -> Self {
-        Self::from_f32(self.to_f32().cbrt())
+        Self::from_vec_f32(self.to_f32().cbrt())
     }
 
     #[inline]
     fn hypot(self, other: Self) -> Self {
-        Self::from_f32(self.to_f32().hypot(other.to_f32()))
+        Self::from_vec_f32(self.to_f32().hypot(other.to_f32()))
     }
 
     #[inline]
     fn sin(self) -> Self {
-        Self::from_f32(self.to_f32().sin())
+        Self::from_vec_f32(self.to_f32().sin())
     }
 
     #[inline]
     fn cos(self) -> Self {
-        Self::from_f32(self.to_f32().cos())
+        Self::from_vec_f32(self.to_f32().cos())
     }
 
     #[inline]
     fn tan(self) -> Self {
-        Self::from_f32(self.to_f32().tan())
+        Self::from_vec_f32(self.to_f32().tan())
     }
 
     #[inline]
     fn asin(self) -> Self {
-        Self::from_f32(self.to_f32().asin())
+        Self::from_vec_f32(self.to_f32().asin())
     }
 
     #[inline]
     fn acos(self) -> Self {
-        Self::from_f32(self.to_f32().acos())
+        Self::from_vec_f32(self.to_f32().acos())
     }
 
     #[inline]
     fn atan(self) -> Self {
-        Self::from_f32(self.to_f32().atan())
+        Self::from_vec_f32(self.to_f32().atan())
     }
 
     #[inline]
     fn atan2(self, other: Self) -> Self {
-        Self::from_f32(self.to_f32().atan2(other.to_f32()))
+        Self::from_vec_f32(self.to_f32().atan2(other.to_f32()))
     }
 
     #[inline]
     fn sin_cos(self) -> (Self, Self) {
         let (sin, cos) = self.to_f32().sin_cos();
-        (Self::from_f32(sin), Self::from_f32(cos))
+        (Self::from_vec_f32(sin), Self::from_vec_f32(cos))
     }
 
     #[inline]
     fn exp_m1(self) -> Self {
-        Self::from_f32(self.to_f32().exp_m1())
+        Self::from_vec_f32(self.to_f32().exp_m1())
     }
 
     #[inline]
     fn ln_1p(self) -> Self {
-        Self::from_f32(self.to_f32().ln_1p())
+        Self::from_vec_f32(self.to_f32().ln_1p())
     }
 
     #[inline]
     fn sinh(self) -> Self {
-        Self::from_f32(self.to_f32().sinh())
+        Self::from_vec_f32(self.to_f32().sinh())
     }
 
     #[inline]
     fn cosh(self) -> Self {
-        Self::from_f32(self.to_f32().cosh())
+        Self::from_vec_f32(self.to_f32().cosh())
     }
 
     #[inline]
     fn tanh(self) -> Self {
-        Self::from_f32(self.to_f32().tanh())
+        Self::from_vec_f32(self.to_f32().tanh())
     }
 
     #[inline]
     fn asinh(self) -> Self {
-        Self::from_f32(self.to_f32().asinh())
+        Self::from_vec_f32(self.to_f32().asinh())
     }
 
     #[inline]
     fn acosh(self) -> Self {
-        Self::from_f32(self.to_f32().acosh())
+        Self::from_vec_f32(self.to_f32().acosh())
     }
 
     #[inline]
     fn atanh(self) -> Self {
-        Self::from_f32(self.to_f32().atanh())
+        Self::from_vec_f32(self.to_f32().atanh())
     }
 
     #[inline]
@@ -1504,17 +1504,17 @@ macro_rules! impl_as_primitive_bf16_from {
     };
 }
 
-impl_as_primitive_bf16_from!(i64, from_f32);
-impl_as_primitive_bf16_from!(u64, from_f32);
-impl_as_primitive_bf16_from!(i8, from_f32);
-impl_as_primitive_bf16_from!(u8, from_f32);
-impl_as_primitive_bf16_from!(i16, from_f32);
-impl_as_primitive_bf16_from!(u16, from_f32);
-impl_as_primitive_bf16_from!(i32, from_f32);
-impl_as_primitive_bf16_from!(u32, from_f32);
-impl_as_primitive_bf16_from!(isize, from_f32);
-impl_as_primitive_bf16_from!(usize, from_f32);
-impl_as_primitive_bf16_from!(f32, from_f32);
+impl_as_primitive_bf16_from!(i64, from_vec_f32);
+impl_as_primitive_bf16_from!(u64, from_vec_f32);
+impl_as_primitive_bf16_from!(i8, from_vec_f32);
+impl_as_primitive_bf16_from!(u8, from_vec_f32);
+impl_as_primitive_bf16_from!(i16, from_vec_f32);
+impl_as_primitive_bf16_from!(u16, from_vec_f32);
+impl_as_primitive_bf16_from!(i32, from_vec_f32);
+impl_as_primitive_bf16_from!(u32, from_vec_f32);
+impl_as_primitive_bf16_from!(isize, from_vec_f32);
+impl_as_primitive_bf16_from!(usize, from_vec_f32);
+impl_as_primitive_bf16_from!(f32, from_vec_f32);
 impl_as_primitive_bf16_from!(f64, from_f64);
 
 impl ToBytes for bf16 {

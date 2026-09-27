@@ -126,7 +126,7 @@ impl crate::Literal {
             (value, crate::ScalarKind::Float, 8) => Some(Self::F64(value as _)),
             (value, crate::ScalarKind::Float, 4) => Some(Self::F32(value as _)),
             (value, crate::ScalarKind::Float, 2) => {
-                Some(Self::F16(half::f16::from_f32_const(value as _)))
+                Some(Self::F16(half::f16::from_vec_f32_const(value as _)))
             }
             (value, crate::ScalarKind::Uint, 2) => Some(Self::U16(value as _)),
             (value, crate::ScalarKind::Sint, 2) => Some(Self::I16(value as _)),
@@ -154,7 +154,7 @@ impl crate::Literal {
         match (scalar.kind, scalar.width) {
             (crate::ScalarKind::Float, 8) => Some(Self::F64(-1.0)),
             (crate::ScalarKind::Float, 4) => Some(Self::F32(-1.0)),
-            (crate::ScalarKind::Float, 2) => Some(Self::F16(half::f16::from_f32_const(-1.0))),
+            (crate::ScalarKind::Float, 2) => Some(Self::F16(half::f16::from_vec_f32_const(-1.0))),
             (crate::ScalarKind::Sint, 8) => Some(Self::I64(-1)),
             (crate::ScalarKind::Sint, 4) => Some(Self::I32(-1)),
             (crate::ScalarKind::Sint, 2) => Some(Self::I16(-1)),

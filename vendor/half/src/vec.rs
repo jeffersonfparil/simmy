@@ -28,10 +28,10 @@ pub trait HalfFloatVecExt: private::SealedHalfFloatVec {
     ///
     /// ```rust
     /// # use half::prelude::*;
-    /// let float_buffer = vec![f16::from_f32(1.), f16::from_f32(2.), f16::from_f32(3.)];
+    /// let float_buffer = vec![f16::from_vec_f32(1.), f16::from_vec_f32(2.), f16::from_vec_f32(3.)];
     /// let int_buffer = float_buffer.reinterpret_into();
     ///
-    /// assert_eq!(int_buffer, [f16::from_f32(1.).to_bits(), f16::from_f32(2.).to_bits(), f16::from_f32(3.).to_bits()]);
+    /// assert_eq!(int_buffer, [f16::from_vec_f32(1.).to_bits(), f16::from_vec_f32(2.).to_bits(), f16::from_vec_f32(3.).to_bits()]);
     /// ```
     #[must_use]
     fn reinterpret_into(self) -> Vec<u16>;
@@ -47,12 +47,12 @@ pub trait HalfFloatVecExt: private::SealedHalfFloatVec {
     /// ```rust
     /// # use half::prelude::*;
     /// let float_values = [1., 2., 3., 4.];
-    /// let vec: Vec<f16> = Vec::from_f32_slice(&float_values);
+    /// let vec: Vec<f16> = Vec::from_vec_f32_slice(&float_values);
     ///
-    /// assert_eq!(vec, vec![f16::from_f32(1.), f16::from_f32(2.), f16::from_f32(3.), f16::from_f32(4.)]);
+    /// assert_eq!(vec, vec![f16::from_vec_f32(1.), f16::from_vec_f32(2.), f16::from_vec_f32(3.), f16::from_vec_f32(4.)]);
     /// ```
     #[must_use]
-    fn from_f32_slice(slice: &[f32]) -> Self;
+    fn from_vec_f32_slice(slice: &[f32]) -> Self;
 
     /// Converts all of the elements of a `[f64]` slice into a new [`struct@f16`] or [`bf16`] vector.
     ///
@@ -88,10 +88,10 @@ pub trait HalfBitsVecExt: private::SealedHalfBitsVec {
     ///
     /// ```rust
     /// # use half::prelude::*;
-    /// let int_buffer = vec![f16::from_f32(1.).to_bits(), f16::from_f32(2.).to_bits(), f16::from_f32(3.).to_bits()];
+    /// let int_buffer = vec![f16::from_vec_f32(1.).to_bits(), f16::from_vec_f32(2.).to_bits(), f16::from_vec_f32(3.).to_bits()];
     /// let float_buffer = int_buffer.reinterpret_into::<f16>();
     ///
-    /// assert_eq!(float_buffer, [f16::from_f32(1.), f16::from_f32(2.), f16::from_f32(3.)]);
+    /// assert_eq!(float_buffer, [f16::from_vec_f32(1.), f16::from_vec_f32(2.), f16::from_vec_f32(3.)]);
     /// ```
     #[must_use]
     fn reinterpret_into<H>(self) -> Vec<H>
@@ -135,9 +135,9 @@ impl HalfFloatVecExt for Vec<f16> {
     }
 
     #[allow(clippy::uninit_vec)]
-    fn from_f32_slice(slice: &[f32]) -> Self {
+    fn from_vec_f32_slice(slice: &[f32]) -> Self {
         let mut vec = vec![f16::from_bits(0); slice.len()];
-        vec.convert_from_f32_slice(slice);
+        vec.convert_from_vec_f32_slice(slice);
         vec
     }
 
@@ -171,9 +171,9 @@ impl HalfFloatVecExt for Vec<bf16> {
     }
 
     #[allow(clippy::uninit_vec)]
-    fn from_f32_slice(slice: &[f32]) -> Self {
+    fn from_vec_f32_slice(slice: &[f32]) -> Self {
         let mut vec = vec![bf16::from_bits(0); slice.len()];
-        vec.convert_from_f32_slice(slice);
+        vec.convert_from_vec_f32_slice(slice);
         vec
     }
 
