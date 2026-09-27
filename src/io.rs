@@ -1432,4 +1432,67 @@ mod tests {
         assert_eq!(data1.phenotype_data.shape[0] as usize, data1.entries.len());
         assert_eq!(data1.phenotype_data.shape[1] as usize, data1.traits.len());
     }
+    #[test]
+    fn sim_phenotypes_are_approximately_normally_distributed() {
+        let ctx = context();
+        // Use a large population and sufficient loci so the Central Limit Theorem kicks in
+        let n_entries = 5000;
+        let n_loci = 200;
+        let n_traits = 1;
+        let mut data = Data::new(&ctx, n_entries, 5, n_loci, n_traits, 2, false, 42).unwrap();
+        // 100 loci with effects, mean=0.0, genetic sd=1.0, error sd=1.0
+        let params = [(100, 0.0, 1.0, 1.0)];
+        data.sim_phenotypes(&ctx, &params, 123).unwrap();
+        let phenotypes = data.phenotype_data.to_vec_f32(&ctx).unwrap();
+        assert_eq!(phenotypes.len(), n_entries);
+        // 1. Calculate Mean
+        let mean: f32 = phenotypes.iter().sum::<f32>() / (n_entries as f32);
+        // 2. Calculate Variance and Standard Deviation
+        let variance: f32 =
+            phenotypes.iter().map(|&x| (x - mean).powi(2)).sum::<f32>() / ((n_entries - 1) as f32);
+        let sd = variance.sqrt();
+        // 3. Check Empirical Rule (68-95-99.7)
+        let mut within_1_sd = 0;
+        let mut within_2_sd = 0;
+        let mut within_3_sd = 0;
+        for &p in &phenotypes {
+            let diff = (p - mean).abs();
+            if diff <= sd {
+                within_1_sd += 1;
+            }
+            if diff <= 2.0 * sd {
+                within_2_sd += 1;
+            }
+            if diff <= 3.0 * sd {
+                within_3_sd += 1;
+            }
+        }
+        let prop_1_sd = (within_1_sd as f32) / (n_entries as f32);
+        let prop_2_sd = (within_2_sd as f32) / (n_entries as f32);
+        let prop_3_sd = (within_3_sd as f32) / (n_entries as f32);
+        // Allow a +/- 4% tolerance for randomness
+        assert!(
+            (prop_1_sd - 0.6827).abs() < 0.04,
+            "Expected ~68.3% within 1 SD, got {:.2}%",
+            prop_1_sd * 100.0
+        );
+        assert!(
+            (prop_2_sd - 0.9545).abs() < 0.04,
+            "Expected ~95.5% within 2 SD, got {:.2}%",
+            prop_2_sd * 100.0
+        );
+        assert!(
+            (prop_3_sd - 0.9973).abs() < 0.02, // 3 SD is usually very close to 100%
+            "Expected ~99.7% within 3 SD, got {:.2}%",
+            prop_3_sd * 100.0
+        );
+        // 4. Check Skewness (should be near 0 for a normal distribution)
+        let skewness: f32 = phenotypes.iter().map(|&x| (x - mean).powi(3)).sum::<f32>()
+            / ((n_entries as f32) * sd.powi(3));
+        assert!(
+            skewness.abs() < 0.2,
+            "Expected symmetrical distribution (skewness near 0), got {}",
+            skewness
+        );
+    }
 }
