@@ -735,15 +735,30 @@ impl Data {
             None,
             None,
         )?;
+        // // Ploidy to divide the matrix multiplication result because we used allele dosages and we want allele frequencies and this does that essentially but with less memory as we
+        // let ploidy_tmp: Vec<f32> = vec![self.ploidy as f32; n_entries * n_traits];
+        // let ploidy: GpuTensor = GpuTensor::from_vec_f32(
+        //     ctx,
+        //     &ploidy_tmp,
+        //     &[n_entries as u32, n_traits as u32],
+        //     None,
+        //     None,
+        // )?;
         // Update the phenotype data
-        // TODO:rectify contraction, i.e. like matrix multiplication for these 3D tensors...
         let kernel = GpuKernel::new(ctx);
-        self.phenotype_data = kernel.contract(
+        let y0 = kernel.contract(
             &self
                 .genotype_data
                 .slice_view(&[(0, n_entries), (0, n_loci_alleles), (0, 1)])?,
             &effects,
         )?;
+        let y1 = kernel.contract(
+            &self
+                .genotype_data
+                .slice_view(&[(0, n_entries), (0, n_loci_alleles), (1, 2)])?,
+            &effects,
+        )?;
+        self.phenotype_data = kernel.div_scalar(&kernel.add(&y0, &y1)?, self.ploidy as f32)?;
         self.phenotype_data = kernel.add(&self.phenotype_data, &errors)?;
         // Output in addition to the mutated phenotype data tensor
         Ok(effects)

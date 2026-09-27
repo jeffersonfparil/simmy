@@ -1,6 +1,8 @@
 use crate::linalg::kernel::{GpuKernel, Params};
 use crate::linalg::operations::Operation;
-use crate::linalg::params::{BinaryMatrixParams, ContractMatrixParams, UnaryMatrixParams};
+use crate::linalg::params::{
+    BinaryMatrixParams, ContractMatrixParams, ScalarMatrixParams, UnaryMatrixParams,
+};
 use crate::linalg::tensor::GpuTensor;
 use anyhow::{Result, ensure};
 
@@ -61,6 +63,33 @@ impl GpuTensor {
             op: op.binary_opcode()?,
         };
         Ok(Params::BinaryMatrix(params))
+    }
+
+    pub fn params_scalar_matrix(&self, b: f32, op: Operation) -> Result<Params> {
+        ensure!(self.shape.len() == 2, "A must be rank 2!");
+        let params = ScalarMatrixParams {
+            // Number of rows in `A` and `C`.
+            n: self.shape[0],
+            // Number of columns in `A` and `C`.
+            p: self.shape[1],
+            // Starting element of `A` within its backing storage.
+            a_offset: self.offset,
+            // Storage stride between rows of `A`.
+            a_row_stride: self.strides[0],
+            // Storage stride between columns of `A`.
+            a_col_stride: self.strides[1],
+            // Scalar used for operations on A
+            b,
+            // Starting element of `C` within its backing storage.
+            c_offset: 0,
+            // Storage stride between rows of `C`.
+            c_row_stride: self.shape[1],
+            // Storage stride between columns of `C`.
+            c_col_stride: 1,
+            // Mathematical operation: op(A, B) -> C (see operations.rs & wgsl/opcodes.wgsl).
+            op: op.binary_opcode()?,
+        };
+        Ok(Params::ScalarMatrix(params))
     }
 
     pub fn params_contract_matrix(
@@ -177,6 +206,50 @@ impl GpuKernel<'_> {
     }
     pub fn ge_matrix(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {
         self.execute_kernel(a.params_binary_matrix(b, Operation::GE)?, a, Some(b))
+    }
+
+    // Scalar x Matrix
+    pub fn add_scalar_matrix(&self, a: &GpuTensor, b: f32) -> Result<GpuTensor> {
+        self.execute_kernel(a.params_scalar_matrix(b, Operation::ADD)?, a, None)
+    }
+    pub fn sub_scalar_matrix(&self, a: &GpuTensor, b: f32) -> Result<GpuTensor> {
+        self.execute_kernel(a.params_scalar_matrix(b, Operation::SUB)?, a, None)
+    }
+    pub fn mul_scalar_matrix(&self, a: &GpuTensor, b: f32) -> Result<GpuTensor> {
+        self.execute_kernel(a.params_scalar_matrix(b, Operation::MUL)?, a, None)
+    }
+    pub fn div_scalar_matrix(&self, a: &GpuTensor, b: f32) -> Result<GpuTensor> {
+        self.execute_kernel(a.params_scalar_matrix(b, Operation::DIV)?, a, None)
+    }
+    pub fn min_scalar_matrix(&self, a: &GpuTensor, b: f32) -> Result<GpuTensor> {
+        self.execute_kernel(a.params_scalar_matrix(b, Operation::MIN)?, a, None)
+    }
+    pub fn max_scalar_matrix(&self, a: &GpuTensor, b: f32) -> Result<GpuTensor> {
+        self.execute_kernel(a.params_scalar_matrix(b, Operation::MAX)?, a, None)
+    }
+    pub fn pow_scalar_matrix(&self, a: &GpuTensor, b: f32) -> Result<GpuTensor> {
+        self.execute_kernel(a.params_scalar_matrix(b, Operation::POW)?, a, None)
+    }
+    pub fn atan2_scalar_matrix(&self, a: &GpuTensor, b: f32) -> Result<GpuTensor> {
+        self.execute_kernel(a.params_scalar_matrix(b, Operation::ATAN2)?, a, None)
+    }
+    pub fn eq_scalar_matrix(&self, a: &GpuTensor, b: f32) -> Result<GpuTensor> {
+        self.execute_kernel(a.params_scalar_matrix(b, Operation::EQ)?, a, None)
+    }
+    pub fn ne_scalar_matrix(&self, a: &GpuTensor, b: f32) -> Result<GpuTensor> {
+        self.execute_kernel(a.params_scalar_matrix(b, Operation::NE)?, a, None)
+    }
+    pub fn lt_scalar_matrix(&self, a: &GpuTensor, b: f32) -> Result<GpuTensor> {
+        self.execute_kernel(a.params_scalar_matrix(b, Operation::LT)?, a, None)
+    }
+    pub fn le_scalar_matrix(&self, a: &GpuTensor, b: f32) -> Result<GpuTensor> {
+        self.execute_kernel(a.params_scalar_matrix(b, Operation::LE)?, a, None)
+    }
+    pub fn gt_scalar_matrix(&self, a: &GpuTensor, b: f32) -> Result<GpuTensor> {
+        self.execute_kernel(a.params_scalar_matrix(b, Operation::GT)?, a, None)
+    }
+    pub fn ge_scalar_matrix(&self, a: &GpuTensor, b: f32) -> Result<GpuTensor> {
+        self.execute_kernel(a.params_scalar_matrix(b, Operation::GE)?, a, None)
     }
 
     // Matrix multiplication (MUL --> ADD)

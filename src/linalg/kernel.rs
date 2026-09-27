@@ -1,7 +1,7 @@
 use crate::linalg::context::GpuContext;
 use crate::linalg::params::{
     BinaryMatrixParams, BinaryTensorParams, ContractMatrixParams, ContractTensorParams,
-    UnaryMatrixParams, UnaryTensorParams,
+    ScalarMatrixParams, ScalarTensorParams, UnaryMatrixParams, UnaryTensorParams,
 };
 use crate::linalg::tensor::GpuTensor;
 use anyhow::{Result, ensure};
@@ -27,9 +27,11 @@ pub enum Params {
     UnaryMatrix(UnaryMatrixParams),
     BinaryMatrix(BinaryMatrixParams),
     ContractMatrix(ContractMatrixParams),
+    ScalarMatrix(ScalarMatrixParams),
     UnaryTensor(UnaryTensorParams),
     BinaryTensor(BinaryTensorParams),
     ContractTensor(ContractTensorParams),
+    ScalarTensor(ScalarTensorParams),
 }
 
 impl GpuKernel<'_> {
@@ -47,6 +49,9 @@ impl GpuKernel<'_> {
             ensure!(b.is_none(), "The b matrix should be None!");
         } else {
             ensure!(!b.is_none(), "The b matrix should be supplied!");
+        }
+        if matches!(&params, Params::ScalarMatrix(..) | Params::ScalarTensor(..)) {
+            ensure!(b.is_none(), "The b matrix should be None!");
         }
         let (params_buffer, c_shape) = match &params {
             Params::UnaryMatrix(par) => (
@@ -74,6 +79,22 @@ impl GpuKernel<'_> {
                 &a.shape,
             ),
             Params::BinaryTensor(par) => (
+                self.ctx.device.create_buffer_init(&BufferInitDescriptor {
+                    label: Some("params"),
+                    contents: bytemuck::bytes_of(par),
+                    usage: wgpu::BufferUsages::STORAGE,
+                }),
+                &a.shape,
+            ),
+            Params::ScalarMatrix(par) => (
+                self.ctx.device.create_buffer_init(&BufferInitDescriptor {
+                    label: Some("params"),
+                    contents: bytemuck::bytes_of(par),
+                    usage: wgpu::BufferUsages::STORAGE,
+                }),
+                &a.shape,
+            ),
+            Params::ScalarTensor(par) => (
                 self.ctx.device.create_buffer_init(&BufferInitDescriptor {
                     label: Some("params"),
                     contents: bytemuck::bytes_of(par),
@@ -112,12 +133,15 @@ impl GpuKernel<'_> {
             Params::UnaryTensor(_) => &self.ctx.unary_tensor_pipeline,
             Params::BinaryMatrix(_) => &self.ctx.binary_matrix_pipeline,
             Params::BinaryTensor(_) => &self.ctx.binary_tensor_pipeline,
+            Params::ScalarMatrix(_) => &self.ctx.scalar_matrix_pipeline,
+            Params::ScalarTensor(_) => &self.ctx.scalar_tensor_pipeline,
             Params::ContractMatrix(_) => &self.ctx.contract_matrix_pipeline,
             Params::ContractTensor(_) => &self.ctx.contract_tensor_pipeline,
         };
-        let bind_group = match &params {
-            Params::UnaryMatrix(_) | Params::UnaryTensor(_) => {
-                self.ctx
+        let bind_group =
+            match &params {
+                Params::UnaryMatrix(_) | Params::UnaryTensor(_) => self
+                    .ctx
                     .device
                     .create_bind_group(&wgpu::BindGroupDescriptor {
                         label: Some("bind-group"),
@@ -136,37 +160,57 @@ impl GpuKernel<'_> {
                                 resource: params_buffer.as_entire_binding(),
                             },
                         ],
-                    })
-            }
-            _ => self
-                .ctx
-                .device
-                .create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("bind-group"),
-                    layout: &pipeline.get_bind_group_layout(0),
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: a.buffer.as_entire_binding(),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: b
-                                .expect("Validated to exist for non-unary kernels!")
-                                .buffer
-                                .as_entire_binding(),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 2,
-                            resource: c_buffer.as_entire_binding(),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 3,
-                            resource: params_buffer.as_entire_binding(),
-                        },
-                    ],
-                }),
-        };
+                    }),
+                Params::ScalarMatrix(_) | Params::ScalarTensor(_) => self
+                    .ctx
+                    .device
+                    .create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("bind-group"),
+                        layout: &pipeline.get_bind_group_layout(0),
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: a.buffer.as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: c_buffer.as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 2,
+                                resource: params_buffer.as_entire_binding(),
+                            },
+                        ],
+                    }),
+                _ => self
+                    .ctx
+                    .device
+                    .create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("bind-group"),
+                        layout: &pipeline.get_bind_group_layout(0),
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: a.buffer.as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: b
+                                    .expect("Validated to exist for non-unary kernels!")
+                                    .buffer
+                                    .as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 2,
+                                resource: c_buffer.as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 3,
+                                resource: params_buffer.as_entire_binding(),
+                            },
+                        ],
+                    }),
+            };
         let mut encoder = self
             .ctx
             .device
@@ -310,7 +354,7 @@ mod tests {
         let a = GpuTensor::from_vec_f32(&ctx, &[1.0, 2.0, 3.0, 4.0], &[2, 2], None, None)?;
         let b = GpuTensor::from_vec_f32(&ctx, &[5.0, 6.0, 7.0, 8.0], &[2, 2], None, None)?;
         assert!(
-            ops.execute_kernel(unary_matrix_params(OP_ABS), &a, Some(&b),)
+            ops.execute_kernel(unary_matrix_params(OP_ABS), &a, Some(&b))
                 .is_err()
         );
         Ok(())
@@ -321,7 +365,7 @@ mod tests {
         let ops = ops(&ctx);
         let a = GpuTensor::from_vec_f32(&ctx, &[1.0, 2.0, 3.0, 4.0], &[2, 2], None, None)?;
         assert!(
-            ops.execute_kernel(binary_matrix_params(OP_ADD), &a, None,)
+            ops.execute_kernel(binary_matrix_params(OP_ADD), &a, None)
                 .is_err()
         );
         Ok(())
@@ -585,7 +629,7 @@ mod tests {
         let a = GpuTensor::from_vec_f32(&ctx, &[1.0; 8], &[2, 2, 2], None, None)?;
         let b = GpuTensor::from_vec_f32(&ctx, &[2.0; 8], &[2, 2, 2], None, None)?;
         assert!(
-            ops.execute_kernel(unary_tensor_params(OP_ABS), &a, Some(&b),)
+            ops.execute_kernel(unary_tensor_params(OP_ABS), &a, Some(&b))
                 .is_err()
         );
         Ok(())
