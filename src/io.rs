@@ -431,7 +431,8 @@ pub fn sim_genotype_data(
                     Sex::Homogametic => {
                         // Homogametic individuals (e.g. XX or ZZ):
                         genotype_data_tmp[idx_entry + (2 * idx_allele_1)] += (ploidy / 2) as f32;
-                        genotype_data_tmp[idx_entry + (2 * idx_allele_1) + 1] += (ploidy / 2) as f32;
+                        genotype_data_tmp[idx_entry + (2 * idx_allele_1) + 1] +=
+                            (ploidy / 2) as f32;
                         genotype_data_tmp[idx_entry + (2 * idx_allele_2)] += 0.0;
                         genotype_data_tmp[idx_entry + (2 * idx_allele_2) + 1] += 0.0;
                     }
@@ -440,7 +441,8 @@ pub fn sim_genotype_data(
                         genotype_data_tmp[idx_entry + (2 * idx_allele_1)] += (ploidy / 2) as f32;
                         genotype_data_tmp[idx_entry + (2 * idx_allele_1) + 1] += 0.0;
                         genotype_data_tmp[idx_entry + (2 * idx_allele_2)] += 0.0;
-                        genotype_data_tmp[idx_entry + (2 * idx_allele_2) + 1] += (ploidy / 2) as f32;
+                        genotype_data_tmp[idx_entry + (2 * idx_allele_2) + 1] +=
+                            (ploidy / 2) as f32;
                     }
                     Sex::Hermaphrodite => bail!(
                         "Hermaphrodite sexes are not expected because we have sex chromosomes!"
@@ -470,10 +472,12 @@ pub fn sim_genotype_to_phenotype_map(
     let n_traits: usize = traits.len();
 
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
-    let unif_p: Uniform<usize> = Uniform::new(1, n_loci).expect("Error initialising uniform distribution for number of loci with effects!");
+    let unif_p: Uniform<usize> = Uniform::new(1, n_loci)
+        .expect("Error initialising uniform distribution for number of loci with effects!");
     let unif_eff_mu: Uniform<f32> = Uniform::new(-1.0, 1.0).expect("Error initialising uniform distribution for the mean of normally distributed allele effects!");
     let unif_eff_sd: Uniform<f32> = Uniform::new(1.0, 5.0).expect("Error initialising uniform distribution for the standard deviation of normally distributed allele effects!");
-    let unif_h2: Uniform<f32> = Uniform::new(f32::EPSILON, 1.0).expect("Error initialising uniform distribution for the trait hertabilities!");
+    let unif_h2: Uniform<f32> = Uniform::new(f32::EPSILON, 1.0)
+        .expect("Error initialising uniform distribution for the trait hertabilities!");
 
     let mut heritabilities: Vec<f32> = Vec::with_capacity(n_traits);
     let mut allele_effects_tmp: Vec<f32> = vec![0.0; n_loci_alleles * n_traits];
@@ -499,7 +503,7 @@ pub fn sim_genotype_to_phenotype_map(
         None,
         None,
     )?;
-    Ok(MapperG2P{
+    Ok(MapperG2P {
         genome: genome.to_owned(),
         loci: loci.to_owned(),
         traits: traits.to_owned(),
@@ -519,7 +523,7 @@ pub fn calc_phenotypes(
     let n_loci_alleles: usize = genotype_data.shape[1] as usize;
     let n_traits: usize = mapper.allele_effects.shape[1] as usize;
     ensure!(
-        n_loci_alleles == mapper.loci.iter().map(|x| x.col_idx.len()).sum() as usize,
+        n_loci_alleles == mapper.loci.iter().map(|x| x.col_idx.len()).sum::<usize>(),
         "The number of loci-alleles do not match between genotype_data and mapper loci!"
     );
     ensure!(
@@ -547,21 +551,17 @@ pub fn calc_phenotypes(
         &genotype_data.slice_view(&[(0, n_entries), (0, n_loci_alleles), (1, 2)])?,
         &mapper.allele_effects,
     )?;
-    let y: GpuTensor = kernel.div_scalar(
-        &kernel.add(
-            &y0, 
-            &y1
-        )?, 
-        ploidy as f32
-    )?;
+    let y: GpuTensor = kernel.div_scalar(&kernel.add(&y0, &y1)?, ploidy as f32)?;
     // Simulate error effects dependin on trait heritabilities
     let mut errors_tmp: Vec<f32> = vec![0.0; n_entries * n_traits];
     for (j, &h2) in mapper.heritabilities.iter().enumerate() {
-        let y_j = y.slice_view(&[(0, n_entries), (j, j+1)])?.to_vec_f32(ctx)?;
+        let y_j = y
+            .slice_view(&[(0, n_entries), (j, j + 1)])?
+            .to_vec_f32(ctx)?;
         let n = y_j.len() as f32;
         let u = y_j.iter().sum::<f32>() / n;
-        let var_y_j = y_j.iter().map(|&x| (u-x).powi(2)).sum::<f32>() / n;
-        let sd_err = (var_y_j * ((1.00/h2) - 1.00)).sqrt() + f32::EPSILON;
+        let var_y_j = y_j.iter().map(|&x| (u - x).powi(2)).sum::<f32>() / n;
+        let sd_err = (var_y_j * ((1.00 / h2) - 1.00)).sqrt() + f32::EPSILON;
         let normal: Normal<f32> =
             Normal::new(0.0, sd_err).expect("Error initialising a standard normal distribution!");
         for i in 0..n_entries {
@@ -577,10 +577,7 @@ pub fn calc_phenotypes(
         None,
     )?;
     // Add in the standard normal errors
-    kernel.add(
-        &y, 
-        &errors
-    )
+    kernel.add(&y, &errors)
 }
 
 pub fn sim_phenotype_data(
@@ -616,20 +613,32 @@ impl Data {
         let sexes = sim_sexes(n_entries, with_sex, seed + 1)?;
         let loci = sim_loci(&genome, n_loci, seed + 2)?;
         let haplotype_persistence_probs = haplotype_persistence_probabilities(&genome, &loci)?;
-        let genotype_data = sim_genotype_data(ctx, &entries, &genome, &loci, &sexes, ploidy, seed + 3)?;
-        let (phenotype_data, mapper) = sim_phenotype_data(ctx, &genome, &loci, &genotype_data, &traits, ploidy, seed + 4)?;
-        // Output
-        Ok((Self {
-            entries,
+        let genotype_data =
+            sim_genotype_data(ctx, &entries, &genome, &loci, &sexes, ploidy, seed + 3)?;
+        let (phenotype_data, mapper) = sim_phenotype_data(
+            ctx,
+            &genome,
+            &loci,
+            &genotype_data,
+            &traits,
             ploidy,
-            sexes,
-            genome,
-            loci,
-            haplotype_persistence_probs,
-            traits,
-            genotype_data,
-            phenotype_data,
-        }, mapper))
+            seed + 4,
+        )?;
+        // Output
+        Ok((
+            Self {
+                entries,
+                ploidy,
+                sexes,
+                genome,
+                loci,
+                haplotype_persistence_probs,
+                traits,
+                genotype_data,
+                phenotype_data,
+            },
+            mapper,
+        ))
     }
     pub fn check_dimensions(&self) -> Result<()> {
         let n_entries: usize = self.entries.len();
@@ -747,12 +756,20 @@ impl Data {
     ) -> Result<Self> {
         self.check_dimensions()?;
         let n_offsprings = mating_pairs.len();
-        let n_traits = self.traits.len();
         let n_loci = self.loci.len();
         let n_loci_alleles = self.loci.iter().fold(0, |sum, x| sum + x.col_idx.len());
-        ensure!(self.genome == mapper.genome, "The genome of self and mapper do not match!");
-        ensure!(self.loci == mapper.loci, "The loci of self and mapper do not match!");
-        ensure!(self.traits == mapper.traits, "The traits of self and mapper do not match!");
+        ensure!(
+            self.genome == mapper.genome,
+            "The genome of self and mapper do not match!"
+        );
+        ensure!(
+            self.loci == mapper.loci,
+            "The loci of self and mapper do not match!"
+        );
+        ensure!(
+            self.traits == mapper.traits,
+            "The traits of self and mapper do not match!"
+        );
         // Locus Data
         let mut locus_data_packed = Vec::with_capacity(n_loci);
         for j in 0..n_loci {
@@ -904,7 +921,8 @@ impl Data {
             None,
             None,
         )?;
-        offsprings.phenotype_data = calc_phenotypes(ctx, &offsprings.genotype_data, &mapper, self.ploidy, seed)?;
+        offsprings.phenotype_data =
+            calc_phenotypes(ctx, &offsprings.genotype_data, &mapper, self.ploidy, seed)?;
         Ok(offsprings)
     }
     pub fn sim_population() {
