@@ -185,7 +185,7 @@ impl GpuContext {
             .await
             .context("No adapter")?;
         // let (device, queue) = adapter.request_device(&Default::default()).await?;
-        let supported = adapter.limits();
+        let supported = adapter.limits(); // May be limited to just 4 storage buffers!
         let required_limits = wgpu::Limits {
             max_color_attachments: supported.max_color_attachments,
             ..wgpu::Limits::downlevel_defaults()

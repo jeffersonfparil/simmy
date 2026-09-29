@@ -106,7 +106,7 @@ fn parse_tensor_params(
     );
     let offset: u32 = offset.unwrap_or(0);
     ensure!(n > offset, "The offset must range from 0 to {}", n - 1);
-    let required_len = if shape.is_empty() | shape.contains(&0) {
+    let required_len = if shape.is_empty() || shape.contains(&0) {
         0
     } else {
         offset

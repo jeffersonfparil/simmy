@@ -33,9 +33,9 @@ pub async fn run() -> Result<()> {
     // let c = ops.multiply(&a, &b)?;
     // println!("c: {}", c);
 
-    let n_entries = 5000;
-    let n_loci = 200;
-    let n_traits = 2;
+    // let n_entries = 5000;
+    // let n_loci = 200;
+    // let n_traits = 2;
     // let mut rng = ChaCha8Rng::seed_from_u64(42);
     // let range =
     //     Uniform::new(n_loci / 10, n_loci / 2).expect("Failed to initialise uniform distribution!");
