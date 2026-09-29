@@ -33,6 +33,13 @@ pub struct Locus {
     pub col_idx: Vec<usize>, // The column indices in the main genotype tensor, each referring to an allele
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Sex {
+    Hermaphrodite,
+    Homogametic,
+    Heterogametic,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Trait {
     pub name: String,
@@ -46,13 +53,6 @@ pub struct Trait {
 //     pub group: String,
 //     pub notes: String,
 // }
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Sex {
-    Hermaphrodite,
-    Homogametic,
-    Heterogametic,
-}
 
 #[derive(Debug)]
 pub struct Dataset {
@@ -237,40 +237,6 @@ pub fn sim_genome(n_chromosomes: usize, with_sex: bool) -> Result<Vec<Chromosome
     Ok(genome)
 }
 
-pub fn sim_traits(n_traits: usize) -> Result<Vec<Trait>> {
-    ensure!(
-        n_traits > 0,
-        "The number of traits need to be greater than zero!"
-    );
-    let mut traits: Vec<Trait> = Vec::with_capacity(n_traits);
-    let n_digits: usize = format!("{}", n_traits).len();
-    for i in 0..n_traits {
-        traits.push(Trait {
-            name: format!("trait_{:0>n_digits$}", i),
-            description: "".to_owned(),
-        });
-    }
-    Ok(traits)
-}
-
-pub fn sim_sexes(n_entries: usize, with_sex: bool, seed: u64) -> Result<Vec<Sex>> {
-    let mut sexes: Vec<Sex> = Vec::with_capacity(n_entries);
-    let mut rng = ChaCha8Rng::seed_from_u64(seed);
-    for _ in 0..n_entries {
-        let sex = if !with_sex {
-            Sex::Hermaphrodite
-        } else {
-            if rng.random_bool(0.5) {
-                Sex::Homogametic
-            } else {
-                Sex::Heterogametic
-            }
-        };
-        sexes.push(sex);
-    }
-    Ok(sexes)
-}
-
 pub fn sim_loci(genome: &[Chromosome], n_loci: usize, seed: u64) -> Result<Vec<Locus>> {
     ensure!(
         n_loci > 0,
@@ -367,6 +333,24 @@ pub fn haplotype_persistence_probabilities(
         haplotype_persistence_probs.push(r);
     }
     Ok(haplotype_persistence_probs)
+}
+
+pub fn sim_sexes(n_entries: usize, with_sex: bool, seed: u64) -> Result<Vec<Sex>> {
+    let mut sexes: Vec<Sex> = Vec::with_capacity(n_entries);
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    for _ in 0..n_entries {
+        let sex = if !with_sex {
+            Sex::Hermaphrodite
+        } else {
+            if rng.random_bool(0.5) {
+                Sex::Homogametic
+            } else {
+                Sex::Heterogametic
+            }
+        };
+        sexes.push(sex);
+    }
+    Ok(sexes)
 }
 
 pub fn sim_genotype_data(
@@ -490,6 +474,22 @@ pub fn sim_genotype_data(
         None,
         None,
     )
+}
+
+pub fn sim_traits(n_traits: usize) -> Result<Vec<Trait>> {
+    ensure!(
+        n_traits > 0,
+        "The number of traits need to be greater than zero!"
+    );
+    let mut traits: Vec<Trait> = Vec::with_capacity(n_traits);
+    let n_digits: usize = format!("{}", n_traits).len();
+    for i in 0..n_traits {
+        traits.push(Trait {
+            name: format!("trait_{:0>n_digits$}", i),
+            description: "".to_owned(),
+        });
+    }
+    Ok(traits)
 }
 
 pub fn sim_genotype_to_phenotype_map(
