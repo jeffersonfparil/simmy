@@ -63,19 +63,11 @@ pub struct Data {
     pub phenotype_data: GpuTensor, // 2D tensor with shape: n_entries x n_traits (additionally monogametic = 0.0 and heterogametic = 1.0)
 }
 
-#[derive(Debug)]
-pub struct MapperG2P {
-    pub genome: Vec<Chromosome>,
-    pub loci: Vec<Locus>,
-    pub traits: Vec<Trait>,
-    pub heritabilities: Vec<f32>,
-    pub allele_effects: GpuTensor,
-}
-
 impl fmt::Display for Data {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let n_loci_alleles: usize = self.loci.iter().map(|l| l.col_idx.len()).sum();
-        writeln!(f, "Data")?;
+        writeln!(f, "------------------------")?;
+        writeln!(f, "Data struct")?;
+        writeln!(f, "------------------------")?;
         writeln!(f, "\t- Entries: {}", self.entries.len())?;
         writeln!(f, "\t- Ploidy: {}X (always even ploidy)", self.ploidy)?;
         writeln!(f, "\t- Sex:")?;
@@ -105,7 +97,11 @@ impl fmt::Display for Data {
         )?;
         writeln!(f, "\t- Chromosomes: {}", self.genome.len())?;
         writeln!(f, "\t- Loci: {}", self.loci.len())?;
-        writeln!(f, "\t- Locus Alleles: {}", n_loci_alleles)?;
+        writeln!(
+            f,
+            "\t- Locus Alleles: {}",
+            self.loci.iter().map(|l| l.col_idx.len()).sum::<usize>()
+        )?;
         writeln!(f, "\t- Haplotype persistence probability")?;
         writeln!(
             f,
@@ -114,13 +110,45 @@ impl fmt::Display for Data {
         )?;
         writeln!(f, "\t- Traits: {}", self.traits.len())?;
         writeln!(f, "\t  ---------------------------------")?;
-        writeln!(f, "\t- Genotype Tensor Shape: {}", self.genotype_data)?;
+        writeln!(f, "\t- Genotype Tensor: {}", self.genotype_data)?;
         writeln!(f, "\t  ---------------------------------")?;
-        writeln!(f, "\t- Phenotype Tensor Shape: {}", self.phenotype_data)?;
+        writeln!(f, "\t- Phenotype Tensor: {}", self.phenotype_data)?;
         writeln!(f, "\t  ---------------------------------")?;
         Ok(())
     }
 }
+
+#[derive(Debug)]
+pub struct MapperG2P {
+    pub genome: Vec<Chromosome>,
+    pub loci: Vec<Locus>,
+    pub traits: Vec<Trait>,
+    pub heritabilities: Vec<f32>,
+    pub allele_effects: GpuTensor,
+}
+
+impl fmt::Display for MapperG2P {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "------------------------")?;
+        writeln!(f, "MapperG2P struct")?;
+        writeln!(f, "------------------------")?;
+        writeln!(f, "\t- Chromosomes: {}", self.genome.len())?;
+        writeln!(f, "\t- Loci: {}", self.loci.len())?;
+        writeln!(
+            f,
+            "\t- Locus Alleles: {}",
+            self.loci.iter().map(|l| l.col_idx.len()).sum::<usize>()
+        )?;
+        writeln!(f, "\t- Traits: {}", self.traits.len())?;
+        writeln!(f, "\t- Heritabilities: {}", self.heritabilities.len())?;
+        writeln!(f, "\t  ---------------------------------")?;
+        writeln!(f, "\t- Allele effects: {}", self.allele_effects)?;
+        writeln!(f, "\t  ---------------------------------")?;
+        Ok(())
+    }
+}
+
+// Helper structs for meiosis.wgl
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
