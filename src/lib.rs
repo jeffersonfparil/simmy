@@ -1,4 +1,4 @@
-pub mod entries;
+pub mod entry;
 pub mod io;
 pub mod linalg;
 

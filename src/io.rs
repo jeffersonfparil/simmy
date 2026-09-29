@@ -1,7 +1,7 @@
-use crate::entries::*;
-// use crate::genotypes::*;
-// use crate::phenotypes::*;
-// use crate::datasets::*;
+use crate::entry::*;
+// use crate::genotype::*;
+// use crate::phenotype::*;
+// use crate::dataset::*;
 use crate::linalg::context::GpuContext;
 use crate::linalg::kernel::GpuKernel;
 use crate::linalg::tensor::GpuTensor;
