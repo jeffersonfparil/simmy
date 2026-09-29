@@ -1,3 +1,7 @@
+use crate::entries::*;
+// use crate::genotypes::*;
+// use crate::phenotypes::*;
+// use crate::datasets::*;
 use crate::linalg::context::GpuContext;
 use crate::linalg::kernel::GpuKernel;
 use crate::linalg::tensor::GpuTensor;
@@ -35,13 +39,13 @@ pub struct Trait {
     pub description: String,
 }
 
-#[derive(Debug, Clone)]
-pub struct Entry {
-    pub name: String,
-    pub species: String,
-    pub group: String,
-    pub notes: String,
-}
+// #[derive(Debug, Clone)]
+// pub struct Entry {
+//     pub name: String,
+//     pub species: String,
+//     pub group: String,
+//     pub notes: String,
+// }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Sex {
@@ -51,7 +55,7 @@ pub enum Sex {
 }
 
 #[derive(Debug)]
-pub struct Data {
+pub struct Dataset {
     pub entries: Vec<Entry>,
     pub ploidy: usize,
     pub sexes: Vec<Sex>,
@@ -63,10 +67,10 @@ pub struct Data {
     pub phenotype_data: GpuTensor, // 2D tensor with shape: n_entries x n_traits (additionally monogametic = 0.0 and heterogametic = 1.0)
 }
 
-impl fmt::Display for Data {
+impl fmt::Display for Dataset {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "------------------------")?;
-        writeln!(f, "Data struct")?;
+        writeln!(f, "Dataset struct")?;
         writeln!(f, "------------------------")?;
         writeln!(f, "\t- Entries: {}", self.entries.len())?;
         writeln!(f, "\t- Ploidy: {}X (always even ploidy)", self.ploidy)?;
@@ -197,23 +201,23 @@ struct WGSLLocusData {
     metadata: u32,
 }
 
-pub fn sim_entries(n_entries: usize) -> Result<Vec<Entry>> {
-    ensure!(
-        n_entries > 0,
-        "The number of entries need to be greater than zero!"
-    );
-    let mut entries: Vec<Entry> = Vec::with_capacity(n_entries);
-    let n_digits: usize = format!("{}", n_entries - 1).len();
-    for i in 0..n_entries {
-        entries.push(Entry {
-            name: format!("entry_{:0>n_digits$}", i),
-            species: "".to_owned(),
-            group: "".to_owned(),
-            notes: "".to_owned(),
-        });
-    }
-    Ok(entries)
-}
+// pub fn sim_entries(n_entries: usize) -> Result<Vec<Entry>> {
+//     ensure!(
+//         n_entries > 0,
+//         "The number of entries need to be greater than zero!"
+//     );
+//     let mut entries: Vec<Entry> = Vec::with_capacity(n_entries);
+//     let n_digits: usize = format!("{}", n_entries - 1).len();
+//     for i in 0..n_entries {
+//         entries.push(Entry {
+//             name: format!("entry_{:0>n_digits$}", i),
+//             species: "".to_owned(),
+//             group: "".to_owned(),
+//             notes: "".to_owned(),
+//         });
+//     }
+//     Ok(entries)
+// }
 
 pub fn sim_genome(n_chromosomes: usize, with_sex: bool) -> Result<Vec<Chromosome>> {
     ensure!(
@@ -622,7 +626,7 @@ pub fn sim_phenotype_data(
     Ok((phenotype_data, mapper))
 }
 
-impl Data {
+impl Dataset {
     // TODO: make a computation-light init and then a founder population simulator more similar to whar we do with the `new()` method below...
     pub fn new(ctx: &GpuContext, n: usize) -> Result<Self> {
         let entries: Vec<Entry> = vec![
@@ -828,7 +832,7 @@ impl Data {
             mapper.heritabilities.len() == mapper.traits.len(),
             "The number of heritabilities does not match the number of traits in the genotype-to-phenotype mapper!"
         );
-        // Locus Data
+        // Locus data
         let mut locus_data_packed = Vec::with_capacity(n_loci);
         for j in 0..n_loci {
             let start_col = *self.loci[j].col_idx.first().unwrap() as u32;
@@ -848,7 +852,7 @@ impl Data {
                 metadata,
             });
         }
-        // Mating Pair Data
+        // Mating Pair data
         let mut pairs_data_packed = Vec::with_capacity(n_offsprings);
         for &(p1, p2) in mating_pairs.iter() {
             let sex_p1 = match self.sexes[p1] {
@@ -1059,10 +1063,10 @@ mod tests {
         x.iter().map(|v| (*v - mu).powi(3)).sum::<f32>() / ((x.len() as f32) * sd.powi(3))
     }
 
-    #[test]
-    fn sim_entries_rejects_zero() {
-        assert!(sim_entries(0).is_err());
-    }
+    // #[test]
+    // fn sim_entries_rejects_zero() {
+    //     assert!(sim_entries(0).is_err());
+    // }
 
     #[test]
     fn sim_genome_rejects_zero_chromosomes() {
@@ -1104,21 +1108,21 @@ mod tests {
     fn founder_dimensions_are_consistent() {
         let ctx = context();
 
-        let (data, _) = Data::sim_founders(&ctx, 100, 5, 100, 10, 2, true, 42).unwrap();
+        let (dataset, _) = Dataset::sim_founders(&ctx, 100, 5, 100, 10, 2, true, 42).unwrap();
 
-        assert!(data.check_dimensions().is_ok());
+        assert!(dataset.check_dimensions().is_ok());
     }
 
     #[test]
     fn genotype_tensor_shape_matches_loci() {
         let ctx = context();
 
-        let (data, _) = Data::sim_founders(&ctx, 100, 5, 100, 10, 2, true, 42).unwrap();
+        let (dataset, _) = Dataset::sim_founders(&ctx, 100, 5, 100, 10, 2, true, 42).unwrap();
 
-        let n_loci_alleles: usize = data.loci.iter().map(|x| x.col_idx.len()).sum();
+        let n_loci_alleles: usize = dataset.loci.iter().map(|x| x.col_idx.len()).sum();
 
         assert_eq!(
-            data.genotype_data.shape,
+            dataset.genotype_data.shape,
             vec![100, n_loci_alleles as u32, 2]
         );
     }
@@ -1127,18 +1131,18 @@ mod tests {
     fn phenotype_tensor_shape_matches_traits() {
         let ctx = context();
 
-        let (data, _) = Data::sim_founders(&ctx, 250, 5, 100, 7, 2, true, 42).unwrap();
+        let (dataset, _) = Dataset::sim_founders(&ctx, 250, 5, 100, 7, 2, true, 42).unwrap();
 
-        assert_eq!(data.phenotype_data.shape, vec![250, 7]);
+        assert_eq!(dataset.phenotype_data.shape, vec![250, 7]);
     }
 
     #[test]
     fn sex_vector_matches_entry_count() {
         let ctx = context();
 
-        let (data, _) = Data::sim_founders(&ctx, 500, 5, 100, 3, 2, true, 42).unwrap();
+        let (dataset, _) = Dataset::sim_founders(&ctx, 500, 5, 100, 3, 2, true, 42).unwrap();
 
-        assert_eq!(data.entries.len(), data.sexes.len());
+        assert_eq!(dataset.entries.len(), dataset.sexes.len());
     }
     ////////////////////////////////////////////////////////////////////////////////////
     ////////////////////////////////////////////////////////////////////////////////////
@@ -1147,7 +1151,7 @@ mod tests {
     fn mating_is_deterministic() {
         let ctx = context();
 
-        let (parents, mapper) = Data::sim_founders(&ctx, 100, 5, 100, 5, 2, true, 42).unwrap();
+        let (parents, mapper) = Dataset::sim_founders(&ctx, 100, 5, 100, 5, 2, true, 42).unwrap();
 
         let pairs = parents.sample_mating_pairs(50, 123).unwrap();
 
@@ -1165,7 +1169,7 @@ mod tests {
     fn offspring_sexes_contain_only_valid_categories() {
         let ctx = context();
 
-        let (parents, mapper) = Data::sim_founders(&ctx, 1000, 5, 200, 5, 2, true, 42).unwrap();
+        let (parents, mapper) = Dataset::sim_founders(&ctx, 1000, 5, 200, 5, 2, true, 42).unwrap();
 
         let pairs = parents.sample_mating_pairs(100, 123).unwrap();
 
@@ -1183,7 +1187,7 @@ mod tests {
     fn offspring_sex_ratio_is_approximately_half() {
         let ctx = context();
 
-        let (parents, mapper) = Data::sim_founders(&ctx, 2000, 5, 100, 5, 2, true, 42).unwrap();
+        let (parents, mapper) = Dataset::sim_founders(&ctx, 2000, 5, 100, 5, 2, true, 42).unwrap();
 
         let pairs = parents.sample_mating_pairs(10000, 123).unwrap();
 
@@ -1203,7 +1207,7 @@ mod tests {
     fn inferred_sex_matches_sex_locus() {
         let ctx = context();
 
-        let (parents, mapper) = Data::sim_founders(&ctx, 1000, 5, 200, 5, 2, true, 42).unwrap();
+        let (parents, mapper) = Dataset::sim_founders(&ctx, 1000, 5, 200, 5, 2, true, 42).unwrap();
 
         let pairs = parents.sample_mating_pairs(1000, 123).unwrap();
 
@@ -1260,13 +1264,13 @@ mod tests {
     fn founder_allele_frequencies_are_u_shaped() {
         let ctx = context();
 
-        let (data, _) = Data::sim_founders(&ctx, 1000, 10, 500, 1, 2, false, 42).unwrap();
+        let (dataset, _) = Dataset::sim_founders(&ctx, 1000, 10, 500, 1, 2, false, 42).unwrap();
 
-        let g = data.genotype_data.to_vec_f32(&ctx).unwrap();
+        let g = dataset.genotype_data.to_vec_f32(&ctx).unwrap();
 
-        let n_entries = data.genotype_data.shape[0] as usize;
+        let n_entries = dataset.genotype_data.shape[0] as usize;
 
-        let n_loci_alleles = data.genotype_data.shape[1] as usize;
+        let n_loci_alleles = dataset.genotype_data.shape[1] as usize;
 
         let mut freqs = Vec::new();
 
@@ -1294,9 +1298,9 @@ mod tests {
     fn phenotype_distribution_is_approximately_normal() {
         let ctx = context();
 
-        let (data, _) = Data::sim_founders(&ctx, 10000, 10, 500, 1, 2, false, 42).unwrap();
+        let (dataset, _) = Dataset::sim_founders(&ctx, 10000, 10, 500, 1, 2, false, 42).unwrap();
 
-        let y = data.phenotype_data.to_vec_f32(&ctx).unwrap();
+        let y = dataset.phenotype_data.to_vec_f32(&ctx).unwrap();
 
         let mu = mean(&y);
         let var = variance(&y);

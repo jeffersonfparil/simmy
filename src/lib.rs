@@ -1,3 +1,4 @@
+pub mod entries;
 pub mod io;
 pub mod linalg;
 
@@ -5,7 +6,7 @@ use anyhow::Result;
 use linalg::context::GpuContext;
 use linalg::tensor::GpuTensor;
 
-use crate::io::{Data, MapperG2P};
+use crate::io::{Dataset, MapperG2P};
 
 // TODO: this were CLI arguments parsing will live...
 
@@ -39,7 +40,7 @@ pub async fn run() -> Result<()> {
     let ploidy: usize = 2;
     let with_sex: bool = true;
     let seed: u64 = 4;
-    let (founders, mapper): (Data, MapperG2P) = Data::sim_founders(
+    let (founders, mapper): (Dataset, MapperG2P) = Dataset::sim_founders(
         &ctx,
         n_entries,
         n_chromosomes,
