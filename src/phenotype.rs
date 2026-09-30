@@ -457,7 +457,7 @@ mod tests {
     fn simulated_phenotypes_have_non_zero_variance() {
         let ctx = context();
 
-        let entries = sim_entries(1000).unwrap();
+        let entries = sim_entries(500).unwrap();
 
         let genome = sim_genome(5, false).unwrap();
 

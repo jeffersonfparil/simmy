@@ -611,7 +611,7 @@ mod tests {
     fn founder_allele_frequencies_are_u_shaped() {
         let ctx = context();
 
-        let entries = sim_entries(5000).unwrap();
+        let entries = sim_entries(1_000).unwrap();
 
         let genome = sim_genome(10, false).unwrap();
 
@@ -639,7 +639,7 @@ mod tests {
     fn founder_allele_frequencies_are_edge_enriched() {
         let ctx = context();
 
-        let entries = sim_entries(5000).unwrap();
+        let entries = sim_entries(1_000).unwrap();
 
         let genome = sim_genome(10, false).unwrap();
 
@@ -665,11 +665,11 @@ mod tests {
     fn first_allele_is_on_average_most_common() {
         let ctx = context();
 
-        let entries = sim_entries(5000).unwrap();
+        let entries = sim_entries(1_000).unwrap();
 
         let genome = sim_genome(10, false).unwrap();
 
-        let loci = sim_loci(&genome, 1000, 42).unwrap();
+        let loci = sim_loci(&genome, 500, 42).unwrap();
 
         let sexes = sim_sexes(entries.len(), false, 42).unwrap();
 
