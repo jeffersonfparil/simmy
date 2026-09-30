@@ -1,10 +1,13 @@
 use crate::dataset::Dataset;
+use crate::entry::Entry;
+use crate::linalg::tensor::GpuTensor;
+use crate::phenotype::Trait;
 use crate::linalg::context::GpuContext;
 use anyhow::{Result, bail};
 use std::fs::{File, OpenOptions, exists, remove_file};
-use std::io::{BufWriter, Write};
+use std::io::{BufRead, BufReader, BufWriter, Write};
 
-pub fn open_file(fname: &str, overwrite: bool) -> Result<BufWriter<File>> {
+pub fn open_file_writer(fname: &str, overwrite: bool) -> Result<BufWriter<File>> {
     if exists(fname)? {
         if overwrite {
             remove_file(fname)?;
@@ -16,8 +19,15 @@ pub fn open_file(fname: &str, overwrite: bool) -> Result<BufWriter<File>> {
         .create_new(true) // Errors if file exists!
         .write(true)
         .open(fname)?;
-    // Using buffer for large phenotype tables
     Ok(BufWriter::new(file))
+}
+
+pub fn open_file_reader(fname: &str) -> Result<BufReader<File>> {
+    if !exists(fname)? {
+        bail!("The file:\"{}\" does not exist!", fname);
+    }
+    let file: File = File::open(fname)?;
+    Ok(BufReader::new(file))
 }
 
 pub fn check_strings(string: &str, delimiter: &str) -> Result<()> {
@@ -44,7 +54,7 @@ impl Dataset {
         let n_entries: usize = self.entries.len();
         let n_traits: usize = self.traits.len();
         // Open file
-        let mut file_buffer: BufWriter<File> = open_file(fname, overwrite)?;
+        let mut file: BufWriter<File> = open_file_writer(fname, overwrite)?;
         // Header
         let mut header: Vec<&str> = Vec::with_capacity(3 + n_traits);
         header.push("name");
@@ -54,7 +64,7 @@ impl Dataset {
             check_strings(&t.name, delimiter)?;
             header.push(t.name.as_str());
         }
-        writeln!(file_buffer, "{}", header.join(delimiter))?;
+        writeln!(file, "{}", header.join(delimiter))?;
         // Phenotype values
         let phenotype_vec: Vec<f32> = self.phenotype_data.to_vec_f32(ctx)?; // maybe a large allocation if phenotype data is large
         let mut line: Vec<String> = vec!["".to_owned(); 3 + n_traits];
@@ -68,13 +78,53 @@ impl Dataset {
             for j in 0..n_traits {
                 line[3 + j] = phenotype_vec[(i * n_traits) + j].to_string();
             }
-            writeln!(file_buffer, "{}", line.join(delimiter))?;
+            writeln!(file, "{}", line.join(delimiter))?;
         }
-        file_buffer.flush()?; // Explicitly flush to make sure we successfully wrote into disk!
+        file.flush()?; // Explicitly flush to make sure we successfully wrote into disk!
         Ok(())
     }
-    pub fn read_phenotype(&mut self) -> Result<()> {
-        todo!()
+
+    // TODO: assess and test
+    pub fn read_phenotype(&mut self, ctx: &GpuContext, fname: &str, delimiter: &str, entries_exist: bool) -> Result<()> {
+        let file: BufReader<File> = open_file_reader(fname)?;
+        if !entries_exist {
+            self.entries = vec![];
+        }
+        let mut traits: Vec<Trait> = vec![];
+        let mut phenotype_vec: Vec<f32> = vec![];
+        for (i, line) in file.lines().enumerate() {
+            let line: Vec<String> = line?.split(delimiter).map(|x| x.to_owned()).collect();
+            if i == 0 {
+                for j in 3..line.len() {
+                    let t = Trait {
+                        name: line[j].to_owned(),
+                        description: "".to_owned(),
+                    };
+                    traits.push(t);
+                }
+            } else {
+                if entries_exist {
+                    if self.entries[i-1].name == line[0] {bail!("Entries on file: \"{}\" do not match existing Dataset! See line {}.", fname, i);}
+                } else {
+                    let entry = Entry{
+                        name: line[0].to_owned(),
+                        species: line[1].to_owned(),
+                        group: line[2].to_owned(),
+                        notes: "".to_owned(),
+                    };
+                    self.entries.push(entry);
+                }
+                for j in 3..line.len() {
+                    let y: f32 = line[j].parse::<f32>()?;
+                    phenotype_vec.push(y);
+                }
+            }
+            let n_traits: u32 = traits.len() as u32;
+            let n_entries: u32 = phenotype_vec.len() as u32 / n_traits;
+            self.traits = traits.clone();
+            self.phenotype_data = GpuTensor::from_vec_f32(ctx, &phenotype_vec, &[n_entries, n_traits], None, None)?;
+        }
+        Ok(())
     }
     pub fn write_genotype(
         &self,
@@ -89,7 +139,7 @@ impl Dataset {
         let n_entries: usize = self.entries.len();
         let n_loci_alleles: usize = self.loci.iter().map(|l| l.col_idx.len()).sum();
         // Open file
-        let mut file_buffer: BufWriter<File> = open_file(fname, overwrite)?;
+        let mut file: BufWriter<File> = open_file_writer(fname, overwrite)?;
         // Check chromosome names
         for chrom in self.genome.iter() {
             check_strings(&chrom.name, delimiter)?;
@@ -108,7 +158,7 @@ impl Dataset {
                 );
             }
         }
-        writeln!(file_buffer, "{}", header.join(delimiter))?;
+        writeln!(file, "{}", header.join(delimiter))?;
         // Genotype values
         let genotype_vec: Vec<f32> = self.genotype_data.to_vec_f32(ctx)?; // maybe a large allocation if genotype data is large
         let mut line: Vec<String> = vec!["".to_owned(); 3 + n_loci_alleles];
@@ -128,9 +178,9 @@ impl Dataset {
                     line[idx_des] = a_0 + "/" + &a_1;
                 }
             }
-            writeln!(file_buffer, "{}", line.join(delimiter))?;
+            writeln!(file, "{}", line.join(delimiter))?;
         }
-        file_buffer.flush()?; // Explicitly flush to make sure we successfully wrote into disk!
+        file.flush()?; // Explicitly flush to make sure we successfully wrote into disk!
         Ok(())
     }
     pub fn read_genotype(&mut self) -> Result<()> {
