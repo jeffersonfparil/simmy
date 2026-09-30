@@ -1,8 +1,8 @@
 use crate::dataset::Dataset;
 use crate::entry::Entry;
+use crate::linalg::context::GpuContext;
 use crate::linalg::tensor::GpuTensor;
 use crate::phenotype::Trait;
-use crate::linalg::context::GpuContext;
 use anyhow::{Result, bail};
 use std::fs::{File, OpenOptions, exists, remove_file};
 use std::io::{BufRead, BufReader, BufWriter, Write};
@@ -85,7 +85,13 @@ impl Dataset {
     }
 
     // TODO: assess and test
-    pub fn read_phenotype(&mut self, ctx: &GpuContext, fname: &str, delimiter: &str, entries_exist: bool) -> Result<()> {
+    pub fn read_phenotype(
+        &mut self,
+        ctx: &GpuContext,
+        fname: &str,
+        delimiter: &str,
+        entries_exist: bool,
+    ) -> Result<()> {
         let file: BufReader<File> = open_file_reader(fname)?;
         if !entries_exist {
             self.entries = vec![];
@@ -95,18 +101,24 @@ impl Dataset {
         for (i, line) in file.lines().enumerate() {
             let line: Vec<String> = line?.split(delimiter).map(|x| x.to_owned()).collect();
             if i == 0 {
-                for j in 3..line.len() {
+                for x in line.iter().skip(3) {
                     let t = Trait {
-                        name: line[j].to_owned(),
+                        name: x.to_owned(),
                         description: "".to_owned(),
                     };
                     traits.push(t);
                 }
             } else {
                 if entries_exist {
-                    if self.entries[i-1].name == line[0] {bail!("Entries on file: \"{}\" do not match existing Dataset! See line {}.", fname, i);}
+                    if self.entries[i - 1].name == line[0] {
+                        bail!(
+                            "Entries on file: \"{}\" do not match existing Dataset! See line {}.",
+                            fname,
+                            i
+                        );
+                    }
                 } else {
-                    let entry = Entry{
+                    let entry = Entry {
                         name: line[0].to_owned(),
                         species: line[1].to_owned(),
                         group: line[2].to_owned(),
@@ -114,15 +126,16 @@ impl Dataset {
                     };
                     self.entries.push(entry);
                 }
-                for j in 3..line.len() {
-                    let y: f32 = line[j].parse::<f32>()?;
+                for x in line.iter().skip(3) {
+                    let y: f32 = x.parse::<f32>()?;
                     phenotype_vec.push(y);
                 }
             }
             let n_traits: u32 = traits.len() as u32;
             let n_entries: u32 = phenotype_vec.len() as u32 / n_traits;
             self.traits = traits.clone();
-            self.phenotype_data = GpuTensor::from_vec_f32(ctx, &phenotype_vec, &[n_entries, n_traits], None, None)?;
+            self.phenotype_data =
+                GpuTensor::from_vec_f32(ctx, &phenotype_vec, &[n_entries, n_traits], None, None)?;
         }
         Ok(())
     }

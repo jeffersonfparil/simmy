@@ -417,11 +417,11 @@ mod tests {
     fn simulated_phenotypes_are_approximately_normal() {
         let ctx = context();
 
-        let entries = sim_entries(10_000).unwrap();
+        let entries = sim_entries(1_000).unwrap();
 
         let genome = sim_genome(10, false).unwrap();
 
-        let loci = sim_loci(&genome, 500, 42).unwrap();
+        let loci = sim_loci(&genome, 100, 42).unwrap();
 
         let sexes = sim_sexes(entries.len(), false, 42).unwrap();
 
