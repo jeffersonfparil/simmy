@@ -1,12 +1,16 @@
+pub mod dataset;
 pub mod entry;
+pub mod genotype;
 pub mod io;
 pub mod linalg;
+pub mod phenotype;
 
 use anyhow::Result;
 use linalg::context::GpuContext;
 use linalg::tensor::GpuTensor;
 
-use crate::io::{Dataset, MapperG2P};
+use crate::dataset::Dataset;
+use crate::phenotype::MapperG2P;
 
 // TODO: this were CLI arguments parsing will live...
 
