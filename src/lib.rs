@@ -1,6 +1,7 @@
 pub mod dataset;
 pub mod entry;
 pub mod genotype;
+pub mod gpu_pipeline;
 pub mod io;
 pub mod linalg;
 pub mod phenotype;

@@ -9,6 +9,7 @@ use rand::prelude::IndexedRandom;
 use rand_chacha::{ChaCha8Rng, rand_core::SeedableRng};
 use std::borrow::Cow;
 use std::fmt;
+use wgpu::ComputePipeline;
 use wgpu::util::DeviceExt;
 
 #[derive(Debug)]
@@ -308,6 +309,7 @@ impl Dataset {
     pub fn mate(
         &self,
         ctx: &GpuContext,
+        pipeline: &ComputePipeline, // see `gpu_pipeline/` for specific GPU ComputePipelines to use!
         mating_pairs: Vec<(usize, usize)>,
         genetic_arch: &GeneticModel,
         seed: u64,
@@ -329,8 +331,8 @@ impl Dataset {
             "The traits of self and genetic_arch do not match!"
         );
         ensure!(
-            genetic_arch.heritabilities.len() == genetic_arch.traits.len(),
-            "The number of heritabilities does not match the number of traits in the genotype-to-phenotype genetic_arch!"
+            genetic_arch.repeatabilities.len() == genetic_arch.traits.len(),
+            "The number of repeatabilities does not match the number of traits in the genotype-to-phenotype genetic_arch!"
         );
         // Locus data
         let mut locus_data_packed = Vec::with_capacity(n_loci);
@@ -403,19 +405,8 @@ impl Dataset {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
-        // Compile and Configure Pipeline
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Meiosis Shader"),
-            source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(include_str!("meiosis.wgsl"))),
-        });
-        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("Meiosis Pipeline"),
-            layout: None,
-            module: &shader,
-            entry_point: Some("main"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
+        // Configure the pre-compiled pipeline which is passed as an argument to prevent repeated compilations!
+        // The configuration may fail if the incorrect ComputePipeline is used!
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Meiosis Bind Group"),
             layout: &pipeline.get_bind_group_layout(0),
@@ -542,6 +533,7 @@ impl Dataset {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gpu_pipeline::meiosis;
     use crate::linalg::context::GpuContext;
 
     fn context() -> GpuContext {
@@ -661,6 +653,7 @@ mod tests {
     #[test]
     fn mating_is_deterministic() {
         let ctx = context();
+        let pipeline_meiosis: ComputePipeline = meiosis::pipeline(&context()).unwrap();
 
         let (parents, genetic_arch) =
             Dataset::sim_founders(&ctx, 100, 5, 100, 5, 2, true, 42).unwrap();
@@ -668,10 +661,12 @@ mod tests {
         let pairs = parents.sample_mating_pairs(50, 123).unwrap();
 
         let a = parents
-            .mate(&ctx, pairs.clone(), &genetic_arch, 999)
+            .mate(&ctx, &pipeline_meiosis, pairs.clone(), &genetic_arch, 999)
             .unwrap();
 
-        let b = parents.mate(&ctx, pairs, &genetic_arch, 999).unwrap();
+        let b = parents
+            .mate(&ctx, &pipeline_meiosis, pairs, &genetic_arch, 999)
+            .unwrap();
 
         assert_eq!(
             a.genotype_data.to_vec_f32(&ctx).unwrap(),
@@ -682,13 +677,16 @@ mod tests {
     #[test]
     fn offspring_dimensions_are_consistent() {
         let ctx = context();
+        let pipeline_meiosis: ComputePipeline = meiosis::pipeline(&context()).unwrap();
 
         let (parents, genetic_arch) =
             Dataset::sim_founders(&ctx, 100, 5, 100, 5, 2, true, 42).unwrap();
 
         let pairs = parents.sample_mating_pairs(100, 123).unwrap();
 
-        let offspring = parents.mate(&ctx, pairs, &genetic_arch, 999).unwrap();
+        let offspring = parents
+            .mate(&ctx, &pipeline_meiosis, pairs, &genetic_arch, 999)
+            .unwrap();
 
         assert!(offspring.check_dimensions().is_ok());
     }
@@ -696,13 +694,16 @@ mod tests {
     #[test]
     fn offspring_retain_genome_structure() {
         let ctx = context();
+        let pipeline_meiosis: ComputePipeline = meiosis::pipeline(&context()).unwrap();
 
         let (parents, genetic_arch) =
             Dataset::sim_founders(&ctx, 100, 5, 100, 5, 2, true, 42).unwrap();
 
         let pairs = parents.sample_mating_pairs(100, 123).unwrap();
 
-        let offspring = parents.mate(&ctx, pairs, &genetic_arch, 999).unwrap();
+        let offspring = parents
+            .mate(&ctx, &pipeline_meiosis, pairs, &genetic_arch, 999)
+            .unwrap();
 
         assert_eq!(offspring.genome, parents.genome,);
 
@@ -716,6 +717,7 @@ mod tests {
     #[test]
     fn offspring_names_record_parentage() {
         let ctx = context();
+        let pipeline_meiosis: ComputePipeline = meiosis::pipeline(&context()).unwrap();
 
         let (parents, genetic_arch) =
             Dataset::sim_founders(&ctx, 100, 5, 100, 5, 2, true, 42).unwrap();
@@ -723,7 +725,7 @@ mod tests {
         let pairs = parents.sample_mating_pairs(100, 123).unwrap();
 
         let offspring = parents
-            .mate(&ctx, pairs.clone(), &genetic_arch, 999)
+            .mate(&ctx, &pipeline_meiosis, pairs.clone(), &genetic_arch, 999)
             .unwrap();
 
         for (i, (p1, p2)) in pairs.iter().enumerate() {
@@ -739,13 +741,16 @@ mod tests {
     #[test]
     fn offspring_sexes_contain_only_valid_categories() {
         let ctx = context();
+        let pipeline_meiosis: ComputePipeline = meiosis::pipeline(&context()).unwrap();
 
         let (parents, genetic_arch) =
             Dataset::sim_founders(&ctx, 1000, 5, 200, 5, 2, true, 42).unwrap();
 
         let pairs = parents.sample_mating_pairs(100, 123).unwrap();
 
-        let offspring = parents.mate(&ctx, pairs, &genetic_arch, 999).unwrap();
+        let offspring = parents
+            .mate(&ctx, &pipeline_meiosis, pairs, &genetic_arch, 999)
+            .unwrap();
 
         assert!(
             offspring
@@ -758,13 +763,16 @@ mod tests {
     #[test]
     fn offspring_sex_ratio_is_approximately_half() {
         let ctx = context();
+        let pipeline_meiosis: ComputePipeline = meiosis::pipeline(&context()).unwrap();
 
         let (parents, genetic_arch) =
             Dataset::sim_founders(&ctx, 2000, 5, 100, 5, 2, true, 42).unwrap();
 
         let pairs = parents.sample_mating_pairs(10000, 123).unwrap();
 
-        let offspring = parents.mate(&ctx, pairs, &genetic_arch, 999).unwrap();
+        let offspring = parents
+            .mate(&ctx, &pipeline_meiosis, pairs, &genetic_arch, 999)
+            .unwrap();
 
         let n_hetero = offspring
             .sexes
@@ -780,13 +788,16 @@ mod tests {
     #[test]
     fn inferred_sex_matches_sex_locus() {
         let ctx = context();
+        let pipeline_meiosis: ComputePipeline = meiosis::pipeline(&context()).unwrap();
 
         let (parents, genetic_arch) =
             Dataset::sim_founders(&ctx, 1000, 5, 200, 5, 2, true, 42).unwrap();
 
         let pairs = parents.sample_mating_pairs(1000, 123).unwrap();
 
-        let offspring = parents.mate(&ctx, pairs, &genetic_arch, 999).unwrap();
+        let offspring = parents
+            .mate(&ctx, &pipeline_meiosis, pairs, &genetic_arch, 999)
+            .unwrap();
 
         let idx_sex_chromosome = offspring
             .genome

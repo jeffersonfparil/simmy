@@ -1,7 +1,7 @@
-use crate::{genotype::*, linalg::kernel};
 use crate::linalg::context::GpuContext;
 use crate::linalg::kernel::GpuKernel;
 use crate::linalg::tensor::GpuTensor;
+use crate::{genotype::*, linalg::kernel};
 use anyhow::{Result, ensure};
 use rand::seq::index;
 use rand_chacha::{ChaCha8Rng, rand_core::SeedableRng};
@@ -37,7 +37,7 @@ impl GpuTensor {
                 let kernel = GpuKernel::new(ctx);
                 let denominator = kernel.add_scalar(&kernel.exp(&kernel.neg(self)?)?, 1.0)?;
                 self.buffer = kernel.pow_scalar(&denominator, -1.0)?.buffer.clone();
-            },
+            }
             Activation::ReLU => {
                 let kernel = GpuKernel::new(ctx);
                 let greater_than_zero = kernel.gt_scalar(self, 0.0)?;
@@ -50,38 +50,97 @@ impl GpuTensor {
 
 impl GenoPhenoNetwork {
     pub fn check(&self) -> Result<()> {
-        ensure!(self.weights.len() > 0, "Model is undefined! No weights found!");
-        ensure!(self.weights.len() == self.biases.len(), "The weights ({}) and biases ({}) are incompatible!", self.weights.len(), self.biases.len());
-        ensure!(self.weights.len() == self.activations.len(), "The weights ({}) and activations ({}) are incompatible!", self.weights.len(), self.activations.len());
+        ensure!(
+            self.weights.len() > 0,
+            "Model is undefined! No weights found!"
+        );
+        ensure!(
+            self.weights.len() == self.biases.len(),
+            "The weights ({}) and biases ({}) are incompatible!",
+            self.weights.len(),
+            self.biases.len()
+        );
+        ensure!(
+            self.weights.len() == self.activations.len(),
+            "The weights ({}) and activations ({}) are incompatible!",
+            self.weights.len(),
+            self.activations.len()
+        );
         for (i, (w, b)) in self.weights.iter().zip(self.biases.iter()).enumerate() {
-            ensure!(w.shape.len() == 2, "We expect weights to be 2D tensors! The {}th weight has shape: {:?}!", i, w.shape);
-            ensure!(b.shape.len() == 2, "We expect biases to be 2D tensors! The {}th bias has shape: {:?}!", i, b.shape);
-            ensure!(b.shape[1] == 1, "The second dimension of the {}ith biases should be of length 1!", i);
-            ensure!(w.shape[1] == b.shape[0], "The {}ith weights and biases are incompatible!", i);
+            ensure!(
+                w.shape.len() == 2,
+                "We expect weights to be 2D tensors! The {}th weight has shape: {:?}!",
+                i,
+                w.shape
+            );
+            ensure!(
+                b.shape.len() == 2,
+                "We expect biases to be 2D tensors! The {}th bias has shape: {:?}!",
+                i,
+                b.shape
+            );
+            ensure!(
+                b.shape[1] == 1,
+                "The second dimension of the {}ith biases should be of length 1!",
+                i
+            );
+            ensure!(
+                w.shape[1] == b.shape[0],
+                "The {}ith weights and biases are incompatible!",
+                i
+            );
             if i > 0 {
-                ensure!(self.weights[i-1].shape[1] == w.shape[0], "The {}ith and {}ith weights are incompatible!", i-1, i);
+                ensure!(
+                    self.weights[i - 1].shape[1] == w.shape[0],
+                    "The {}ith and {}ith weights are incompatible!",
+                    i - 1,
+                    i
+                );
             }
         }
-        ensure!(self.weights[self.weights.len() - 1].shape[1] >= 1, "We expect at least a single output node per entry! Each node represent a trait!");
+        ensure!(
+            self.weights[self.weights.len() - 1].shape[1] >= 1,
+            "We expect at least a single output node per entry! Each node represent a trait!"
+        );
         Ok(())
     }
     pub fn predict(&self, ctx: &GpuContext, input: &GpuTensor) -> Result<GpuTensor> {
         self.check()?;
-        ensure!(input.shape.len() == 3, "We expect the input to be a 3D tensor (entries x loci-alleles x homologous chromosomes)!");
-        ensure!(self.weights[0].shape[0] == input.shape[1], "The model (1st weight shape: {:?}) and input (shape: {:?}) are incompatible!", self.weights[0].shape, input.shape);
+        ensure!(
+            input.shape.len() == 3,
+            "We expect the input to be a 3D tensor (entries x loci-alleles x homologous chromosomes)!"
+        );
+        ensure!(
+            self.weights[0].shape[0] == input.shape[1],
+            "The model (1st weight shape: {:?}) and input (shape: {:?}) are incompatible!",
+            self.weights[0].shape,
+            input.shape
+        );
         let n_entries: usize = input.shape[0] as usize;
         let n_loci_alleles: usize = input.shape[1] as usize;
-        ensure!(input.shape[2] == 2, "We expect the 3rd dimension to have 2 levels, one for each homologous chromosome or one from each parent!");
+        ensure!(
+            input.shape[2] == 2,
+            "We expect the 3rd dimension to have 2 levels, one for each homologous chromosome or one from each parent!"
+        );
         let kernel = GpuKernel::new(ctx);
         let mut output: GpuTensor = {
             // Note that we are collapsing the allele dosages of the 2 homologous chromosomes and we are not accounting for haplotype effects/phase information for simplicity!
-            let x: GpuTensor = kernel.add(&input.slice_view(&[(0, n_entries), (0, n_loci_alleles), (0, 1)])?, &input.slice_view(&[(0, n_entries), (0, n_loci_alleles), (1, 2)])?)?;
+            let x: GpuTensor = kernel.add(
+                &input.slice_view(&[(0, n_entries), (0, n_loci_alleles), (0, 1)])?,
+                &input.slice_view(&[(0, n_entries), (0, n_loci_alleles), (1, 2)])?,
+            )?;
             let xw: GpuTensor = kernel.contract(&x, &self.weights[0])?;
             let mut y = kernel.add(&xw, &self.biases[0])?;
             y.activate(ctx, &self.activations[0])?;
             y
         };
-        for ((w, b), a) in self.weights.iter().zip(self.biases.iter()).zip(self.activations.iter()).skip(1) {
+        for ((w, b), a) in self
+            .weights
+            .iter()
+            .zip(self.biases.iter())
+            .zip(self.activations.iter())
+            .skip(1)
+        {
             output = kernel.add(&kernel.contract(&output, w)?, b)?;
             output.activate(ctx, a)?;
         }
@@ -94,8 +153,8 @@ pub struct GeneticModel {
     pub genome: Vec<Chromosome>,
     pub loci: Vec<Locus>,
     pub traits: Vec<Trait>,
-    pub heritabilities: Vec<f32>,
-    pub models: GenoPhenoNetwork, // Encapsulates all traits, i.e. the output nodes is of length traits.len() allowing for hidden correlations between traits
+    pub repeatabilities: Vec<f32>,
+    pub model: GenoPhenoNetwork, // Encapsulates all traits, i.e. the output nodes is of length traits.len() allowing for hidden correlations between traits
 }
 
 impl fmt::Display for GeneticModel {
@@ -111,16 +170,20 @@ impl fmt::Display for GeneticModel {
             self.loci.iter().map(|l| l.col_idx.len()).sum::<usize>()
         )?;
         writeln!(f, "\t- Traits: {}", self.traits.len())?;
-        writeln!(f, "\t- Heritabilities: {}", self.heritabilities.len())?;
+        writeln!(f, "\t- Repeatabilities: {}", self.repeatabilities.len())?;
         writeln!(f, "\t- Genotype-to-phenotype models:")?;
-        for (m, t) in self.models.iter().zip(self.traits.iter()) {
-            for ((w, b), a) in m.weights.iter().zip(m.biases.iter()).zip(m.activations.iter()) {
-                writeln!(f, "\t  ---------------------------------")?;
-                writeln!(f, "\t  Trait: {} | Weights: {}", t.name, w)?;
-                writeln!(f, "\t  Trait: {} | Biases: {}", t.name, b)?;
-                writeln!(f, "\t  Trait: {} | Activations: {}", t.name, a)?;
-                writeln!(f, "\t  ---------------------------------")?;
-            }
+        for ((w, b), a) in self
+            .model
+            .weights
+            .iter()
+            .zip(self.model.biases.iter())
+            .zip(self.model.activations.iter())
+        {
+            writeln!(f, "\t  ---------------------------------")?;
+            writeln!(f, "\t  Weights: {}", w)?;
+            writeln!(f, "\t  Biases: {}", b)?;
+            writeln!(f, "\t  Activations: {:?}", a)?;
+            writeln!(f, "\t  ---------------------------------")?;
         }
         Ok(())
     }
@@ -147,6 +210,9 @@ pub fn sim_genotype_to_phenotype_map(
     genome: &[Chromosome],
     loci: &[Locus],
     traits: &[Trait],
+    n_loci_with_effects: usize, // number of loci with effects which gets translated to sparsity level, i.e. n_loci_with_effects / n_loci fo use in simulating non-zero weights
+    complexity_level: usize,    // number of hidden layers with zero meaning classical linear model
+    activation_functions: Vec<Activation>, // activation functions for each layer, i.e. including the final or output layer (e.g. Activation::Linear for the classical linear model with no hidden layers)
     seed: u64,
 ) -> Result<GeneticModel> {
     todo!()
@@ -260,7 +326,7 @@ mod tests {
         assert_eq!(a.genome, b.genome);
         assert_eq!(a.loci, b.loci);
         assert_eq!(a.traits, b.traits);
-        assert_eq!(a.heritabilities, b.heritabilities);
+        assert_eq!(a.repeatabilities, b.repeatabilities);
 
         assert_eq!(
             a.allele_effects.to_vec_f32(&ctx).unwrap(),
@@ -279,7 +345,7 @@ mod tests {
         let genetic_arch =
             sim_genotype_to_phenotype_map(&ctx, &genome, &loci, &traits, 123).unwrap();
 
-        assert_eq!(genetic_arch.heritabilities.len(), traits.len());
+        assert_eq!(genetic_arch.repeatabilities.len(), traits.len());
     }
 
     #[test]
@@ -295,7 +361,7 @@ mod tests {
 
         assert!(
             genetic_arch
-                .heritabilities
+                .repeatabilities
                 .iter()
                 .all(|h| (0.0..=1.0).contains(h))
         );
@@ -401,7 +467,7 @@ mod tests {
 
         assert_eq!(phenotype_data.shape, vec![250, 11]);
 
-        assert_eq!(genetic_arch.heritabilities.len(), 11);
+        assert_eq!(genetic_arch.repeatabilities.len(), 11);
     }
 
     #[test]
