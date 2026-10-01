@@ -95,7 +95,7 @@ pub struct GeneticModel {
     pub loci: Vec<Locus>,
     pub traits: Vec<Trait>,
     pub heritabilities: Vec<f32>,
-    pub models: Vec<GenoPhenoNetwork>,
+    pub models: GenoPhenoNetwork, // Encapsulates all traits, i.e. the output nodes is of length traits.len() allowing for hidden correlations between traits
 }
 
 impl fmt::Display for GeneticModel {
