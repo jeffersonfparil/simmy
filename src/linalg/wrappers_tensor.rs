@@ -352,7 +352,7 @@ impl GpuKernel<'_> {
         self.execute_kernel(a.params_binary(b, Operation::GE)?, a, Some(b))
     }
 
-    // Scalar x Matrix
+    // Scalar x Tensor
     pub fn add_scalar(&self, a: &GpuTensor, b: f32) -> Result<GpuTensor> {
         self.execute_kernel(a.params_scalar(b, Operation::ADD)?, a, None)
     }

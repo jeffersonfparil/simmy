@@ -1,4 +1,4 @@
-use crate::genotype::*;
+use crate::{genotype::*, linalg::kernel};
 use crate::linalg::context::GpuContext;
 use crate::linalg::kernel::GpuKernel;
 use crate::linalg::tensor::GpuTensor;
@@ -14,19 +14,94 @@ pub struct Trait {
     pub description: String,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum Activation {
+    Linear,
+    Sigmoid,
+    ReLU,
+}
+
 #[derive(Debug)]
-pub struct MapperG2P {
+pub struct GenoPhenoNetwork {
+    // We've opt to generalise the genetic model as a multilayer perceptron or artificial neural network with 0 or more hidden layers translating to a vector of 1 or more GpuTensors of weights and biases.
+    pub weights: Vec<GpuTensor>,
+    pub biases: Vec<GpuTensor>,
+    pub activations: Vec<Activation>,
+}
+
+impl GpuTensor {
+    pub fn activate(&mut self, ctx: &GpuContext, activation: &Activation) -> Result<()> {
+        match activation {
+            Activation::Linear => (),
+            Activation::Sigmoid => {
+                let kernel = GpuKernel::new(ctx);
+                let denominator = kernel.add_scalar(&kernel.exp(&kernel.neg(self)?)?, 1.0)?;
+                self.buffer = kernel.pow_scalar(&denominator, -1.0)?.buffer.clone();
+            },
+            Activation::ReLU => {
+                let kernel = GpuKernel::new(ctx);
+                let greater_than_zero = kernel.gt_scalar(self, 0.0)?;
+                self.buffer = kernel.mul(self, &greater_than_zero)?.buffer.clone();
+            }
+        }
+        Ok(())
+    }
+}
+
+impl GenoPhenoNetwork {
+    pub fn check(&self) -> Result<()> {
+        ensure!(self.weights.len() > 0, "Model is undefined! No weights found!");
+        ensure!(self.weights.len() == self.biases.len(), "The weights ({}) and biases ({}) are incompatible!", self.weights.len(), self.biases.len());
+        ensure!(self.weights.len() == self.activations.len(), "The weights ({}) and activations ({}) are incompatible!", self.weights.len(), self.activations.len());
+        for (i, (w, b)) in self.weights.iter().zip(self.biases.iter()).enumerate() {
+            ensure!(w.shape.len() == 2, "We expect weights to be 2D tensors! The {}th weight has shape: {:?}!", i, w.shape);
+            ensure!(b.shape.len() == 2, "We expect biases to be 2D tensors! The {}th bias has shape: {:?}!", i, b.shape);
+            ensure!(b.shape[1] == 1, "The second dimension of the {}ith biases should be of length 1!", i);
+            ensure!(w.shape[1] == b.shape[0], "The {}ith weights and biases are incompatible!", i);
+            if i > 0 {
+                ensure!(self.weights[i-1].shape[1] == w.shape[0], "The {}ith and {}ith weights are incompatible!", i-1, i);
+            }
+        }
+        ensure!(self.weights[self.weights.len() - 1].shape[1] >= 1, "We expect at least a single output node per entry! Each node represent a trait!");
+        Ok(())
+    }
+    pub fn predict(&self, ctx: &GpuContext, input: &GpuTensor) -> Result<GpuTensor> {
+        self.check()?;
+        ensure!(input.shape.len() == 3, "We expect the input to be a 3D tensor (entries x loci-alleles x homologous chromosomes)!");
+        ensure!(self.weights[0].shape[0] == input.shape[1], "The model (1st weight shape: {:?}) and input (shape: {:?}) are incompatible!", self.weights[0].shape, input.shape);
+        let n_entries: usize = input.shape[0] as usize;
+        let n_loci_alleles: usize = input.shape[1] as usize;
+        ensure!(input.shape[2] == 2, "We expect the 3rd dimension to have 2 levels, one for each homologous chromosome or one from each parent!");
+        let kernel = GpuKernel::new(ctx);
+        let mut output: GpuTensor = {
+            // Note that we are collapsing the allele dosages of the 2 homologous chromosomes and we are not accounting for haplotype effects/phase information for simplicity!
+            let x: GpuTensor = kernel.add(&input.slice_view(&[(0, n_entries), (0, n_loci_alleles), (0, 1)])?, &input.slice_view(&[(0, n_entries), (0, n_loci_alleles), (1, 2)])?)?;
+            let xw: GpuTensor = kernel.contract(&x, &self.weights[0])?;
+            let mut y = kernel.add(&xw, &self.biases[0])?;
+            y.activate(ctx, &self.activations[0])?;
+            y
+        };
+        for ((w, b), a) in self.weights.iter().zip(self.biases.iter()).zip(self.activations.iter()).skip(1) {
+            output = kernel.add(&kernel.contract(&output, w)?, b)?;
+            output.activate(ctx, a)?;
+        }
+        Ok(output)
+    }
+}
+
+#[derive(Debug)]
+pub struct GeneticModel {
     pub genome: Vec<Chromosome>,
     pub loci: Vec<Locus>,
     pub traits: Vec<Trait>,
     pub heritabilities: Vec<f32>,
-    pub allele_effects: GpuTensor,
+    pub models: Vec<GenoPhenoNetwork>,
 }
 
-impl fmt::Display for MapperG2P {
+impl fmt::Display for GeneticModel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "------------------------")?;
-        writeln!(f, "MapperG2P struct")?;
+        writeln!(f, "GeneticModel struct")?;
         writeln!(f, "------------------------")?;
         writeln!(f, "\t- Chromosomes: {}", self.genome.len())?;
         writeln!(f, "\t- Loci: {}", self.loci.len())?;
@@ -37,9 +112,16 @@ impl fmt::Display for MapperG2P {
         )?;
         writeln!(f, "\t- Traits: {}", self.traits.len())?;
         writeln!(f, "\t- Heritabilities: {}", self.heritabilities.len())?;
-        writeln!(f, "\t  ---------------------------------")?;
-        writeln!(f, "\t- Allele effects: {}", self.allele_effects)?;
-        writeln!(f, "\t  ---------------------------------")?;
+        writeln!(f, "\t- Genotype-to-phenotype models:")?;
+        for (m, t) in self.models.iter().zip(self.traits.iter()) {
+            for ((w, b), a) in m.weights.iter().zip(m.biases.iter()).zip(m.activations.iter()) {
+                writeln!(f, "\t  ---------------------------------")?;
+                writeln!(f, "\t  Trait: {} | Weights: {}", t.name, w)?;
+                writeln!(f, "\t  Trait: {} | Biases: {}", t.name, b)?;
+                writeln!(f, "\t  Trait: {} | Activations: {}", t.name, a)?;
+                writeln!(f, "\t  ---------------------------------")?;
+            }
+        }
         Ok(())
     }
 }
@@ -66,118 +148,18 @@ pub fn sim_genotype_to_phenotype_map(
     loci: &[Locus],
     traits: &[Trait],
     seed: u64,
-) -> Result<MapperG2P> {
-    let n_loci: usize = loci.len();
-    let n_loci_alleles: usize = loci.iter().map(|l| l.col_idx.len()).sum();
-    let n_traits: usize = traits.len();
-
-    let mut rng = ChaCha8Rng::seed_from_u64(seed);
-    let unif_p: Uniform<usize> = Uniform::new(1, n_loci)
-        .expect("Error initialising uniform distribution for number of loci with effects!");
-    let unif_eff_mu: Uniform<f32> = Uniform::new(-1.0, 1.0).expect("Error initialising uniform distribution for the mean of normally distributed allele effects!");
-    let unif_eff_sd: Uniform<f32> = Uniform::new(1.0, 5.0).expect("Error initialising uniform distribution for the standard deviation of normally distributed allele effects!");
-    let unif_h2: Uniform<f32> = Uniform::new(f32::EPSILON, 1.0)
-        .expect("Error initialising uniform distribution for the trait hertabilities!");
-
-    let mut heritabilities: Vec<f32> = Vec::with_capacity(n_traits);
-    let mut allele_effects_tmp: Vec<f32> = vec![0.0; n_loci_alleles * n_traits];
-    for j in 0..n_traits {
-        let n_loci_with_effects = unif_p.sample(&mut rng);
-        let mean = unif_eff_mu.sample(&mut rng);
-        let sd = unif_eff_sd.sample(&mut rng);
-        heritabilities.push(unif_h2.sample(&mut rng));
-        let normal = Normal::new(mean, sd).expect("Error initialising a normal distribution!");
-        let idx_loci_with_effects: Vec<usize> =
-            index::sample(&mut rng, n_loci, n_loci_with_effects).into_vec();
-        for idx_locus in idx_loci_with_effects {
-            for &idx_locus_allele in &loci[idx_locus].col_idx {
-                let idx = (idx_locus_allele * n_traits) + j;
-                allele_effects_tmp[idx] = normal.sample(&mut rng);
-            }
-        }
-    }
-    let allele_effects: GpuTensor = GpuTensor::from_vec_f32(
-        ctx,
-        &allele_effects_tmp,
-        &[n_loci_alleles as u32, n_traits as u32],
-        None,
-        None,
-    )?;
-    Ok(MapperG2P {
-        genome: genome.to_owned(),
-        loci: loci.to_owned(),
-        traits: traits.to_owned(),
-        heritabilities,
-        allele_effects,
-    })
+) -> Result<GeneticModel> {
+    todo!()
 }
 
 pub fn calc_phenotypes(
     ctx: &GpuContext,
     genotype_data: &GpuTensor,
-    mapper: &MapperG2P,
+    genetic_arch: &GeneticModel,
     ploidy: usize,
     seed: u64,
 ) -> Result<GpuTensor> {
-    let n_entries: usize = genotype_data.shape[0] as usize;
-    let n_loci_alleles: usize = genotype_data.shape[1] as usize;
-    let n_traits: usize = mapper.allele_effects.shape[1] as usize;
-    ensure!(
-        n_loci_alleles == mapper.loci.iter().map(|x| x.col_idx.len()).sum::<usize>(),
-        "The number of loci-alleles do not match between genotype_data and mapper loci!"
-    );
-    ensure!(
-        n_loci_alleles == mapper.allele_effects.shape[0] as usize,
-        "The number of loci-alleles do not match between genotype_data and mapper allele effects!"
-    );
-    ensure!(
-        mapper.heritabilities.len() == n_traits,
-        "The number of heritabilities does not match the number of traits!"
-    );
-    for (i, h2) in mapper.heritabilities.iter().enumerate() {
-        ensure!(
-            (0.0..=1.0).contains(h2),
-            "The heritability of trait {} which should be range from 0.0 to 1.0!",
-            i
-        );
-    }
-    let mut rng = ChaCha8Rng::seed_from_u64(seed);
-    let kernel = GpuKernel::new(ctx);
-    let y0 = kernel.contract(
-        &genotype_data.slice_view(&[(0, n_entries), (0, n_loci_alleles), (0, 1)])?,
-        &mapper.allele_effects,
-    )?;
-    let y1 = kernel.contract(
-        &genotype_data.slice_view(&[(0, n_entries), (0, n_loci_alleles), (1, 2)])?,
-        &mapper.allele_effects,
-    )?;
-    let y: GpuTensor = kernel.div_scalar(&kernel.add(&y0, &y1)?, ploidy as f32)?;
-    // Simulate error effects dependin on trait heritabilities
-    let mut errors_tmp: Vec<f32> = vec![0.0; n_entries * n_traits];
-    for (j, &h2) in mapper.heritabilities.iter().enumerate() {
-        let y_j = y
-            .slice_view(&[(0, n_entries), (j, j + 1)])?
-            .to_vec_f32(ctx)?;
-        let n = y_j.len() as f32;
-        let u = y_j.iter().sum::<f32>() / n;
-        let var_y_j = y_j.iter().map(|&x| (u - x).powi(2)).sum::<f32>() / n;
-        let sd_err = (var_y_j * ((1.00 / h2) - 1.00)).sqrt() + f32::EPSILON;
-        let normal: Normal<f32> =
-            Normal::new(0.0, sd_err).expect("Error initialising a standard normal distribution!");
-        for i in 0..n_entries {
-            let idx = (i * n_traits) + j;
-            errors_tmp[idx] = normal.sample(&mut rng);
-        }
-    }
-    let errors: GpuTensor = GpuTensor::from_vec_f32(
-        ctx,
-        &errors_tmp,
-        &[n_entries as u32, n_traits as u32],
-        None,
-        None,
-    )?;
-    // Add in the standard normal errors
-    kernel.add(&y, &errors)
+    todo!()
 }
 
 pub fn sim_phenotype_data(
@@ -188,11 +170,14 @@ pub fn sim_phenotype_data(
     traits: &[Trait],
     ploidy: usize,
     seed: u64,
-) -> Result<(GpuTensor, MapperG2P)> {
-    let mapper: MapperG2P = sim_genotype_to_phenotype_map(ctx, genome, loci, traits, seed)?;
-    let phenotype_data = calc_phenotypes(ctx, genotype_data, &mapper, ploidy, seed)?;
-    Ok((phenotype_data, mapper))
+) -> Result<(GpuTensor, GeneticModel)> {
+    let genetic_arch: GeneticModel =
+        sim_genotype_to_phenotype_map(ctx, genome, loci, traits, seed)?;
+    let phenotype_data = calc_phenotypes(ctx, genotype_data, &genetic_arch, ploidy, seed)?;
+    Ok((phenotype_data, genetic_arch))
 }
+
+// TODO: implement better genotype-to-phenotype genetic_arch, i.e. allowing for genetic architecture paramter inputs
 
 #[cfg(test)]
 mod tests {
@@ -291,9 +276,10 @@ mod tests {
         let loci = sim_loci(&genome, 100, 42).unwrap();
         let traits = sim_traits(13).unwrap();
 
-        let mapper = sim_genotype_to_phenotype_map(&ctx, &genome, &loci, &traits, 123).unwrap();
+        let genetic_arch =
+            sim_genotype_to_phenotype_map(&ctx, &genome, &loci, &traits, 123).unwrap();
 
-        assert_eq!(mapper.heritabilities.len(), traits.len());
+        assert_eq!(genetic_arch.heritabilities.len(), traits.len());
     }
 
     #[test]
@@ -304,10 +290,11 @@ mod tests {
         let loci = sim_loci(&genome, 100, 42).unwrap();
         let traits = sim_traits(20).unwrap();
 
-        let mapper = sim_genotype_to_phenotype_map(&ctx, &genome, &loci, &traits, 123).unwrap();
+        let genetic_arch =
+            sim_genotype_to_phenotype_map(&ctx, &genome, &loci, &traits, 123).unwrap();
 
         assert!(
-            mapper
+            genetic_arch
                 .heritabilities
                 .iter()
                 .all(|h| (0.0..=1.0).contains(h))
@@ -322,12 +309,13 @@ mod tests {
         let loci = sim_loci(&genome, 100, 42).unwrap();
         let traits = sim_traits(7).unwrap();
 
-        let mapper = sim_genotype_to_phenotype_map(&ctx, &genome, &loci, &traits, 123).unwrap();
+        let genetic_arch =
+            sim_genotype_to_phenotype_map(&ctx, &genome, &loci, &traits, 123).unwrap();
 
         let n_loci_alleles: usize = loci.iter().map(|l| l.col_idx.len()).sum();
 
         assert_eq!(
-            mapper.allele_effects.shape,
+            genetic_arch.allele_effects.shape,
             vec![n_loci_alleles as u32, traits.len() as u32]
         );
     }
@@ -340,9 +328,10 @@ mod tests {
         let loci = sim_loci(&genome, 100, 42).unwrap();
         let traits = sim_traits(20).unwrap();
 
-        let mapper = sim_genotype_to_phenotype_map(&ctx, &genome, &loci, &traits, 123).unwrap();
+        let genetic_arch =
+            sim_genotype_to_phenotype_map(&ctx, &genome, &loci, &traits, 123).unwrap();
 
-        let effects = mapper.allele_effects.to_vec_f32(&ctx).unwrap();
+        let effects = genetic_arch.allele_effects.to_vec_f32(&ctx).unwrap();
 
         assert!(effects.iter().any(|x| *x != 0.0));
     }
@@ -361,9 +350,10 @@ mod tests {
 
         let traits = sim_traits(8).unwrap();
 
-        let mapper = sim_genotype_to_phenotype_map(&ctx, &genome, &loci, &traits, 456).unwrap();
+        let genetic_arch =
+            sim_genotype_to_phenotype_map(&ctx, &genome, &loci, &traits, 456).unwrap();
 
-        let phenotype_data = calc_phenotypes(&ctx, &genotype_data, &mapper, 2, 789).unwrap();
+        let phenotype_data = calc_phenotypes(&ctx, &genotype_data, &genetic_arch, 2, 789).unwrap();
 
         assert_eq!(phenotype_data.shape, vec![200, 8]);
     }
@@ -382,11 +372,12 @@ mod tests {
 
         let traits = sim_traits(5).unwrap();
 
-        let mapper = sim_genotype_to_phenotype_map(&ctx, &genome, &loci, &traits, 456).unwrap();
+        let genetic_arch =
+            sim_genotype_to_phenotype_map(&ctx, &genome, &loci, &traits, 456).unwrap();
 
-        let a = calc_phenotypes(&ctx, &genotype_data, &mapper, 2, 999).unwrap();
+        let a = calc_phenotypes(&ctx, &genotype_data, &genetic_arch, 2, 999).unwrap();
 
-        let b = calc_phenotypes(&ctx, &genotype_data, &mapper, 2, 999).unwrap();
+        let b = calc_phenotypes(&ctx, &genotype_data, &genetic_arch, 2, 999).unwrap();
 
         assert_eq!(a.to_vec_f32(&ctx).unwrap(), b.to_vec_f32(&ctx).unwrap());
     }
@@ -405,12 +396,12 @@ mod tests {
 
         let traits = sim_traits(11).unwrap();
 
-        let (phenotype_data, mapper) =
+        let (phenotype_data, genetic_arch) =
             sim_phenotype_data(&ctx, &genome, &loci, &genotype_data, &traits, 2, 999).unwrap();
 
         assert_eq!(phenotype_data.shape, vec![250, 11]);
 
-        assert_eq!(mapper.heritabilities.len(), 11);
+        assert_eq!(genetic_arch.heritabilities.len(), 11);
     }
 
     #[test]

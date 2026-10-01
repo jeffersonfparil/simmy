@@ -166,7 +166,7 @@ impl Dataset {
         ploidy: usize,
         with_sex: bool,
         seed: u64,
-    ) -> Result<(Self, MapperG2P)> {
+    ) -> Result<(Self, GeneticModel)> {
         let mut founders: Self = Self::new(ctx, n_entries)?;
         founders.entries = sim_entries(n_entries)?;
         founders.ploidy = ploidy;
@@ -185,7 +185,7 @@ impl Dataset {
             founders.ploidy,
             seed + 3,
         )?;
-        let (phenotype_data, mapper) = sim_phenotype_data(
+        let (phenotype_data, genetic_arch) = sim_phenotype_data(
             ctx,
             &founders.genome,
             &founders.loci,
@@ -195,9 +195,10 @@ impl Dataset {
             seed + 4,
         )?;
         founders.phenotype_data = phenotype_data;
-        Ok((founders, mapper))
+        Ok((founders, genetic_arch))
     }
     pub fn check_dimensions(&self) -> Result<()> {
+        // TODO: add check for ploidy consistency
         let n_entries: usize = self.entries.len();
         let n_loci: usize = self.loci.len();
         let n_haplotype_persistence_probs: usize = self.haplotype_persistence_probs.len();
@@ -308,7 +309,7 @@ impl Dataset {
         &self,
         ctx: &GpuContext,
         mating_pairs: Vec<(usize, usize)>,
-        mapper: &MapperG2P,
+        genetic_arch: &GeneticModel,
         seed: u64,
     ) -> Result<Self> {
         self.check_dimensions()?;
@@ -316,20 +317,20 @@ impl Dataset {
         let n_loci = self.loci.len();
         let n_loci_alleles = self.loci.iter().fold(0, |sum, x| sum + x.col_idx.len());
         ensure!(
-            self.genome == mapper.genome,
-            "The genome of self and mapper do not match!"
+            self.genome == genetic_arch.genome,
+            "The genome of self and genetic_arch do not match!"
         );
         ensure!(
-            self.loci == mapper.loci,
-            "The loci of self and mapper do not match!"
+            self.loci == genetic_arch.loci,
+            "The loci of self and genetic_arch do not match!"
         );
         ensure!(
-            self.traits == mapper.traits,
-            "The traits of self and mapper do not match!"
+            self.traits == genetic_arch.traits,
+            "The traits of self and genetic_arch do not match!"
         );
         ensure!(
-            mapper.heritabilities.len() == mapper.traits.len(),
-            "The number of heritabilities does not match the number of traits in the genotype-to-phenotype mapper!"
+            genetic_arch.heritabilities.len() == genetic_arch.traits.len(),
+            "The number of heritabilities does not match the number of traits in the genotype-to-phenotype genetic_arch!"
         );
         // Locus data
         let mut locus_data_packed = Vec::with_capacity(n_loci);
@@ -463,7 +464,7 @@ impl Dataset {
             None,
             None,
         )?;
-        let phenotype_data = calc_phenotypes(ctx, &genotype_data, mapper, self.ploidy, seed)?;
+        let phenotype_data = calc_phenotypes(ctx, &genotype_data, genetic_arch, self.ploidy, seed)?;
         // Output
         let mut offsprings: Self = Self::new(ctx, n_offsprings)?;
         for (i, &(p1, p2)) in mating_pairs.iter().enumerate() {
@@ -661,13 +662,16 @@ mod tests {
     fn mating_is_deterministic() {
         let ctx = context();
 
-        let (parents, mapper) = Dataset::sim_founders(&ctx, 100, 5, 100, 5, 2, true, 42).unwrap();
+        let (parents, genetic_arch) =
+            Dataset::sim_founders(&ctx, 100, 5, 100, 5, 2, true, 42).unwrap();
 
         let pairs = parents.sample_mating_pairs(50, 123).unwrap();
 
-        let a = parents.mate(&ctx, pairs.clone(), &mapper, 999).unwrap();
+        let a = parents
+            .mate(&ctx, pairs.clone(), &genetic_arch, 999)
+            .unwrap();
 
-        let b = parents.mate(&ctx, pairs, &mapper, 999).unwrap();
+        let b = parents.mate(&ctx, pairs, &genetic_arch, 999).unwrap();
 
         assert_eq!(
             a.genotype_data.to_vec_f32(&ctx).unwrap(),
@@ -679,11 +683,12 @@ mod tests {
     fn offspring_dimensions_are_consistent() {
         let ctx = context();
 
-        let (parents, mapper) = Dataset::sim_founders(&ctx, 100, 5, 100, 5, 2, true, 42).unwrap();
+        let (parents, genetic_arch) =
+            Dataset::sim_founders(&ctx, 100, 5, 100, 5, 2, true, 42).unwrap();
 
         let pairs = parents.sample_mating_pairs(100, 123).unwrap();
 
-        let offspring = parents.mate(&ctx, pairs, &mapper, 999).unwrap();
+        let offspring = parents.mate(&ctx, pairs, &genetic_arch, 999).unwrap();
 
         assert!(offspring.check_dimensions().is_ok());
     }
@@ -692,11 +697,12 @@ mod tests {
     fn offspring_retain_genome_structure() {
         let ctx = context();
 
-        let (parents, mapper) = Dataset::sim_founders(&ctx, 100, 5, 100, 5, 2, true, 42).unwrap();
+        let (parents, genetic_arch) =
+            Dataset::sim_founders(&ctx, 100, 5, 100, 5, 2, true, 42).unwrap();
 
         let pairs = parents.sample_mating_pairs(100, 123).unwrap();
 
-        let offspring = parents.mate(&ctx, pairs, &mapper, 999).unwrap();
+        let offspring = parents.mate(&ctx, pairs, &genetic_arch, 999).unwrap();
 
         assert_eq!(offspring.genome, parents.genome,);
 
@@ -711,11 +717,14 @@ mod tests {
     fn offspring_names_record_parentage() {
         let ctx = context();
 
-        let (parents, mapper) = Dataset::sim_founders(&ctx, 100, 5, 100, 5, 2, true, 42).unwrap();
+        let (parents, genetic_arch) =
+            Dataset::sim_founders(&ctx, 100, 5, 100, 5, 2, true, 42).unwrap();
 
         let pairs = parents.sample_mating_pairs(100, 123).unwrap();
 
-        let offspring = parents.mate(&ctx, pairs.clone(), &mapper, 999).unwrap();
+        let offspring = parents
+            .mate(&ctx, pairs.clone(), &genetic_arch, 999)
+            .unwrap();
 
         for (i, (p1, p2)) in pairs.iter().enumerate() {
             let expected = format!(
@@ -731,11 +740,12 @@ mod tests {
     fn offspring_sexes_contain_only_valid_categories() {
         let ctx = context();
 
-        let (parents, mapper) = Dataset::sim_founders(&ctx, 1000, 5, 200, 5, 2, true, 42).unwrap();
+        let (parents, genetic_arch) =
+            Dataset::sim_founders(&ctx, 1000, 5, 200, 5, 2, true, 42).unwrap();
 
         let pairs = parents.sample_mating_pairs(100, 123).unwrap();
 
-        let offspring = parents.mate(&ctx, pairs, &mapper, 999).unwrap();
+        let offspring = parents.mate(&ctx, pairs, &genetic_arch, 999).unwrap();
 
         assert!(
             offspring
@@ -749,11 +759,12 @@ mod tests {
     fn offspring_sex_ratio_is_approximately_half() {
         let ctx = context();
 
-        let (parents, mapper) = Dataset::sim_founders(&ctx, 2000, 5, 100, 5, 2, true, 42).unwrap();
+        let (parents, genetic_arch) =
+            Dataset::sim_founders(&ctx, 2000, 5, 100, 5, 2, true, 42).unwrap();
 
         let pairs = parents.sample_mating_pairs(10000, 123).unwrap();
 
-        let offspring = parents.mate(&ctx, pairs, &mapper, 999).unwrap();
+        let offspring = parents.mate(&ctx, pairs, &genetic_arch, 999).unwrap();
 
         let n_hetero = offspring
             .sexes
@@ -770,11 +781,12 @@ mod tests {
     fn inferred_sex_matches_sex_locus() {
         let ctx = context();
 
-        let (parents, mapper) = Dataset::sim_founders(&ctx, 1000, 5, 200, 5, 2, true, 42).unwrap();
+        let (parents, genetic_arch) =
+            Dataset::sim_founders(&ctx, 1000, 5, 200, 5, 2, true, 42).unwrap();
 
         let pairs = parents.sample_mating_pairs(1000, 123).unwrap();
 
-        let offspring = parents.mate(&ctx, pairs, &mapper, 999).unwrap();
+        let offspring = parents.mate(&ctx, pairs, &genetic_arch, 999).unwrap();
 
         let idx_sex_chromosome = offspring
             .genome

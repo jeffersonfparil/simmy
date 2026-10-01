@@ -10,7 +10,7 @@ use linalg::context::GpuContext;
 use linalg::tensor::GpuTensor;
 
 use crate::dataset::Dataset;
-use crate::phenotype::MapperG2P;
+use crate::phenotype::GeneticModel;
 
 // TODO: this were CLI arguments parsing will live...
 
@@ -44,7 +44,7 @@ pub async fn run() -> Result<()> {
     let ploidy: usize = 2;
     let with_sex: bool = true;
     let seed: u64 = 4;
-    let (founders, mapper): (Dataset, MapperG2P) = Dataset::sim_founders(
+    let (founders, mapper): (Dataset, GeneticModel) = Dataset::sim_founders(
         &ctx,
         n_entries,
         n_chromosomes,
