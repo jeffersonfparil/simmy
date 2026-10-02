@@ -5,20 +5,15 @@ use crate::linalg::context::GpuContext;
 use crate::linalg::tensor::GpuTensor;
 use crate::phenotype::Trait;
 use anyhow::{Result, bail, ensure};
-use std::fs::{File, OpenOptions, exists, remove_file};
+use std::fs::{File, OpenOptions, exists};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 
 pub fn open_file_writer(fname: &str, overwrite: bool) -> Result<BufWriter<File>> {
-    if exists(fname)? {
-        if overwrite {
-            remove_file(fname)?;
-        } else {
-            bail!("The file:\"{}\" exists but overwrite = false!", fname);
-        }
-    }
-    let file: File = OpenOptions::new()
-        .create_new(true) // Errors if file exists!
+    let file = OpenOptions::new()
         .write(true)
+        .create_new(!overwrite) // Errors atomically if file exists and overwrite=false
+        .create(overwrite) // Creates if it doesn't exist
+        .truncate(overwrite) // Clears the file if it exists and overwrite=true
         .open(fname)?;
     Ok(BufWriter::new(file))
 }
@@ -75,29 +70,35 @@ impl Dataset {
         // Open file
         let mut file: BufWriter<File> = open_file_writer(fname, overwrite)?;
         // Header
-        let mut header: Vec<&str> = Vec::with_capacity(3 + n_traits);
-        header.push("name");
-        header.push("species");
-        header.push("group");
+        write!(file, "name{d}species{d}group", d = delimiter)?;
         for t in self.traits.iter() {
             check_strings(&t.name, delimiter)?;
-            header.push(t.name.as_str());
+            write!(file, "{d}{trait_name}", d = delimiter, trait_name = t.name)?;
         }
-        writeln!(file, "{}", header.join(delimiter))?;
+        writeln!(file)?;
         // Phenotype values
         let phenotype_vec: Vec<f32> = self.phenotype_data.to_vec_f32(ctx)?; // maybe a large allocation if phenotype data is large
-        let mut line: Vec<String> = vec!["".to_owned(); 3 + n_traits];
         for i in 0..n_entries {
             check_strings(&self.entries[i].name, delimiter)?;
-            line[0] = self.entries[i].name.to_owned();
             check_strings(&self.entries[i].species, delimiter)?;
-            line[1] = self.entries[i].species.to_owned();
             check_strings(&self.entries[i].group, delimiter)?;
-            line[2] = self.entries[i].group.to_owned();
+            write!(
+                file,
+                "{name}{d}{species}{d}{group}",
+                d = delimiter,
+                name = self.entries[i].name,
+                species = self.entries[i].species,
+                group = self.entries[i].group,
+            )?;
             for j in 0..n_traits {
-                line[3 + j] = phenotype_vec[(i * n_traits) + j].to_string();
+                write!(
+                    file,
+                    "{d}{y}",
+                    d = delimiter,
+                    y = phenotype_vec[(i * n_traits) + j]
+                )?;
             }
-            writeln!(file, "{}", line.join(delimiter))?;
+            writeln!(file)?;
         }
         file.flush()?; // Explicitly flush to make sure we successfully wrote into disk!
         Ok(())
@@ -214,40 +215,44 @@ impl Dataset {
             check_strings(&chrom.name, delimiter)?;
         }
         // Header
-        let mut header: Vec<String> = vec!["".to_owned(); 3 + n_loci_alleles];
-        header[0] = "name".to_owned();
-        header[1] = "species".to_owned();
-        header[2] = "group".to_owned();
+        write!(file, "name{d}species{d}group", d = delimiter)?;
         for locus in self.loci.iter() {
-            for (&j, allele) in locus.col_idx.iter().zip(&locus.alleles) {
+            for allele in locus.alleles.iter() {
                 check_strings(allele, delimiter)?;
-                header[3 + j] = format!(
-                    "{}|{}|{}",
-                    self.genome[locus.chromosome_id].name, locus.position, allele
-                );
+                write!(
+                    file,
+                    "{d}{chr}|{pos}|{ale}",
+                    d = delimiter,
+                    chr = self.genome[locus.chromosome_id].name,
+                    pos = locus.position,
+                    ale = allele,
+                )?;
             }
         }
-        writeln!(file, "{}", header.join(delimiter))?;
+        writeln!(file)?;
         // Genotype values
         let genotype_vec: Vec<f32> = self.genotype_data.to_vec_f32(ctx)?; // maybe a large allocation if genotype data is large
-        let mut line: Vec<String> = vec!["".to_owned(); 3 + n_loci_alleles];
         for i in 0..n_entries {
             check_strings(&self.entries[i].name, delimiter)?;
-            line[0] = self.entries[i].name.to_owned();
             check_strings(&self.entries[i].species, delimiter)?;
-            line[1] = self.entries[i].species.to_owned();
             check_strings(&self.entries[i].group, delimiter)?;
-            line[2] = self.entries[i].group.to_owned();
+            write!(
+                file,
+                "{name}{d}{species}{d}{group}",
+                d = delimiter,
+                name = self.entries[i].name,
+                species = self.entries[i].species,
+                group = self.entries[i].group,
+            )?;
             for locus in self.loci.iter() {
                 for &j in locus.col_idx.iter() {
-                    let idx_src: usize = (i * n_loci_alleles * 2) + (j * 2);
-                    let idx_des: usize = 3 + j;
-                    let a_0: String = genotype_vec[idx_src].to_string();
-                    let a_1: String = genotype_vec[idx_src + 1].to_string();
-                    line[idx_des] = a_0 + "|" + &a_1;
+                    let idx: usize = (i * n_loci_alleles * 2) + (j * 2);
+                    let a_0: String = genotype_vec[idx].to_string();
+                    let a_1: String = genotype_vec[idx + 1].to_string();
+                    write!(file, "{d}{a_0}|{a_1}", d = delimiter, a_0 = a_0, a_1 = a_1,)?;
                 }
             }
-            writeln!(file, "{}", line.join(delimiter))?;
+            writeln!(file)?;
         }
         file.flush()?; // Explicitly flush to make sure we successfully wrote into disk!
         Ok(())
