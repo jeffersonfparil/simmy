@@ -177,7 +177,16 @@ pub fn sim_genotype_data(
     let n_sexes: usize = sexes.len();
     let n_chromosomes: usize = genome.len();
     let n_loci: usize = loci.len();
-    let n_loci_alleles: usize = loci.iter().map(|x| x.col_idx.len()).sum();
+    let mut n_loci_alleles: usize = 0;
+    for locus in loci {
+        n_loci_alleles += locus.col_idx.len();
+        ensure!(
+            locus.chromosome_id < n_chromosomes,
+            "The chromosome id ({}) in loci is out-of-bounds (n_chromosomes={})!",
+            locus.chromosome_id,
+            n_chromosomes
+        );
+    }
     ensure!(
         n_entries > 0,
         "The number of entries need to be greater than zero!"

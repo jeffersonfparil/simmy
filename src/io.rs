@@ -69,7 +69,7 @@ impl Dataset {
     ) -> Result<()> {
         // Generates a complete phenotype table file
         // Not intended to append to an existing phenotype table file
-        self.check_dimensions()?;
+        self.check()?;
         let n_entries: usize = self.entries.len();
         let n_traits: usize = self.traits.len();
         // Open file
@@ -204,7 +204,7 @@ impl Dataset {
     ) -> Result<()> {
         // Generates a complete genotype table file
         // Not intended to append to an existing genotype table file
-        self.check_dimensions()?;
+        self.check()?;
         let n_entries: usize = self.entries.len();
         let n_loci_alleles: usize = self.loci.iter().map(|l| l.col_idx.len()).sum();
         // Open file
@@ -472,7 +472,10 @@ mod tests {
     }
 
     fn test_dataset(ctx: &GpuContext) -> Dataset {
-        let (parents, _mapper) = Dataset::sim_founders(ctx, 1000, 5, 200, 5, 2, true, 42).unwrap();
+        let (parents, _mapper) = Dataset::sim_founders(
+            ctx, 1000, 2, true, 5, 200, 5, &[0.5; 5], None, None, None, None, 42u64,
+        )
+        .unwrap();
         parents
     }
 

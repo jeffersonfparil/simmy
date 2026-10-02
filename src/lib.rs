@@ -48,11 +48,16 @@ pub async fn run() -> Result<()> {
     let (founders, mapper): (Dataset, GeneticModel) = Dataset::sim_founders(
         &ctx,
         n_entries,
+        ploidy,
+        with_sex,
         n_chromosomes,
         n_loci,
         n_traits,
-        ploidy,
-        with_sex,
+        &vec![0.5; n_traits],
+        None,
+        None,
+        None,
+        None,
         seed,
     )?;
     println!("founders:\n{}", founders);

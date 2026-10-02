@@ -7,7 +7,6 @@ use anyhow::{Result, ensure};
 use bytemuck::{Pod, Zeroable};
 use rand::prelude::IndexedRandom;
 use rand_chacha::{ChaCha8Rng, rand_core::SeedableRng};
-use std::borrow::Cow;
 use std::fmt;
 use wgpu::ComputePipeline;
 use wgpu::util::DeviceExt;
@@ -161,11 +160,16 @@ impl Dataset {
     pub fn sim_founders(
         ctx: &GpuContext,
         n_entries: usize,
+        ploidy: usize,
+        with_sex: bool,
         n_chromosomes: usize,
         n_loci: usize,
         n_traits: usize,
-        ploidy: usize,
-        with_sex: bool,
+        repeatabilities: &[f32], // Each trait will have it's own repeatability hence specific error effects distribution
+        n_loci_alleles_with_effects: Option<usize>, // number of loci with effects which gets translated to sparsity level, i.e. n_loci_alleles_with_effects / n_loci fo use in simulating non-zero weights
+        complexity_level: Option<usize>, // number of hidden layers with zero meaning classical linear model
+        n_nodes: Option<Vec<usize>>, // number of nodes per hidden layer + output layer, i.e. last value refer to the number of nodes in the final layer ==> the number of traits
+        activations: Option<Vec<Activation>>, // activation functions for each layer, i.e. including the final or output layer (e.g. Activation::Linear for the classical linear model with no hidden layers)
         seed: u64,
     ) -> Result<(Self, GeneticModel)> {
         let mut founders: Self = Self::new(ctx, n_entries)?;
@@ -186,19 +190,23 @@ impl Dataset {
             founders.ploidy,
             seed + 3,
         )?;
-        let (phenotype_data, genetic_arch) = sim_phenotype_data(
+        let (phenotype_data, genetic_model) = sim_phenotype_data(
             ctx,
+            &founders.genotype_data,
             &founders.genome,
             &founders.loci,
-            &founders.genotype_data,
             &founders.traits,
-            ploidy,
-            seed + 4,
+            repeatabilities,
+            n_loci_alleles_with_effects,
+            complexity_level,
+            n_nodes,
+            activations,
+            seed,
         )?;
         founders.phenotype_data = phenotype_data;
-        Ok((founders, genetic_arch))
+        Ok((founders, genetic_model))
     }
-    pub fn check_dimensions(&self) -> Result<()> {
+    pub fn check(&self) -> Result<()> {
         // TODO: add check for ploidy consistency
         let n_entries: usize = self.entries.len();
         let n_loci: usize = self.loci.len();
@@ -261,7 +269,7 @@ impl Dataset {
         n_offsprings: usize,
         seed: u64,
     ) -> Result<Vec<(usize, usize)>> {
-        self.check_dimensions()?;
+        self.check()?;
         let idx_homogametics_or_hermaphrodites: Vec<usize> = self
             .sexes
             .iter()
@@ -311,28 +319,29 @@ impl Dataset {
         ctx: &GpuContext,
         pipeline: &ComputePipeline, // see `gpu_pipeline/` for specific GPU ComputePipelines to use!
         mating_pairs: Vec<(usize, usize)>,
-        genetic_arch: &GeneticModel,
+        genetic_model: &GeneticModel,
         seed: u64,
     ) -> Result<Self> {
-        self.check_dimensions()?;
+        self.check()?;
+        genetic_model.check()?;
         let n_offsprings = mating_pairs.len();
         let n_loci = self.loci.len();
         let n_loci_alleles = self.loci.iter().fold(0, |sum, x| sum + x.col_idx.len());
         ensure!(
-            self.genome == genetic_arch.genome,
-            "The genome of self and genetic_arch do not match!"
+            self.genome == genetic_model.genome,
+            "The genome of self and genetic_model do not match!"
         );
         ensure!(
-            self.loci == genetic_arch.loci,
-            "The loci of self and genetic_arch do not match!"
+            self.loci == genetic_model.loci,
+            "The loci of self and genetic_model do not match!"
         );
         ensure!(
-            self.traits == genetic_arch.traits,
-            "The traits of self and genetic_arch do not match!"
+            self.traits == genetic_model.traits,
+            "The traits of self and genetic_model do not match!"
         );
         ensure!(
-            genetic_arch.repeatabilities.len() == genetic_arch.traits.len(),
-            "The number of repeatabilities does not match the number of traits in the genotype-to-phenotype genetic_arch!"
+            genetic_model.repeatabilities.len() == genetic_model.traits.len(),
+            "The number of repeatabilities does not match the number of traits in the genotype-to-phenotype genetic_model!"
         );
         // Locus data
         let mut locus_data_packed = Vec::with_capacity(n_loci);
@@ -442,7 +451,7 @@ impl Dataset {
                 label: Some("Meiosis Pass"),
                 timestamp_writes: None,
             });
-            cpass.set_pipeline(&pipeline);
+            cpass.set_pipeline(pipeline);
             cpass.set_bind_group(0, &bind_group, &[]);
             let workgroup_count = (n_offsprings as u32).div_ceil(64);
             cpass.dispatch_workgroups(workgroup_count, 1, 1);
@@ -455,7 +464,7 @@ impl Dataset {
             None,
             None,
         )?;
-        let phenotype_data = calc_phenotypes(ctx, &genotype_data, genetic_arch, self.ploidy, seed)?;
+        let phenotype_data = genetic_model.calc_phenotypes(ctx, &self.genotype_data, seed)?;
         // Output
         let mut offsprings: Self = Self::new(ctx, n_offsprings)?;
         for (i, &(p1, p2)) in mating_pairs.iter().enumerate() {
@@ -534,313 +543,277 @@ impl Dataset {
 mod tests {
     use super::*;
     use crate::gpu_pipeline::meiosis;
-    use crate::linalg::context::GpuContext;
-
     fn context() -> GpuContext {
         pollster::block_on(GpuContext::new()).expect("Failed to create GPU context")
     }
-
+    fn variance(x: &[f32]) -> f32 {
+        let m = x.iter().sum::<f32>() / (x.len() as f32);
+        x.iter().map(|v| (v - m).powi(2)).sum::<f32>() / (x.len() as f32)
+    }
+    #[test]
+    fn dataset_new_dimensions_are_valid() {
+        let ctx = context();
+        let dataset = Dataset::new(&ctx, 10).unwrap();
+        assert_eq!(dataset.entries.len(), 10);
+        assert_eq!(dataset.sexes.len(), 10);
+        assert_eq!(dataset.ploidy, 2);
+    }
     #[test]
     fn founder_dimensions_are_consistent() {
         let ctx = context();
-
-        let (dataset, _) = Dataset::sim_founders(&ctx, 100, 5, 100, 10, 2, true, 42).unwrap();
-
-        assert!(dataset.check_dimensions().is_ok());
+        let (dataset, _) = Dataset::sim_founders(
+            &ctx, 100, 2, true, 5, 100, 5, &[0.5; 5], None, None, None, None, 42,
+        )
+        .unwrap();
+        assert!(dataset.check().is_ok());
     }
-
     #[test]
     fn sim_founders_is_deterministic() {
         let ctx = context();
-
-        let (a, _) = Dataset::sim_founders(&ctx, 100, 5, 100, 5, 2, true, 42).unwrap();
-
-        let (b, _) = Dataset::sim_founders(&ctx, 100, 5, 100, 5, 2, true, 42).unwrap();
-
+        let (a, g1) = Dataset::sim_founders(
+            &ctx, 100, 2, true, 5, 100, 5, &[0.5; 5], None, None, None, None, 42,
+        )
+        .unwrap();
+        let (b, g2) = Dataset::sim_founders(
+            &ctx, 100, 2, true, 5, 100, 5, &[0.5; 5], None, None, None, None, 42,
+        )
+        .unwrap();
         assert_eq!(a.sexes, b.sexes);
         assert_eq!(a.genome, b.genome);
         assert_eq!(a.loci, b.loci);
         assert_eq!(a.traits, b.traits);
-
+        assert_eq!(
+            g1.weights[0].to_vec_f32(&ctx).unwrap(),
+            g2.weights[0].to_vec_f32(&ctx).unwrap()
+        );
         assert_eq!(
             a.genotype_data.to_vec_f32(&ctx).unwrap(),
-            b.genotype_data.to_vec_f32(&ctx).unwrap(),
+            b.genotype_data.to_vec_f32(&ctx).unwrap()
         );
-
         assert_eq!(
             a.phenotype_data.to_vec_f32(&ctx).unwrap(),
-            b.phenotype_data.to_vec_f32(&ctx).unwrap(),
+            b.phenotype_data.to_vec_f32(&ctx).unwrap()
         );
     }
-
     #[test]
-    fn genotype_tensor_shape_matches_loci() {
+    fn sim_founders_without_sex_are_hermaphroditic() {
         let ctx = context();
-
-        let (dataset, _) = Dataset::sim_founders(&ctx, 100, 5, 100, 10, 2, true, 42).unwrap();
-
+        let (dataset, _) = Dataset::sim_founders(
+            &ctx, 100, 2, false, 5, 100, 2, &[0.5; 2], None, None, None, None, 42,
+        )
+        .unwrap();
+        assert!(dataset.sexes.iter().all(|x| *x == Sex::Hermaphrodite));
+    }
+    #[test]
+    fn genotype_tensor_shape_matches_dataset() {
+        let ctx = context();
+        let (dataset, _) = Dataset::sim_founders(
+            &ctx, 100, 2, true, 5, 100, 5, &[0.5; 5], None, None, None, None, 42,
+        )
+        .unwrap();
         let n_loci_alleles: usize = dataset.loci.iter().map(|x| x.col_idx.len()).sum();
-
         assert_eq!(
             dataset.genotype_data.shape,
-            vec![100, n_loci_alleles as u32, 2,]
+            vec![100, n_loci_alleles as u32, 2]
         );
     }
-
     #[test]
     fn phenotype_tensor_shape_matches_traits() {
         let ctx = context();
-
-        let (dataset, _) = Dataset::sim_founders(&ctx, 250, 5, 100, 7, 2, true, 42).unwrap();
-
-        assert_eq!(dataset.phenotype_data.shape, vec![250, 7],);
+        let (dataset, _) = Dataset::sim_founders(
+            &ctx, 250, 2, true, 5, 100, 7, &[0.5; 7], None, None, None, None, 42,
+        )
+        .unwrap();
+        assert_eq!(dataset.phenotype_data.shape, vec![250, 7]);
     }
-
     #[test]
-    fn sex_vector_matches_entry_count() {
+    fn haplotype_probabilities_match_loci() {
         let ctx = context();
-
-        let (dataset, _) = Dataset::sim_founders(&ctx, 500, 5, 100, 3, 2, true, 42).unwrap();
-
-        assert_eq!(dataset.entries.len(), dataset.sexes.len(),);
+        let (dataset, _) = Dataset::sim_founders(
+            &ctx, 100, 2, true, 5, 200, 2, &[0.5; 2], None, None, None, None, 42,
+        )
+        .unwrap();
+        assert_eq!(
+            dataset.haplotype_persistence_probs.len(),
+            dataset.loci.len()
+        );
     }
-
+    #[test]
+    fn phenotype_variance_is_nonzero() {
+        let ctx = context();
+        let (dataset, _) = Dataset::sim_founders(
+            &ctx,
+            2000,
+            2,
+            true,
+            10,
+            1000,
+            1,
+            &[0.5],
+            None,
+            None,
+            None,
+            None,
+            42,
+        )
+        .unwrap();
+        let p = dataset.phenotype_data.to_vec_f32(&ctx).unwrap();
+        assert!(variance(&p) > 0.0);
+    }
     #[test]
     fn sample_mating_pairs_is_deterministic() {
         let ctx = context();
-
-        let (dataset, _) = Dataset::sim_founders(&ctx, 100, 5, 100, 5, 2, true, 42).unwrap();
-
+        let (dataset, _) = Dataset::sim_founders(
+            &ctx, 100, 2, true, 5, 100, 2, &[0.5; 2], None, None, None, None, 42,
+        )
+        .unwrap();
         let a = dataset.sample_mating_pairs(1000, 999).unwrap();
-
         let b = dataset.sample_mating_pairs(1000, 999).unwrap();
-
         assert_eq!(a, b);
     }
-
     #[test]
     fn sample_mating_pairs_returns_requested_number() {
         let ctx = context();
-
-        let (dataset, _) = Dataset::sim_founders(&ctx, 100, 5, 100, 5, 2, true, 42).unwrap();
-
-        let pairs = dataset.sample_mating_pairs(1234, 999).unwrap();
-
-        assert_eq!(pairs.len(), 1234);
+        let (dataset, _) = Dataset::sim_founders(
+            &ctx, 100, 2, true, 5, 100, 2, &[0.5; 2], None, None, None, None, 42,
+        )
+        .unwrap();
+        assert_eq!(dataset.sample_mating_pairs(1234, 999).unwrap().len(), 1234);
     }
-
     #[test]
     fn sampled_parents_follow_sex_constraints() {
         let ctx = context();
-
-        let (dataset, _) = Dataset::sim_founders(&ctx, 1000, 5, 100, 5, 2, true, 42).unwrap();
-
-        let pairs = dataset.sample_mating_pairs(5000, 999).unwrap();
-
-        for (p1, p2) in pairs {
+        let (dataset, _) = Dataset::sim_founders(
+            &ctx, 1000, 2, true, 5, 100, 2, &[0.5; 2], None, None, None, None, 42,
+        )
+        .unwrap();
+        for (p1, p2) in dataset.sample_mating_pairs(5000, 123).unwrap() {
             assert!(matches!(
                 dataset.sexes[p1],
                 Sex::Homogametic | Sex::Hermaphrodite
             ));
-
             assert!(matches!(
                 dataset.sexes[p2],
                 Sex::Heterogametic | Sex::Hermaphrodite
             ));
         }
     }
-
     #[test]
     fn mating_is_deterministic() {
         let ctx = context();
-        let pipeline_meiosis: ComputePipeline = meiosis::pipeline(&context()).unwrap();
-
-        let (parents, genetic_arch) =
-            Dataset::sim_founders(&ctx, 100, 5, 100, 5, 2, true, 42).unwrap();
-
+        let pipeline = meiosis::pipeline(&ctx).unwrap();
+        let (parents, arch) = Dataset::sim_founders(
+            &ctx, 100, 2, true, 5, 100, 2, &[0.5; 2], None, None, None, None, 42,
+        )
+        .unwrap();
         let pairs = parents.sample_mating_pairs(50, 123).unwrap();
-
         let a = parents
-            .mate(&ctx, &pipeline_meiosis, pairs.clone(), &genetic_arch, 999)
+            .mate(&ctx, &pipeline, pairs.clone(), &arch, 999)
             .unwrap();
-
-        let b = parents
-            .mate(&ctx, &pipeline_meiosis, pairs, &genetic_arch, 999)
-            .unwrap();
-
+        let b = parents.mate(&ctx, &pipeline, pairs, &arch, 999).unwrap();
         assert_eq!(
             a.genotype_data.to_vec_f32(&ctx).unwrap(),
             b.genotype_data.to_vec_f32(&ctx).unwrap()
         );
     }
-
+    #[test]
+    fn mating_changes_when_seed_changes() {
+        let ctx = context();
+        let pipeline = meiosis::pipeline(&ctx).unwrap();
+        let (parents, arch) = Dataset::sim_founders(
+            &ctx, 100, 2, true, 5, 100, 2, &[0.5; 2], None, None, None, None, 42,
+        )
+        .unwrap();
+        let pairs = parents.sample_mating_pairs(50, 123).unwrap();
+        let a = parents
+            .mate(&ctx, &pipeline, pairs.clone(), &arch, 1)
+            .unwrap();
+        let b = parents.mate(&ctx, &pipeline, pairs, &arch, 2).unwrap();
+        assert_ne!(
+            a.genotype_data.to_vec_f32(&ctx).unwrap(),
+            b.genotype_data.to_vec_f32(&ctx).unwrap()
+        );
+    }
     #[test]
     fn offspring_dimensions_are_consistent() {
         let ctx = context();
-        let pipeline_meiosis: ComputePipeline = meiosis::pipeline(&context()).unwrap();
-
-        let (parents, genetic_arch) =
-            Dataset::sim_founders(&ctx, 100, 5, 100, 5, 2, true, 42).unwrap();
-
+        let pipeline = meiosis::pipeline(&ctx).unwrap();
+        let (parents, arch) = Dataset::sim_founders(
+            &ctx, 100, 2, true, 5, 100, 2, &[0.5; 2], None, None, None, None, 42,
+        )
+        .unwrap();
         let pairs = parents.sample_mating_pairs(100, 123).unwrap();
-
-        let offspring = parents
-            .mate(&ctx, &pipeline_meiosis, pairs, &genetic_arch, 999)
-            .unwrap();
-
-        assert!(offspring.check_dimensions().is_ok());
+        let offspring = parents.mate(&ctx, &pipeline, pairs, &arch, 999).unwrap();
+        assert!(offspring.check().is_ok());
     }
-
     #[test]
     fn offspring_retain_genome_structure() {
         let ctx = context();
-        let pipeline_meiosis: ComputePipeline = meiosis::pipeline(&context()).unwrap();
-
-        let (parents, genetic_arch) =
-            Dataset::sim_founders(&ctx, 100, 5, 100, 5, 2, true, 42).unwrap();
-
+        let pipeline = meiosis::pipeline(&ctx).unwrap();
+        let (parents, arch) = Dataset::sim_founders(
+            &ctx, 100, 2, true, 5, 100, 2, &[0.5; 2], None, None, None, None, 42,
+        )
+        .unwrap();
         let pairs = parents.sample_mating_pairs(100, 123).unwrap();
-
-        let offspring = parents
-            .mate(&ctx, &pipeline_meiosis, pairs, &genetic_arch, 999)
-            .unwrap();
-
-        assert_eq!(offspring.genome, parents.genome,);
-
-        assert_eq!(offspring.loci, parents.loci,);
-
-        assert_eq!(offspring.traits, parents.traits,);
-
-        assert_eq!(offspring.ploidy, parents.ploidy,);
+        let offspring = parents.mate(&ctx, &pipeline, pairs, &arch, 999).unwrap();
+        assert_eq!(offspring.genome, parents.genome);
+        assert_eq!(offspring.loci, parents.loci);
+        assert_eq!(offspring.traits, parents.traits);
+        assert_eq!(offspring.ploidy, parents.ploidy);
     }
-
     #[test]
     fn offspring_names_record_parentage() {
         let ctx = context();
-        let pipeline_meiosis: ComputePipeline = meiosis::pipeline(&context()).unwrap();
-
-        let (parents, genetic_arch) =
-            Dataset::sim_founders(&ctx, 100, 5, 100, 5, 2, true, 42).unwrap();
-
+        let pipeline = meiosis::pipeline(&ctx).unwrap();
+        let (parents, arch) = Dataset::sim_founders(
+            &ctx, 100, 2, true, 5, 100, 2, &[0.5; 2], None, None, None, None, 42,
+        )
+        .unwrap();
         let pairs = parents.sample_mating_pairs(100, 123).unwrap();
-
         let offspring = parents
-            .mate(&ctx, &pipeline_meiosis, pairs.clone(), &genetic_arch, 999)
+            .mate(&ctx, &pipeline, pairs.clone(), &arch, 999)
             .unwrap();
-
         for (i, (p1, p2)) in pairs.iter().enumerate() {
-            let expected = format!(
-                "{}--x--{}",
-                parents.entries[*p1].name, parents.entries[*p2].name,
+            assert_eq!(
+                offspring.entries[i].name,
+                format!(
+                    "{}--x--{}",
+                    parents.entries[*p1].name, parents.entries[*p2].name
+                )
             );
-
-            assert_eq!(offspring.entries[i].name, expected,);
         }
     }
-
     #[test]
-    fn offspring_sexes_contain_only_valid_categories() {
+    fn offspring_genotypes_are_not_identical_to_parents() {
         let ctx = context();
-        let pipeline_meiosis: ComputePipeline = meiosis::pipeline(&context()).unwrap();
-
-        let (parents, genetic_arch) =
-            Dataset::sim_founders(&ctx, 1000, 5, 200, 5, 2, true, 42).unwrap();
-
+        let pipeline = meiosis::pipeline(&ctx).unwrap();
+        let (parents, arch) = Dataset::sim_founders(
+            &ctx, 200, 2, true, 5, 100, 2, &[0.5; 2], None, None, None, None, 42,
+        )
+        .unwrap();
         let pairs = parents.sample_mating_pairs(100, 123).unwrap();
-
-        let offspring = parents
-            .mate(&ctx, &pipeline_meiosis, pairs, &genetic_arch, 999)
-            .unwrap();
-
-        assert!(
-            offspring
-                .sexes
-                .iter()
-                .all(|x| { matches!(x, Sex::Homogametic | Sex::Heterogametic) })
+        let offspring = parents.mate(&ctx, &pipeline, pairs, &arch, 999).unwrap();
+        assert_ne!(
+            parents.genotype_data.to_vec_f32(&ctx).unwrap()[0..100].to_vec(),
+            offspring.genotype_data.to_vec_f32(&ctx).unwrap()[0..100].to_vec()
         );
     }
-
     #[test]
     fn offspring_sex_ratio_is_approximately_half() {
         let ctx = context();
-        let pipeline_meiosis: ComputePipeline = meiosis::pipeline(&context()).unwrap();
-
-        let (parents, genetic_arch) =
-            Dataset::sim_founders(&ctx, 2000, 5, 100, 5, 2, true, 42).unwrap();
-
+        let pipeline = meiosis::pipeline(&ctx).unwrap();
+        let (parents, arch) = Dataset::sim_founders(
+            &ctx, 2000, 2, true, 5, 200, 2, &[0.5; 2], None, None, None, None, 42,
+        )
+        .unwrap();
         let pairs = parents.sample_mating_pairs(10000, 123).unwrap();
-
-        let offspring = parents
-            .mate(&ctx, &pipeline_meiosis, pairs, &genetic_arch, 999)
-            .unwrap();
-
-        let n_hetero = offspring
+        let offspring = parents.mate(&ctx, &pipeline, pairs, &arch, 999).unwrap();
+        let n = offspring
             .sexes
             .iter()
             .filter(|&&x| x == Sex::Heterogametic)
             .count();
-
-        let p = n_hetero as f32 / offspring.sexes.len() as f32;
-
+        let p = n as f32 / offspring.sexes.len() as f32;
         assert!((p - 0.5).abs() < 0.05);
-    }
-
-    #[test]
-    fn inferred_sex_matches_sex_locus() {
-        let ctx = context();
-        let pipeline_meiosis: ComputePipeline = meiosis::pipeline(&context()).unwrap();
-
-        let (parents, genetic_arch) =
-            Dataset::sim_founders(&ctx, 1000, 5, 200, 5, 2, true, 42).unwrap();
-
-        let pairs = parents.sample_mating_pairs(1000, 123).unwrap();
-
-        let offspring = parents
-            .mate(&ctx, &pipeline_meiosis, pairs, &genetic_arch, 999)
-            .unwrap();
-
-        let idx_sex_chromosome = offspring
-            .genome
-            .iter()
-            .position(|x| x.is_sex_chromosome)
-            .unwrap();
-
-        let sex_locus = offspring
-            .loci
-            .iter()
-            .find(|l| l.chromosome_id == idx_sex_chromosome)
-            .unwrap();
-
-        let g = offspring
-            .genotype_data
-            .slice_view(&[
-                (0, offspring.entries.len()),
-                (sex_locus.col_idx[0], sex_locus.col_idx[0] + 2),
-                (0, 2),
-            ])
-            .unwrap()
-            .to_vec_f32(&ctx)
-            .unwrap();
-
-        for i in 0..offspring.entries.len() {
-            let x0 = g[i * 4];
-            let x1 = g[(i * 4) + 1];
-            let y0 = g[(i * 4) + 2];
-            let y1 = g[(i * 4) + 3];
-
-            match offspring.sexes[i] {
-                Sex::Homogametic => {
-                    assert!(x0 > 0.0 || x1 > 0.0);
-                    assert_eq!(y0 + y1, 0.0);
-                }
-                Sex::Heterogametic => {
-                    assert!(x0 > 0.0 || x1 > 0.0);
-                    assert!(y0 + y1 > 0.0);
-                }
-                Sex::Hermaphrodite => {
-                    panic!("Unexpected hermaphroditic offspring")
-                }
-            }
-        }
     }
 }

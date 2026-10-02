@@ -1,18 +1,8 @@
-use crate::compute_pipelines::meiosis;
-use crate::entry::*;
-use crate::genotype::*;
 use crate::linalg::context::GpuContext;
-use crate::linalg::tensor::GpuTensor;
-use crate::phenotype::*;
-use anyhow::{Result, bail, ensure};
-use bytemuck::{Pod, Zeroable};
-use rand::prelude::IndexedRandom;
-use rand_chacha::{ChaCha8Rng, rand_core::SeedableRng};
+use anyhow::{Result, bail};
 use std::borrow::Cow;
-use std::fmt;
 use std::fs::exists;
 use wgpu::ComputePipeline;
-use wgpu::util::DeviceExt;
 
 pub fn pipeline(ctx: &GpuContext) -> Result<ComputePipeline> {
     match exists("meiosis.wgsl") {
