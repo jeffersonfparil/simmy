@@ -22,10 +22,12 @@ pub struct GpuContext {
 
     pub unary_matrix_pipeline: wgpu::ComputePipeline,
     pub binary_matrix_pipeline: wgpu::ComputePipeline,
+    pub scalar_matrix_pipeline: wgpu::ComputePipeline,
     pub contract_matrix_pipeline: wgpu::ComputePipeline,
 
     pub unary_tensor_pipeline: wgpu::ComputePipeline,
     pub binary_tensor_pipeline: wgpu::ComputePipeline,
+    pub scalar_tensor_pipeline: wgpu::ComputePipeline,
     pub contract_tensor_pipeline: wgpu::ComputePipeline,
 }
 
@@ -182,14 +184,31 @@ impl GpuContext {
             })
             .await
             .context("No adapter")?;
-        let (device, queue) = adapter.request_device(&Default::default()).await?;
+        // let (device, queue) = adapter.request_device(&Default::default()).await?;
+        let supported = adapter.limits(); // May be limited to just 4 storage buffers!
+        let required_limits = wgpu::Limits {
+            max_color_attachments: supported.max_color_attachments,
+            ..wgpu::Limits::downlevel_defaults()
+        };
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("device"),
+                required_features: wgpu::Features::empty(),
+                required_limits,
+                memory_hints: wgpu::MemoryHints::Performance,
+                experimental_features: wgpu::ExperimentalFeatures::disabled(),
+                trace: wgpu::Trace::default(),
+            })
+            .await?;
         let opcode_source: &str = include_str!("wgsl/opcodes.wgsl");
         let kernel_sources: Vec<&str> = vec![
             include_str!("wgsl/unary_matrix.wgsl"),
             include_str!("wgsl/binary_matrix.wgsl"),
+            include_str!("wgsl/scalar_matrix.wgsl"),
             include_str!("wgsl/contract_matrix.wgsl"),
             include_str!("wgsl/unary_tensor.wgsl"),
             include_str!("wgsl/binary_tensor.wgsl"),
+            include_str!("wgsl/scalar_tensor.wgsl"),
             include_str!("wgsl/contract_tensor.wgsl"),
         ];
         let mut pipelines: Vec<ComputePipeline> = Vec::with_capacity(kernel_sources.len());
@@ -211,9 +230,11 @@ impl GpuContext {
         }
         let unary_matrix_pipeline = pipelines.remove(0);
         let binary_matrix_pipeline = pipelines.remove(0);
+        let scalar_matrix_pipeline = pipelines.remove(0);
         let contract_matrix_pipeline = pipelines.remove(0);
         let unary_tensor_pipeline = pipelines.remove(0);
         let binary_tensor_pipeline = pipelines.remove(0);
+        let scalar_tensor_pipeline = pipelines.remove(0);
         let contract_tensor_pipeline = pipelines.remove(0);
         Ok(Self {
             instance,
@@ -222,9 +243,11 @@ impl GpuContext {
             queue,
             unary_matrix_pipeline,
             binary_matrix_pipeline,
+            scalar_matrix_pipeline,
             contract_matrix_pipeline,
             unary_tensor_pipeline,
             binary_tensor_pipeline,
+            scalar_tensor_pipeline,
             contract_tensor_pipeline,
         })
     }

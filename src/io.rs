@@ -1,359 +1,785 @@
-//! # Genomic and Phenotypic Data Structures for Breeding Simulations
-//!
-//! This module defines the CPU-side relational metadata and structural foundations
-//! of the simulation engine. The primary design goal is to cleanly decouple heavy,
-//! text-based biological metadata (which resides on the CPU) from raw, highly
-//! optimized numerical arrays (which reside on the GPU as [`GpuTensor`] instances) [1, 2].
-//!
-//! ### Why This Architecture is Optimized for Breeding Simulations:
-//! 1. **GPU/CPU Modularity:** Simulating cohorts over generations involves complex CPU-bound
-//!    recombination, crossover logic, and pedigree tracing. Meanwhile, calculating genomic
-//!    breeding values (GEBVs), selection indices, and linkage disequilibrium (LD) matrices
-//!    is delegated to massive parallel matrix algebra on the GPU [2].
-//! 2. **Support for Multi-Allelic Loci:** Real-world breeding pools contain highly variable
-//!    multi-allelic states (e.g., microsatellites, structural variants, or multiple founder
-//!    haplotypes). By flattening these states into a relational mapping table ([`LocusAllele`]),
-//!    this design supports arbitrary allelic counts per site on a unified GPU matrix coordinate system.
-//! 3. **Struct-of-Arrays (SoA) Layout:** Storing metadata attributes in parallel vectors
-//!    allows rapid CPU-side scanning, demographic filtering, and generation masking without
-//!    the memory overhead of unpacking deeply nested structures.
-//!
-
+use crate::dataset::Dataset;
+use crate::entry::Entry;
+use crate::genotype::Locus;
+use crate::linalg::context::GpuContext;
 use crate::linalg::tensor::GpuTensor;
-use anyhow::{Result, ensure};
+use crate::phenotype::Trait;
+use anyhow::{Result, bail, ensure};
+use std::fs::{File, OpenOptions, exists};
+use std::io::{BufRead, BufReader, BufWriter, Write};
 
-/// Represents physical genomic chromosomes, scaffolds, or contigs.
-///
-/// ### Breeding Simulation Context:
-/// Essential for simulating physical linkage, chromosomal crossover events during
-/// meiosis, and modeling genetic recombination maps. The sequence coordinates mapped
-/// against physical chromosomal lengths enable calculation of centimorgan (cM) distances
-/// and crossover probabilities during simulated mating cycles.
-#[derive(Debug, Clone)]
-pub struct Chromosomes {
-    /// Unique names/identifiers for each chromosome, scaffold, or contig.
-    pub chromosomes: Vec<String>,
-    /// Physical sizes (lengths in base pairs) corresponding to each chromosome.
-    /// Used for validating recombination crossover boundaries.
-    pub lengths: Vec<usize>,
+pub fn open_file_writer(fname: &str, overwrite: bool) -> Result<BufWriter<File>> {
+    let file = OpenOptions::new()
+        .write(true)
+        .create_new(!overwrite) // Errors atomically if file exists and overwrite=false
+        .create(overwrite) // Creates if it doesn't exist
+        .truncate(overwrite) // Clears the file if it exists and overwrite=true
+        .open(fname)?;
+    Ok(BufWriter::new(file))
 }
 
-impl Chromosomes {
-    pub fn new(n: usize, lengths: Option<Vec<usize>>) -> Result<Self> {
-        let lengths = match lengths {
-            Some(x) => x,
-            None => vec![1_000_000; n],
-        };
-        ensure!(
-            n == lengths.len(),
-            "The number of names (n={}) and lengths (n={}) must match!",
-            n,
-            lengths.len()
-        );
-        let chromosomes: Vec<String> = (0..n).map(|i| format!("chr_{}", i)).collect();
-        Ok(Self {
-            chromosomes,
-            lengths,
-        })
+pub fn open_file_reader(fname: &str) -> Result<BufReader<File>> {
+    if !exists(fname)? {
+        bail!("The file:\"{}\" does not exist!", fname);
     }
+    let file: File = File::open(fname)?;
+    Ok(BufReader::new(file))
 }
 
-/// A global dictionary of unique allelic variant sequences or sequence states.
-///
-/// ### Breeding Simulation Context:
-/// This acts as a centralized registry for any physical allele represented in the pool—ranging
-/// from single-nucleotide polymorphisms (SNPs) to complex insertions, deletions (DEL),
-/// and large structural variants. It decouples descriptive string-based sequence data
-/// from the active, high-speed numeric matrices running on the GPU.
-#[derive(Debug, Clone)]
-pub struct Alleles {
-    /// String representations of the allele sequences (e.g., "A", "T", "DEL", "GATGCGC").
-    pub names: Vec<String>,
+pub fn check_strings(string: &str, delimiter: &str) -> Result<()> {
+    for ill in ["\"", "\n", "|", delimiter] {
+        if string.contains(ill) {
+            bail!("The string: {} contains illegal string: {:?}", string, ill);
+        }
+    }
+    Ok(())
 }
 
-const SNPS: &[&str] = &["A", "T", "C", "G", "DEL"];
+pub fn check_header_id_cols(line: &[String], fname: &str) -> Result<()> {
+    ensure!(
+        line[0] == "name",
+        "The first column of the file: \"{}\" should be \"name\"!",
+        fname
+    );
+    ensure!(
+        line[1] == "species",
+        "The second column of the file: \"{}\" should be \"species\"!",
+        fname
+    );
+    ensure!(
+        line[2] == "group",
+        "The third column of the file: \"{}\" should be \"group\"!",
+        fname
+    );
+    Ok(())
+}
 
-impl Alleles {
-    pub fn new(n: usize, names: Option<Vec<String>>) -> Result<Self> {
-        let names = match names {
-            Some(x) => x,
-            None => {
-                let mut names: Vec<String> = Vec::with_capacity(n);
-                // For n <= 5: names  in vec!["A", "T", "C", "G", "DEL"]
-                // For n <= 10: names in vec!["A", "T", "C", "G", "DEL", "TA", "TT", "TC", "TG", "TDEL"]
-                // For n <= 15: names in vec!["A", "T", "C", "G", "DEL", "TA", "TT", "TC", "TG", "TDEL", "CA", "CT", "CC", "CG", "CDEL"]
-                // For n <= 20: names in vec!["A", "T", "C", "G", "DEL", "TA", "TT", "TC", "TG", "TDEL", "CA", "CT", "CC", "CG", "CDEL", "GA", "GT", "GC", "GG", "GDEL"]
-                // i.e. little-endian generation because this is simpler than the big-endian
-                for i in 0..n {
-                    let mut name_components: Vec<&str> = Vec::new();
-                    let mut idx = i;
-                    loop {
-                        let snp_idx = idx % SNPS.len();
-                        idx /= SNPS.len(); // floor of corresponding float quotients
-                        name_components.push(SNPS[snp_idx]);
-                        if idx == 0 {
+impl Dataset {
+    pub fn write_phenotype(
+        &self,
+        ctx: &GpuContext,
+        fname: &str,
+        delimiter: &str,
+        overwrite: bool,
+    ) -> Result<()> {
+        // Generates a complete phenotype table file
+        // Not intended to append to an existing phenotype table file
+        self.check()?;
+        let n_entries: usize = self.entries.len();
+        let n_traits: usize = self.traits.len();
+        // Open file
+        let mut file: BufWriter<File> = open_file_writer(fname, overwrite)?;
+        // Header
+        write!(file, "name{d}species{d}group", d = delimiter)?;
+        for t in self.traits.iter() {
+            check_strings(&t.name, delimiter)?;
+            write!(file, "{d}{trait_name}", d = delimiter, trait_name = t.name)?;
+        }
+        writeln!(file)?;
+        // Phenotype values
+        let phenotype_vec: Vec<f32> = self.phenotype_data.to_vec_f32(ctx)?; // maybe a large allocation if phenotype data is large
+        for i in 0..n_entries {
+            check_strings(&self.entries[i].name, delimiter)?;
+            check_strings(&self.entries[i].species, delimiter)?;
+            check_strings(&self.entries[i].group, delimiter)?;
+            write!(
+                file,
+                "{name}{d}{species}{d}{group}",
+                d = delimiter,
+                name = self.entries[i].name,
+                species = self.entries[i].species,
+                group = self.entries[i].group,
+            )?;
+            for j in 0..n_traits {
+                write!(
+                    file,
+                    "{d}{y}",
+                    d = delimiter,
+                    y = phenotype_vec[(i * n_traits) + j]
+                )?;
+            }
+            writeln!(file)?;
+        }
+        file.flush()?; // Explicitly flush to make sure we successfully wrote into disk!
+        Ok(())
+    }
+    pub fn read_phenotype(
+        &mut self,
+        ctx: &GpuContext,
+        fname: &str,
+        delimiter: &str,
+        entries_exist: bool,
+    ) -> Result<()> {
+        let file: BufReader<File> = open_file_reader(fname)?;
+        if !entries_exist {
+            self.entries = Vec::new();
+        }
+        let mut traits: Vec<Trait> = Vec::new();
+        let mut phenotype_vec: Vec<f32> = Vec::new();
+        for (i, line) in file.lines().enumerate() {
+            let line: Vec<String> = line?.split(delimiter).map(|x| x.to_owned()).collect();
+            ensure!(
+                line.len() >= 4,
+                "Malformed file: \"{}\" at line {}!",
+                fname,
+                i
+            );
+            if i == 0 {
+                // Header
+                check_header_id_cols(&line, fname)?;
+                for x in line.iter().skip(3) {
+                    let t = Trait {
+                        name: x.to_owned(),
+                        description: "".to_owned(),
+                    };
+                    traits.push(t);
+                }
+                ensure!(
+                    !traits.is_empty(),
+                    "There are no traits in file: \"{}\"!",
+                    fname
+                );
+            } else {
+                // Data after the header line
+                if entries_exist {
+                    ensure!(
+                        (i - 1) < self.entries.len(),
+                        "There are too many entries in file: \"{}\" than expected!",
+                        fname
+                    ); // Note that we use i-1 because ith line is the header in the file
+                    ensure!(
+                        self.entries[i - 1].name == line[0],
+                        "Entries in file: \"{}\" do not match existing Dataset! See line {}.",
+                        fname,
+                        i
+                    ); // Again note that we use i-1 because ith line is the header in the file
+                } else {
+                    let entry = Entry {
+                        name: line[0].to_owned(),
+                        species: line[1].to_owned(),
+                        group: line[2].to_owned(),
+                        notes: "".to_owned(),
+                    };
+                    self.entries.push(entry);
+                }
+                ensure!(
+                    line.len() == 3 + traits.len(),
+                    "Malformed file: \"{}\" at line {}!",
+                    fname,
+                    i
+                );
+                for x in line.iter().skip(3) {
+                    let y: f32 = x.parse::<f32>()?;
+                    phenotype_vec.push(y);
+                }
+            }
+        }
+        let n_traits: u32 = traits.len() as u32;
+        let n_entries: u32 = phenotype_vec.len() as u32 / n_traits;
+        ensure!(
+            n_entries == self.entries.len() as u32,
+            "There are too few entries in file: \"{}\" than expected!",
+            fname
+        );
+        self.traits = traits;
+        self.phenotype_data =
+            GpuTensor::from_vec_f32(ctx, &phenotype_vec, &[n_entries, n_traits], None, None)?;
+        // Note that the resulting mutated Dataset struct may be:
+        // ✅ entries
+        // ❌ ploidy
+        // ❌ sexes
+        // ❌ genome
+        // ❌ loci
+        // ❌ haplotype_persistence_probs
+        // ✅ traits
+        // ❌ genotype_data
+        // ✅ phenotype_data
+        Ok(())
+    }
+    pub fn write_genotype(
+        &self,
+        ctx: &GpuContext,
+        fname: &str,
+        delimiter: &str,
+        overwrite: bool,
+    ) -> Result<()> {
+        // Generates a complete genotype table file
+        // Not intended to append to an existing genotype table file
+        self.check()?;
+        let n_entries: usize = self.entries.len();
+        let n_loci_alleles: usize = self.loci.iter().map(|l| l.col_idx.len()).sum();
+        // Open file
+        let mut file: BufWriter<File> = open_file_writer(fname, overwrite)?;
+        // Check chromosome names
+        for chrom in self.genome.iter() {
+            check_strings(&chrom.name, delimiter)?;
+        }
+        // Header
+        write!(file, "name{d}species{d}group", d = delimiter)?;
+        for locus in self.loci.iter() {
+            for allele in locus.alleles.iter() {
+                check_strings(allele, delimiter)?;
+                write!(
+                    file,
+                    "{d}{chr}|{pos}|{ale}",
+                    d = delimiter,
+                    chr = self.genome[locus.chromosome_id].name,
+                    pos = locus.position,
+                    ale = allele,
+                )?;
+            }
+        }
+        writeln!(file)?;
+        // Genotype values
+        let genotype_vec: Vec<f32> = self.genotype_data.to_vec_f32(ctx)?; // maybe a large allocation if genotype data is large
+        for i in 0..n_entries {
+            check_strings(&self.entries[i].name, delimiter)?;
+            check_strings(&self.entries[i].species, delimiter)?;
+            check_strings(&self.entries[i].group, delimiter)?;
+            write!(
+                file,
+                "{name}{d}{species}{d}{group}",
+                d = delimiter,
+                name = self.entries[i].name,
+                species = self.entries[i].species,
+                group = self.entries[i].group,
+            )?;
+            for locus in self.loci.iter() {
+                for &j in locus.col_idx.iter() {
+                    let idx: usize = (i * n_loci_alleles * 2) + (j * 2);
+                    let a_0: String = genotype_vec[idx].to_string();
+                    let a_1: String = genotype_vec[idx + 1].to_string();
+                    write!(file, "{d}{a_0}|{a_1}", d = delimiter, a_0 = a_0, a_1 = a_1,)?;
+                }
+            }
+            writeln!(file)?;
+        }
+        file.flush()?; // Explicitly flush to make sure we successfully wrote into disk!
+        Ok(())
+    }
+    pub fn read_genotype(
+        &mut self,
+        ctx: &GpuContext,
+        fname: &str,
+        delimiter: &str,
+        entries_exist: bool,
+    ) -> Result<()> {
+        ensure!(
+            !self.genome.is_empty(),
+            "We expect the genome information to already exist as the genotype table file does not contain all the necessary information, e.g. chromosome lengths!"
+        );
+        let file: BufReader<File> = open_file_reader(fname)?;
+        if !entries_exist {
+            self.entries = Vec::new();
+        }
+        let mut genotype_vec: Vec<f32> = Vec::new();
+        for (i, line) in file.lines().enumerate() {
+            let line: Vec<String> = line?.split(delimiter).map(|x| x.to_owned()).collect();
+            ensure!(
+                line.len() >= 4,
+                "Malformed file: \"{}\" at line {}!",
+                fname,
+                i
+            );
+            if i == 0 {
+                // Header line: parse and validate locus-allele information
+                check_header_id_cols(&line, fname)?; // First 3 columns are: name, species, and group
+                let mut loci: Vec<Locus> = Vec::new();
+                let mut locus = Locus {
+                    chromosome_id: 0,
+                    position: 0,
+                    alleles: vec![],
+                    length: 1,
+                    col_idx: vec![],
+                };
+                for (j, x) in line.iter().skip(3).enumerate() {
+                    let y: Vec<&str> = x.split("|").collect();
+                    ensure!(
+                        y.len() == 3,
+                        "Malformed header in file: \"{}\" at column {}. The locus-allele names should have the form: \"chromosome_name|position|allele\", e.g. \"chr_1|123|A\"!",
+                        fname,
+                        j + 3
+                    );
+                    let chromosome_name: &str = y[0];
+                    let position: usize = y[1].parse::<usize>()?;
+                    let allele: &str = y[2];
+                    let mut okay: bool = false;
+                    let mut chromosome_id: usize = 0;
+                    for (k, g) in self.genome.iter().enumerate() {
+                        if (g.name == chromosome_name) && (g.length > position) {
+                            okay = true;
+                            chromosome_id = k;
                             break;
                         }
                     }
-                    name_components.reverse();
-                    names.push(name_components.join(""));
+                    ensure!(
+                        okay,
+                        "The chromosome name and/or length in file: \"{}\" at column {} do not match the expected information!",
+                        fname,
+                        j + 3
+                    );
+                    if !((locus.chromosome_id == chromosome_id) && (locus.position == position)) {
+                        // New locus
+                        if j > 0 {
+                            // Push previous fully defined locus
+                            loci.push(locus.clone());
+                        }
+                        locus.chromosome_id = chromosome_id;
+                        locus.position = position;
+                        locus.alleles = vec![allele.to_owned()];
+                        locus.length = allele.len();
+                        locus.col_idx = vec![j];
+                    } else {
+                        // Additional alleles at a locus
+                        locus.alleles.push(allele.to_owned());
+                        locus.length = [locus.length, allele.len()].into_iter().max().unwrap_or(1);
+                        locus.col_idx.push(j);
+                    }
                 }
-                names
+                // Push the last fully defined locus
+                ensure!(
+                    !loci.is_empty() && !locus.alleles.is_empty(),
+                    "No loci found in file: \"{}\"!",
+                    fname
+                );
+                loci.push(locus.clone());
+                // Update the Dataset
+                self.loci = loci;
+            } else {
+                // Genotype data
+                if entries_exist {
+                    ensure!(
+                        (i - 1) < self.entries.len(),
+                        "There are too many entries in file: \"{}\" than expected!",
+                        fname
+                    ); // Note that we use i-1 because ith line is the header in the file
+                    ensure!(
+                        self.entries[i - 1].name == line[0],
+                        "Entries in file: \"{}\" do not match existing Dataset! See line {}.",
+                        fname,
+                        i
+                    ); // Again note that we use i-1 because ith line is the header in the file
+                } else {
+                    let entry = Entry {
+                        name: line[0].to_owned(),
+                        species: line[1].to_owned(),
+                        group: line[2].to_owned(),
+                        notes: "".to_owned(),
+                    };
+                    self.entries.push(entry);
+                }
+                let n_loci_alleles: usize = self.loci.iter().map(|x| x.col_idx.len()).sum();
+                ensure!(
+                    (line.len() - 3) == n_loci_alleles,
+                    "Malformed genotype data in file: \"{}\" at line {}!",
+                    fname,
+                    i
+                );
+                for (j, x) in line.iter().skip(3).enumerate() {
+                    let y: Vec<&str> = x.split("|").collect();
+                    ensure!(
+                        y.len() == 2,
+                        "Malformed genotype data in file: \"{}\" at column {}. The genotype data is expected to be paired: \"h0_dosage|h1_dosage\", e.g. \"1|1\", \"2|0\" and \"3|1\"!",
+                        fname,
+                        j + 3
+                    );
+                    let h0_dosage: f32 = match y[0].parse::<f32>() {
+                        Ok(x) => x,
+                        Err(_e) => {
+                            bail!(
+                                "Failed to parse the allele dosage from the first homologous chromosome in file: \"{}\" at line {} and column {}!",
+                                fname,
+                                i,
+                                j
+                            );
+                        }
+                    };
+                    let h1_dosage: f32 = match y[1].parse::<f32>() {
+                        Ok(x) => x,
+                        Err(_e) => {
+                            bail!(
+                                "Failed to parse the allele dosage from the second homologous chromosome in file: \"{}\" at line {} and column {}!",
+                                fname,
+                                i,
+                                j
+                            );
+                        }
+                    };
+                    genotype_vec.push(h0_dosage);
+                    genotype_vec.push(h1_dosage);
+                }
             }
-        };
-        ensure!(
-            n == names.len(),
-            "The numbe of names (n={}) and names (n={}) must match!",
-            n,
-            names.len()
-        );
-        let mut perm: Vec<usize> = (0..n).collect();
-        perm.sort_by_key(|&i| names[i].to_owned());
-        for i in 1..n {
-            let idx_0 = perm[i - 1];
-            let idx_1 = perm[i];
-            ensure!(
-                names[idx_0] != names[idx_1],
-                "Duplicated allele: {}!",
-                names[idx_0]
-            );
         }
-        Ok(Self { names })
+        let n_entries: usize = self.entries.len();
+        let n_loci_alleles: usize = self.loci.iter().map(|x| x.col_idx.len()).sum::<usize>();
+        ensure!(
+            n_entries == (genotype_vec.len() / (2 * n_loci_alleles)),
+            "There are too few entries in file: \"{}\" than expected!",
+            fname
+        );
+        // Update and check ploidy consistency across entries and loci
+        let mut ploidy: usize = 0;
+        for i in 0..n_entries {
+            let idx_entry: usize = i * n_loci_alleles * 2;
+            for locus in self.loci.iter() {
+                let mut h0_dosage: usize = 0;
+                let mut h1_dosage: usize = 0;
+                for idx_locus_allele in locus.col_idx.iter() {
+                    h0_dosage += genotype_vec[idx_entry + (2 * idx_locus_allele)] as usize;
+                    h1_dosage += genotype_vec[idx_entry + (2 * idx_locus_allele) + 1] as usize;
+                }
+                if (i == 0) && (locus == &self.loci[0]) {
+                    ploidy = h0_dosage + h1_dosage;
+                } else {
+                    ensure!(
+                        ploidy == h0_dosage + h1_dosage,
+                        "Mismatched ploidy levels in file: \"{}\" at line {} and columns {:?}!",
+                        fname,
+                        i + 1,
+                        locus.col_idx.iter().map(|x| x + 3).collect::<Vec<usize>>()
+                    );
+                }
+            }
+        }
+        self.ploidy = ploidy;
+        // Update genotype data
+        self.genotype_data = GpuTensor::from_vec_f32(
+            ctx,
+            &genotype_vec,
+            &[n_entries as u32, n_loci_alleles as u32, 2u32],
+            None,
+            None,
+        )?;
+        // Note that the resulting mutated Dataset struct may be:
+        // ✅ entries
+        // ✅ ploidy
+        // ❌ sexes
+        // ✅ genome
+        // ✅ loci
+        // ❌ haplotype_persistence_probs
+        // ❌ traits
+        // ✅ genotype_data
+        // ❌ phenotype_data
+        Ok(())
     }
-}
-
-/// Defines a physical genomic feature or coordinate region (locus) and its valid alleles.
-///
-/// ### Breeding Simulation Context:
-/// Represents individual markers (SNPs) or quantitative trait loci (QTL). By holding
-/// a list of valid `allele_ids` local to this locus, it naturally supports **monoallelic** (fixed),
-/// **biallelic** (standard SNPs), and **multi-allelic** loci within the same genome.
-#[derive(Debug, Clone)]
-pub struct Locus {
-    /// ID of the chromosome where this locus resides (indexes into [`Chromosomes`]).
-    pub chromosome_id: usize,
-    /// Start physical coordinate in base pairs (0-indexed, inclusive).
-    pub start: usize,
-    /// End physical coordinate in base pairs (exclusive).
-    pub end: usize,
-    /// Valid allele identifiers observable at this locus (indexes into [`Alleles`]).
-    pub allele_ids: Vec<usize>,
-}
-
-/// A key relational mapping that bridges a physical locus to a specific sequence variant.
-///
-/// ### Why We Chose This Structure:
-/// In population simulations, alleles are variable per locus. A standard matrix representation
-/// assuming only biallelic SNPs fails under multi-allelic states.
-///
-/// This structure solves the problem by providing a flat relational lookup table.
-/// Every entry represents a unique **locus-allele combination**, which directly maps to a column
-/// index in the GPU genotype tensor. This enables the GPU compute kernels to perform rapid
-/// linear algebra on variable-allele genomes by representing them as flattened dosage columns.
-#[derive(Debug, Clone)]
-pub struct LocusAllele {
-    /// The physical location of the marker (indexes into [`Genome::loci`]).
-    pub locus_id: usize,
-    /// The specific sequence variant associated with this locus (indexes into [`Alleles`]).
-    pub allele_id: usize,
-}
-
-/// The global blueprint of the simulation's genomic architecture.
-///
-/// ### Breeding Simulation Context:
-/// Acts as the central validation authority on the CPU. It ensures that any imported,
-/// generated, or simulated genomic structure is internally consistent, verifying that
-/// chromosomal boundaries, loci, and locus-allele combinations are valid before initiating
-/// a simulation run.
-#[derive(Debug, Clone)]
-pub struct Genome {
-    /// The chromosome configurations defining physical linkage groups.
-    pub chromosomes: Chromosomes,
-    /// The global lookup dictionary of physical sequence variations.
-    pub alleles: Alleles,
-    /// The list of genomic loci/markers (such as QTL or SNPs) being tracked.
-    pub loci: Vec<Locus>,
-    /// The relational map of all locus-allele combinations (used to decode GPU tensor column indices).
-    pub loci_alleles: Vec<LocusAllele>,
-}
-
-/// High-level demographic metadata representing individual animals, plants, or lines.
-///
-/// ### Breeding Simulation Context:
-/// Manages population structures, cohort generations, and pedigrees on the CPU. By separating
-/// this qualitative tracking from the dense numerical genotype tensors, you can query, slice,
-/// and filter breeding cohorts (e.g., separating founders, generation F1, or target breeding lines)
-/// cleanly on the CPU to dynamically assemble indexing vectors for GPU acceleration.
-#[derive(Debug, Clone)]
-pub struct Entries {
-    /// Names or unique identifiers of each individual or line in the dataset.
-    pub names: Vec<String>,
-    /// Taxonomic classification (e.g., species or subspecies) for multi-species scenarios.
-    pub species: Vec<String>,
-    /// Breeding cohort or origin group identifier (e.g., "Founder_A", "Cycle_5").
-    pub population: Vec<String>,
-    /// User-defined categorization, breeding tiers, or selection groups.
-    pub classification: Vec<String>,
-    /// Arbitrary historical logs, pedigree descriptions, or metadata notes.
-    pub notes: Vec<String>,
-}
-
-/// Metadata describing quantitative traits under selection.
-///
-/// ### Breeding Simulation Context:
-/// Defines targets for breeding programs (e.g., disease resistance, yield, stature).
-/// It enables multi-trait selection schemes, economic weights configuration, and tracking
-/// how genetic architectures map to multiple target phenotypes.
-#[derive(Debug, Clone)]
-pub struct Traits {
-    /// Names of the tracked quantitative traits.
-    pub names: Vec<String>,
-    /// Descriptions of genetic parameters, heritabilities, or breeding objectives.
-    pub notes: Vec<String>,
-}
-
-/// The primary GPU-backed genotype representation for high-throughput computing.
-///
-/// ### Why We Chose This Structure:
-/// In quantitative genetics and breeding, the genotype matrix is the bottleneck of calculations.
-/// Storing this as a [`GpuTensor`] on the GPU enables extremely fast, massively parallel operations:
-/// - Calculating genomic relationship matrices (GRM).
-/// - Matrix multiplication of marker effect sizes for genomic prediction ($X \beta$).
-/// - Slicing and selecting specific subgroups using zero-copy stride manipulations [2, 3].
-#[derive(Debug)]
-pub struct GenotypeData {
-    /// Rows of the genotype matrix: indices pointing to the evaluated individuals in [`Entries`].
-    pub entry_ids: Vec<usize>,
-    /// Columns of the genotype matrix: indices mapping to physical alleles via [`LocusAllele`].
-    pub locus_allele_ids: Vec<usize>,
-    /// Dense GPU matrix of shape `[entry_ids.len(), locus_allele_ids.len()]` [2].
-    /// Represents allelic dosages (e.g., count, probability, or state of the allele).
-    pub data: GpuTensor,
-}
-
-// impl GenotypeData {
-//     pub fn new() {
-//         todo!()
-//     }
-// }
-
-/// The observed phenotype metrics backed by high-performance GPU storage.
-///
-/// ### Breeding Simulation Context:
-/// This holds the quantitative performance values of each individual across multiple traits.
-/// Storing these on the GPU allows the simulation engine to perform real-time selection-index
-/// calculations, variance-covariance estimations, and evaluation sweeps directly in GPU memory,
-/// feeding selection decisions straight back into the next simulated mating cycle.
-#[derive(Debug)]
-pub struct PhenotypeData {
-    /// Rows of the phenotype matrix: indices pointing to the evaluated individuals in [`Entries`].
-    pub entry_ids: Vec<usize>,
-    /// Columns of the phenotype matrix: indices pointing to quantitative traits in [`Traits`].
-    pub trait_ids: Vec<usize>,
-    /// Dense GPU matrix of shape `[entry_ids.len(), trait_ids.len()]` [2].
-    /// Stores the phenotypic value floats (e.g., breeding estimates, observed values).
-    pub data: GpuTensor,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use anyhow::Result;
+    use crate::dataset::Dataset;
+    use crate::linalg::context::GpuContext;
+    use std::fs::{read_to_string, remove_file, write};
+    use std::path::PathBuf;
 
-    // -----------------------------
-    // Chromosomes::new tests
-    // -----------------------------
+    fn context() -> GpuContext {
+        pollster::block_on(GpuContext::new()).expect("Failed to create GPU context")
+    }
 
-    #[test]
-    fn chromosomes_default_lengths() -> Result<()> {
-        let chr = Chromosomes::new(3, None)?;
-        assert_eq!(chr.chromosomes, vec!["chr_0", "chr_1", "chr_2"]);
-        assert_eq!(chr.lengths, vec![1_000_000, 1_000_000, 1_000_000]);
-        Ok(())
+    fn test_dataset(ctx: &GpuContext) -> Dataset {
+        let (parents, _mapper) = Dataset::sim_founders(
+            ctx, 1000, 2, true, 5, 200, 5, &[0.5; 5], None, None, None, None, 42u64,
+        )
+        .unwrap();
+        parents
+    }
+
+    fn temp_file(name: &str) -> PathBuf {
+        std::env::temp_dir().join(name)
     }
 
     #[test]
-    fn chromosomes_custom_lengths() -> Result<()> {
-        let chr = Chromosomes::new(3, Some(vec![10, 20, 30]))?;
-        assert_eq!(chr.chromosomes, vec!["chr_0", "chr_1", "chr_2"]);
-        assert_eq!(chr.lengths, vec![10, 20, 30]);
-        Ok(())
+    fn rejects_delimiter() {
+        assert!(check_strings("abc\tdef", "\t").is_err());
     }
 
     #[test]
-    fn chromosomes_length_mismatch_fails() {
-        let result = Chromosomes::new(3, Some(vec![10, 20]));
-        assert!(result.is_err());
+    fn write_phenotype_creates_file() {
+        let ctx = context();
+        let ds = test_dataset(&ctx);
+
+        let path = temp_file("phenotype_create.tsv");
+
+        ds.write_phenotype(&ctx, path.to_str().unwrap(), "\t", true)
+            .unwrap();
+
+        assert!(path.exists());
+
+        let _ = remove_file(&path);
     }
 
     #[test]
-    fn chromosomes_zero_n() -> Result<()> {
-        let chr = Chromosomes::new(0, None)?;
-        assert!(chr.chromosomes.is_empty());
-        assert!(chr.lengths.is_empty());
-        Ok(())
-    }
+    fn write_phenotype_writes_all_entries() {
+        let ctx = context();
+        let ds = test_dataset(&ctx);
 
-    // -----------------------------
-    // Alleles::new tests
-    // -----------------------------
+        let path = temp_file("phenotype_rows.tsv");
 
-    #[test]
-    fn alleles_default_n_leq_5() -> Result<()> {
-        let a = Alleles::new(5, None)?;
-        assert_eq!(a.names, vec!["A", "T", "C", "G", "DEL"]);
-        Ok(())
+        ds.write_phenotype(&ctx, path.to_str().unwrap(), "\t", true)
+            .unwrap();
+
+        let text = read_to_string(&path).unwrap();
+
+        assert_eq!(text.lines().count(), ds.entries.len() + 1);
+
+        let _ = remove_file(&path);
     }
 
     #[test]
-    fn alleles_default_n_10() -> Result<()> {
-        let a = Alleles::new(10, None)?;
+    fn phenotype_roundtrip() {
+        let ctx = context();
+
+        let ds1 = test_dataset(&ctx);
+
+        let path = temp_file("phenotype_roundtrip.tsv");
+
+        ds1.write_phenotype(&ctx, path.to_str().unwrap(), "\t", true)
+            .unwrap();
+
+        let mut ds2 = Dataset::new(&ctx, 1).unwrap();
+
+        ds2.read_phenotype(&ctx, path.to_str().unwrap(), "\t", false)
+            .unwrap();
+
+        assert_eq!(ds1.entries, ds2.entries);
+
+        assert_eq!(ds1.traits, ds2.traits);
+
         assert_eq!(
-            a.names,
-            vec!["A", "T", "C", "G", "DEL", "TA", "TT", "TC", "TG", "TDEL"]
+            ds1.phenotype_data.to_vec_f32(&ctx).unwrap(),
+            ds2.phenotype_data.to_vec_f32(&ctx).unwrap()
         );
-        Ok(())
+
+        let _ = remove_file(&path);
     }
 
     #[test]
-    fn alleles_default_n_20() -> Result<()> {
-        let a = Alleles::new(20, None)?;
-        // Check first 5 and last 5 only
-        assert_eq!(&a.names[..5], &["A", "T", "C", "G", "DEL"]);
-        assert_eq!(&a.names[15..20], &["GA", "GT", "GC", "GG", "GDEL"]);
-        Ok(())
+    fn phenotype_header_validation_fails() {
+        let ctx = context();
+
+        let path = temp_file("phenotype_bad_header.tsv");
+
+        write(&path, "species\tname\tgroup\ttrait1\nentry\tsp\tgrp\t1.0\n").unwrap();
+
+        let mut ds = Dataset::new(&ctx, 1).unwrap();
+
+        assert!(
+            ds.read_phenotype(&ctx, path.to_str().unwrap(), "\t", false)
+                .is_err()
+        );
+
+        let _ = remove_file(&path);
     }
 
     #[test]
-    fn alleles_custom_names() -> Result<()> {
-        let custom = vec!["X".into(), "Y".into(), "Z".into()];
-        let a = Alleles::new(3, Some(custom.clone()))?;
-        assert_eq!(a.names, custom);
-        Ok(())
+    fn phenotype_entry_mismatch_fails() {
+        let ctx = context();
+
+        let ds = test_dataset(&ctx);
+
+        let path = temp_file("phenotype_entry_mismatch.tsv");
+
+        ds.write_phenotype(&ctx, path.to_str().unwrap(), "\t", true)
+            .unwrap();
+
+        let mut ds2 = test_dataset(&ctx);
+
+        ds2.entries[0].name = "__mismatch__".to_owned();
+
+        assert!(
+            ds2.read_phenotype(&ctx, path.to_str().unwrap(), "\t", true)
+                .is_err()
+        );
+
+        let _ = remove_file(&path);
     }
 
     #[test]
-    fn alleles_custom_name_length_mismatch_fails() {
-        let result = Alleles::new(3, Some(vec!["A".into(), "B".into()]));
-        assert!(result.is_err());
+    fn overwrite_false_fails() {
+        let ctx = context();
+
+        let ds = test_dataset(&ctx);
+
+        let path = temp_file("overwrite_false.tsv");
+
+        ds.write_phenotype(&ctx, path.to_str().unwrap(), "\t", true)
+            .unwrap();
+
+        assert!(
+            ds.write_phenotype(&ctx, path.to_str().unwrap(), "\t", false)
+                .is_err()
+        );
+
+        let _ = remove_file(&path);
     }
 
     #[test]
-    fn alleles_no_duplicates() -> Result<()> {
-        let a = Alleles::new(50, None)?;
-        let mut sorted = a.names.clone();
-        sorted.sort();
-        sorted.dedup();
-        assert_eq!(sorted.len(), a.names.len());
-        Ok(())
+    fn overwrite_true_succeeds() {
+        let ctx = context();
+
+        let ds = test_dataset(&ctx);
+
+        let path = temp_file("overwrite_true.tsv");
+
+        ds.write_phenotype(&ctx, path.to_str().unwrap(), "\t", true)
+            .unwrap();
+
+        assert!(
+            ds.write_phenotype(&ctx, path.to_str().unwrap(), "\t", true)
+                .is_ok()
+        );
+
+        let _ = remove_file(&path);
     }
 
     #[test]
-    fn alleles_large_n() -> Result<()> {
-        let a = Alleles::new(500, None)?;
-        assert_eq!(a.names.len(), 500);
-        // Check that the last allele is multi-character
-        assert!(a.names[499].len() >= 3);
-        Ok(())
+    fn genotype_header_has_expected_number_of_columns() {
+        let ctx = context();
+
+        let ds = test_dataset(&ctx);
+
+        let path = temp_file("genotype_header.tsv");
+
+        ds.write_genotype(&ctx, path.to_str().unwrap(), "\t", true)
+            .unwrap();
+
+        let text = read_to_string(&path).unwrap();
+
+        let header = text.lines().next().unwrap();
+
+        let cols: Vec<_> = header.split('\t').collect();
+
+        let expected = 3 + ds.loci.iter().map(|l| l.col_idx.len()).sum::<usize>();
+
+        assert_eq!(cols.len(), expected);
+
+        let _ = remove_file(&path);
+    }
+
+    #[test]
+    fn genotype_cells_contain_single_haplotype_separator() {
+        let ctx = context();
+
+        let ds = test_dataset(&ctx);
+
+        let path = temp_file("genotype_separator.tsv");
+
+        ds.write_genotype(&ctx, path.to_str().unwrap(), "\t", true)
+            .unwrap();
+
+        let text = read_to_string(&path).unwrap();
+
+        let row = text.lines().nth(1).unwrap();
+
+        for value in row.split('\t').skip(3) {
+            assert_eq!(value.matches('|').count(), 1);
+        }
+
+        let _ = remove_file(&path);
+    }
+
+    #[test]
+    fn exported_genotypes_match_tensor_values() {
+        let ctx = context();
+
+        let ds = test_dataset(&ctx);
+
+        let genotype = ds.genotype_data.to_vec_f32(&ctx).unwrap();
+
+        let path = temp_file("genotype_values.tsv");
+
+        ds.write_genotype(&ctx, path.to_str().unwrap(), "\t", true)
+            .unwrap();
+
+        let text = read_to_string(&path).unwrap();
+
+        let row = text.lines().nth(1).unwrap();
+
+        let cols: Vec<_> = row.split('\t').collect();
+
+        let expected = format!("{}|{}", genotype[0], genotype[1]);
+
+        assert_eq!(cols[3], expected);
+
+        let _ = remove_file(&path);
+    }
+
+    #[test]
+    fn genotype_roundtrip() {
+        let ctx = context();
+
+        let ds1 = test_dataset(&ctx);
+
+        let path = temp_file("genotype_roundtrip.tsv");
+
+        ds1.write_genotype(&ctx, path.to_str().unwrap(), "\t", true)
+            .unwrap();
+
+        let mut ds2 = Dataset::new(&ctx, 1).unwrap();
+
+        ds2.genome = ds1.genome.clone();
+
+        ds2.read_genotype(&ctx, path.to_str().unwrap(), "\t", false)
+            .unwrap();
+
+        assert_eq!(ds1.entries, ds2.entries);
+
+        assert_eq!(ds1.loci, ds2.loci);
+
+        assert_eq!(
+            ds1.genotype_data.to_vec_f32(&ctx).unwrap(),
+            ds2.genotype_data.to_vec_f32(&ctx).unwrap()
+        );
+
+        let _ = remove_file(&path);
+    }
+
+    #[test]
+    fn genotype_entry_mismatch_fails() {
+        let ctx = context();
+
+        let ds = test_dataset(&ctx);
+
+        let path = temp_file("genotype_entry_mismatch.tsv");
+
+        ds.write_genotype(&ctx, path.to_str().unwrap(), "\t", true)
+            .unwrap();
+
+        let mut ds2 = test_dataset(&ctx);
+
+        ds2.entries[0].name = "__mismatch__".to_owned();
+
+        assert!(
+            ds2.read_genotype(&ctx, path.to_str().unwrap(), "\t", true)
+                .is_err()
+        );
+
+        let _ = remove_file(&path);
+    }
+
+    #[test]
+    fn genotype_invalid_header_fails() {
+        let ctx = context();
+
+        let reference = test_dataset(&ctx);
+
+        let path = temp_file("genotype_invalid_header.tsv");
+
+        write(
+            &path,
+            "name\tspecies\tgroup\tbad_header\nentry\tsp\tgrp\t1|1\n",
+        )
+        .unwrap();
+
+        let mut ds = Dataset::new(&ctx, 1).unwrap();
+
+        ds.genome = reference.genome.clone();
+
+        assert!(
+            ds.read_genotype(&ctx, path.to_str().unwrap(), "\t", false)
+                .is_err()
+        );
+
+        let _ = remove_file(&path);
     }
 }

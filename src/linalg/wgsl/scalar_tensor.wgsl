@@ -1,0 +1,147 @@
+struct BinaryTensorParams {
+    rank: u32,
+    n_elements: u32,
+
+    shape: array<u32, 8>,
+
+    a_offset: u32,
+    a_strides: array<u32, 8>,
+
+    b: f32,
+    
+    c_offset: u32,
+    c_strides: array<u32, 8>,
+
+    op: u32,
+};
+
+fn tensor_index(
+    linear_idx: u32,
+    offset: u32,
+    shape: array<u32, 8>,
+    strides: array<u32, 8>,
+    rank: u32,
+) -> u32 {
+    if (rank == 0u) {
+        return offset;
+    }
+    // Working copy of the logical element index.
+    var idx = linear_idx;
+    // Initialize the storage position to the tensor's starting offset
+    // within the backing buffer.
+    var storage_idx = offset;
+    // Recover tensor coordinates from the fastest-varying axis to the
+    // slowest-varying axis.
+    // For shape [2, 3, 4] and linear_idx = 17:
+    //     axis = 2  -> coord = 1
+    //     axis = 1  -> coord = 1
+    //     axis = 0  -> coord = 1
+    // yielding coordinates (1, 1, 1).
+    for (var axis = i32(rank) - 1; axis >= 0; axis--) {
+        let i = u32(axis);
+        // Coordinate of the current tensor dimension.
+        let coord = idx % shape[i];
+        // Remove the coordinate just extracted, preparing the index
+        // for the next (slower-varying) dimension.
+        idx = idx / shape[i];
+        // Accumulate the corresponding contribution to the storage
+        // index using the tensor stride for this dimension.
+        storage_idx += coord * strides[i];
+    }
+    return storage_idx;
+}
+
+@group(0) @binding(0)
+var<storage, read> A: array<f32>;
+
+@group(0) @binding(1)
+var<storage, read_write> C: array<f32>;
+
+@group(0) @binding(2)
+var<storage> params: BinaryTensorParams;
+
+@compute
+@workgroup_size(256)
+fn main(
+    @builtin(global_invocation_id)
+    gid: vec3<u32>,
+) {
+    let linear_idx = gid.x;
+    if (linear_idx >= params.n_elements) {
+        return;
+    }
+    let a_idx = tensor_index(
+        linear_idx,
+        params.a_offset,
+        params.shape,
+        params.a_strides,
+        params.rank,
+    );
+    let c_idx = tensor_index(
+        linear_idx,
+        params.c_offset,
+        params.shape,
+        params.c_strides,
+        params.rank,
+    );
+    let a = A[a_idx];
+    let b = params.b;
+    var result = a;
+    switch(params.op) {
+        case OP_ADD: {
+            result = a + b;
+        }
+        case OP_SUB: {
+            result = a - b;
+        }
+        case OP_MUL: {
+            result = a * b;
+        }
+        case OP_DIV: {
+            result = a / b;
+        }
+        case OP_MIN: {
+            result = min(a, b);
+        }
+        case OP_MAX: {
+            result = max(a, b);
+        }
+        case OP_POW: {
+            result = pow(a, b);
+        }
+        case OP_ATAN2: {
+            result = atan2(a, b);
+        }
+        case OP_EQ: {
+            result = select(0.0, 1.0, a == b);
+        }
+        case OP_NE: {
+            result = select(0.0, 1.0, a != b);
+        }
+        case OP_LT: {
+            result = select(0.0, 1.0, a < b);
+        }
+        case OP_LE: {
+            result = select(0.0, 1.0, a <= b);
+        }
+        case OP_GT: {
+            result = select(0.0, 1.0, a > b);
+        }
+        case OP_GE: {
+            result = select(0.0, 1.0, a >= b);
+        }
+        case OP_AND: {
+            result = select(0.0, 1.0, (a != 0.0) && (b != 0.0));
+        }
+        case OP_OR: {
+            result = select(0.0, 1.0, (a != 0.0) || (b != 0.0));
+        }
+        case OP_XOR: {
+            result = select(0.0, 1.0, (a != 0.0) != (b != 0.0));
+        }
+        default: {
+            return;
+        }
+    }
+    C[c_idx] = result;
+}

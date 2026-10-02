@@ -1,29 +1,35 @@
+pub mod dataset;
+pub mod entry;
+pub mod genotype;
+pub mod gpu_pipeline;
 pub mod io;
 pub mod linalg;
+pub mod phenotype;
 
 use anyhow::Result;
 use linalg::context::GpuContext;
 use linalg::tensor::GpuTensor;
-// use linalg::operations::MatrixOps;
-// use linalg::kernel::GpuKernel;
+
+use crate::dataset::Dataset;
+use crate::phenotype::GeneticModel;
 
 // TODO: this were CLI arguments parsing will live...
 
 pub async fn run() -> Result<()> {
     let ctx = pollster::block_on(GpuContext::new()).expect("Failed to create GPU context");
     println!("ctx: {}", ctx);
-    let a = GpuTensor::from_f32(
+    let a = GpuTensor::from_vec_f32(
         &ctx,
         &(0..6).map(|x| x as f32).collect::<Vec<f32>>(),
-        vec![2, 3],
+        &[2, 3],
         None,
         None,
     )?;
     println!("a: {}", a);
-    let b = GpuTensor::from_f32(
+    let b = GpuTensor::from_vec_f32(
         &ctx,
         &(0..12).map(|x| x as f32).collect::<Vec<f32>>(),
-        vec![3, 4],
+        &[3, 4],
         None,
         None,
     )?;
@@ -31,5 +37,34 @@ pub async fn run() -> Result<()> {
     // let ops = MatrixOps { ctx: &ctx };
     // let c = ops.multiply(&a, &b)?;
     // println!("c: {}", c);
+
+    let n_entries: usize = 100;
+    let n_chromosomes: usize = 10;
+    let n_loci: usize = 1_000;
+    let n_traits: usize = 2;
+    let ploidy: usize = 2;
+    let with_sex: bool = true;
+    let seed: u64 = 4;
+    let (founders, mapper): (Dataset, GeneticModel) = Dataset::sim_founders(
+        &ctx,
+        n_entries,
+        ploidy,
+        with_sex,
+        n_chromosomes,
+        n_loci,
+        n_traits,
+        &vec![0.5; n_traits],
+        None,
+        None,
+        None,
+        None,
+        seed,
+    )?;
+    println!("founders:\n{}", founders);
+    println!("mapper:\n{}", mapper);
+
+    println!("founders.entries:\n{:?}", founders.entries);
+    println!("mapper.genome:\n{:?}", mapper.genome);
+
     Ok(())
 }

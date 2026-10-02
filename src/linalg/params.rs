@@ -56,6 +56,31 @@ pub struct BinaryMatrixParams {
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct ScalarMatrixParams {
+    /// Number of rows in `A` and `C`.
+    pub n: u32,
+    /// Number of columns in `A` and `C`.
+    pub p: u32,
+    /// Starting element of `A` within its backing storage.
+    pub a_offset: u32,
+    /// Storage stride between rows of `A`.
+    pub a_row_stride: u32,
+    /// Storage stride between columns of `A`.
+    pub a_col_stride: u32,
+    // Scalar used for operations on A
+    pub b: f32,
+    /// Starting element of `C` within its backing storage.
+    pub c_offset: u32,
+    /// Storage stride between rows of `C`.
+    pub c_row_stride: u32,
+    /// Storage stride between columns of `C`.
+    pub c_col_stride: u32,
+    /// Mathematical operation: op(A, B) -> C (see operations.rs & wgsl/opcodes.wgsl).
+    pub op: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub struct ContractMatrixParams {
     /// Number of rows in `A` and `C`.
     pub n: u32,
@@ -125,6 +150,29 @@ pub struct BinaryTensorParams {
     pub b_offset: u32,
     /// Storage strides of `B` per dimension.
     pub b_strides: [u32; MAX_RANK],
+    /// Starting element of `C` within its backing storage.
+    pub c_offset: u32,
+    /// Storage strides of `C` per dimension.
+    pub c_strides: [u32; MAX_RANK],
+    /// Mathematical operation: op(A, B) -> C (see operations.rs & wgsl/opcodes.wgsl).
+    pub op: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct ScalarTensorParams {
+    /// Number of tensor dimensions.
+    pub rank: u32,
+    /// Total number of logical tensor elements.
+    pub n_elements: u32,
+    /// Shape of the logical tensor.
+    pub shape: [u32; MAX_RANK],
+    /// Starting element of `A` within its backing storage.
+    pub a_offset: u32,
+    /// Storage strides of `A` per dimension.
+    pub a_strides: [u32; MAX_RANK],
+    /// Scalar value used to perform operations on A.
+    pub b: f32,
     /// Starting element of `C` within its backing storage.
     pub c_offset: u32,
     /// Storage strides of `C` per dimension.

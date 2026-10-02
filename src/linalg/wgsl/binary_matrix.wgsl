@@ -2,14 +2,17 @@ struct BinaryMatrixParams {
     n: u32,
     p: u32,
 
+    // Tensor A view metadata
     a_offset: u32,
     a_row_stride: u32,
     a_col_stride: u32,
 
+    // Tensor B view metadata
     b_offset: u32,
     b_row_stride: u32,
     b_col_stride: u32,
 
+    // Tensor C view metadata
     c_offset: u32,
     c_row_stride: u32,
     c_col_stride: u32,
@@ -22,7 +25,7 @@ fn matrix_index(
     col: u32,
     offset: u32,
     row_stride: u32,
-    col_stride: u32
+    col_stride: u32,
 ) -> u32 {
     return offset +
            row * row_stride +
@@ -49,88 +52,125 @@ fn main(
 ) {
     let row = gid.y;
     let col = gid.x;
+
     if (row >= params.n || col >= params.p) {
         return;
     }
+
     let a_idx = matrix_index(
         row,
         col,
         params.a_offset,
         params.a_row_stride,
-        params.a_col_stride
+        params.a_col_stride,
     );
+
     let b_idx = matrix_index(
         row,
         col,
         params.b_offset,
         params.b_row_stride,
-        params.b_col_stride
+        params.b_col_stride,
     );
+
     let c_idx = matrix_index(
         row,
         col,
         params.c_offset,
         params.c_row_stride,
-        params.c_col_stride
+        params.c_col_stride,
     );
+
     let a = A[a_idx];
     let b = B[b_idx];
+
     var result = a;
-    switch(params.op) {
+
+    switch (params.op) {
         case OP_ADD: {
             result = a + b;
         }
+
         case OP_SUB: {
             result = a - b;
         }
+
         case OP_MUL: {
             result = a * b;
         }
+
         case OP_DIV: {
             result = a / b;
         }
+
         case OP_MIN: {
             result = min(a, b);
         }
+
         case OP_MAX: {
             result = max(a, b);
         }
+
         case OP_POW: {
             result = pow(a, b);
         }
+
         case OP_ATAN2: {
             result = atan2(a, b);
         }
+
         case OP_EQ: {
             result = select(0.0, 1.0, a == b);
         }
+
         case OP_NE: {
             result = select(0.0, 1.0, a != b);
         }
+
         case OP_LT: {
             result = select(0.0, 1.0, a < b);
         }
+
         case OP_LE: {
             result = select(0.0, 1.0, a <= b);
         }
+
         case OP_GT: {
             result = select(0.0, 1.0, a > b);
         }
+
         case OP_GE: {
             result = select(0.0, 1.0, a >= b);
         }
+
         case OP_AND: {
-            result = select(0.0, 1.0, (a != 0.0) && (b != 0.0));
+            result = select(
+                0.0,
+                1.0,
+                (a != 0.0) && (b != 0.0)
+            );
         }
+
         case OP_OR: {
-            result = select(0.0, 1.0, (a != 0.0) || (b != 0.0));
+            result = select(
+                0.0,
+                1.0,
+                (a != 0.0) || (b != 0.0)
+            );
         }
+
         case OP_XOR: {
-            result = select(0.0, 1.0, (a != 0.0) != (b != 0.0));
+            result = select(
+                0.0,
+                1.0,
+                (a != 0.0) != (b != 0.0)
+            );
         }
+
         default: {
             return;
         }
     }
+
     C[c_idx] = result;
 }
