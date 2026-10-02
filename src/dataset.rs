@@ -37,10 +37,15 @@ pub struct DatasetStats {
     n_alleles_per_locus_mean: usize,
     n_alleles_per_locus_max: usize,
     // TODO: per species per group:
-    //  - genotype allele frequency spectrum
-    //  - phenotypes :
+    //  - genotype per window per chromosome:
+    //      + allele frequency spectrum
+    //      + LD map
+    //      + ...?
+    //  - phenotypes per trait:
+    //      + mean, sd, min, max, median
     //      + distributions
     //      + correlations
+    //      + ...?
 }
 
 // TODO: update using DatasetStats
