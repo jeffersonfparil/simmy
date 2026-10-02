@@ -24,6 +24,26 @@ pub struct Dataset {
     pub phenotype_data: GpuTensor, // 2D tensor with shape: n_entries x n_traits (additionally monogametic = 0.0 and heterogametic = 1.0)
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct DatasetStats {
+    n_entries: usize,
+    ploidy: usize,
+    with_sex: bool,
+    genome_size: usize,
+    n_chromosomes: usize,
+    n_loci: usize,
+    n_loci_alleles: usize,
+    n_alleles_per_locus_min: usize,
+    n_alleles_per_locus_mean: usize,
+    n_alleles_per_locus_max: usize,
+    // TODO: per species per group:
+    //  - genotype allele frequency spectrum
+    //  - phenotypes :
+    //      + distributions
+    //      + correlations
+}
+
+// TODO: update using DatasetStats
 impl fmt::Display for Dataset {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "------------------------")?;
@@ -536,6 +556,9 @@ impl Dataset {
         offsprings.genotype_data = genotype_data;
         offsprings.phenotype_data = phenotype_data;
         Ok(offsprings)
+    }
+    pub fn stats(&self) -> Result<DatasetStats> {
+        todo!()
     }
 }
 
