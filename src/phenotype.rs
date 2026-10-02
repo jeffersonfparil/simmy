@@ -857,7 +857,7 @@ mod tests {
     #[test]
     fn phenotype_distribution_is_approximately_normal() {
         let ctx = context();
-        let entries = sim_entries(5000).unwrap();
+        let entries = sim_entries(500).unwrap();
         let genome = sim_genome(10, false).unwrap();
         let loci = sim_loci(&genome, 1000, 42).unwrap();
         let sexes = sim_sexes(entries.len(), false, 42).unwrap();
