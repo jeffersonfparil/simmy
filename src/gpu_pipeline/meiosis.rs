@@ -1,7 +1,6 @@
 use crate::linalg::context::GpuContext;
-use anyhow::{Result, bail};
+use anyhow::Result;
 use std::borrow::Cow;
-use std::fs::exists;
 use wgpu::ComputePipeline;
 
 pub fn pipeline(ctx: &GpuContext) -> Result<ComputePipeline> {
