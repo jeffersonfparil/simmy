@@ -59,6 +59,15 @@ cargo run
 cargo tree
 ```
 
+## Roadmap
+
+- [-] WGSL Tensors and operations
+- [-] Basic structs
+- [-] I/O (will need I/O for the full genome structs + confg.toml file or something...)
+- [ ] Summary stats
+- [ ] Breeding program builder and runner
+- [ ] UI (CLI arguments parsing and main entry point)
+
 # Licence
 
 This project is licensed under the GNU General Public License v3.0 (GPL-3.0).
