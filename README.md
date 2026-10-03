@@ -30,7 +30,7 @@ src/
     ├── tensor.rs           # GpuTensor memory model (shape, strides, offsets, buffer)
     ├── kernel.rs           # GpuKernel compute pipeline bindings
     ├── operations.rs       # Maths operations & WGSL opcodes mapping
-    ├── params.rs           # Buffer parameter structs for shaders
+    ├── params.rs           # Buffer parameter structs for kernels
     ├── transpose.rs        # Stride-based zero-copy tensor axis permutations
     ├── wrappers_matrix.rs  # Matrix-specific kernel dispatch wrappers
     ├── wrappers_tensor.rs  # Arbitrary-rank tensor kernel dispatch wrappers

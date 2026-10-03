@@ -5,6 +5,7 @@ pub mod gpu_pipeline;
 pub mod io;
 pub mod linalg;
 pub mod phenotype;
+pub mod stats;
 
 use anyhow::Result;
 use linalg::context::GpuContext;
