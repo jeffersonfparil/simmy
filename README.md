@@ -27,6 +27,7 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo test
 cargo run
 # cargo test -- --show-output
+# cargo test -- --test-threads=1
 # cargo build --release
 # cargo doc --open
 cargo tree
