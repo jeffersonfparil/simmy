@@ -1,9 +1,9 @@
-use anyhow::{Result, ensure};
-use std::fmt;
 use crate::{
     dataset::Dataset,
     linalg::{context::GpuContext, kernel::GpuKernel, tensor::GpuTensor},
 };
+use anyhow::{Result, ensure};
+use std::fmt;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DatasetStats {
@@ -57,7 +57,10 @@ impl Dataset {
     }
     pub fn allele_freq_spec(&self, ctx: &GpuContext, window_bp: usize) -> Result<()> {
         self.check()?;
-        ensure!(window_bp > 0, "The window size need to be greater than zero!");
+        ensure!(
+            window_bp > 0,
+            "The window size need to be greater than zero!"
+        );
         let idx_entries: Vec<usize> = self.sortperm_entries()?;
         // let idx_loci: Vec<usize> = self.sortperm_loci()?;
         // let n_chromosomes: usize = self.genome.len();
