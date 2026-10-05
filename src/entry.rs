@@ -1,6 +1,6 @@
 use anyhow::{Result, ensure};
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord)]
 pub struct Entry {
     pub name: String,
     pub species: String,
