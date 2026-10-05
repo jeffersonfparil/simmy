@@ -1,9 +1,9 @@
+use anyhow::{Result, ensure};
+use std::fmt;
 use crate::{
     dataset::Dataset,
     linalg::{context::GpuContext, kernel::GpuKernel, tensor::GpuTensor},
 };
-use anyhow::Result;
-use std::fmt;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DatasetStats {
@@ -57,12 +57,12 @@ impl Dataset {
     }
     pub fn allele_freq_spec(&self, ctx: &GpuContext, window_bp: usize) -> Result<()> {
         self.check()?;
+        ensure!(window_bp > 0, "The window size need to be greater than zero!");
         let idx_entries: Vec<usize> = self.sortperm_entries()?;
-        let idx_loci: Vec<usize> = self.sortperm_loci()?;
-        let n_chromosomes: usize = self.genome.len();
+        // let idx_loci: Vec<usize> = self.sortperm_loci()?;
+        // let n_chromosomes: usize = self.genome.len();
         let n_entries: usize = idx_entries.len();
         let n_loci_alleles: usize = self.genotype_data.shape[1] as usize;
-
         let kernel: GpuKernel = GpuKernel { ctx };
         let allele_dosages: GpuTensor = kernel
             .add(
@@ -84,36 +84,8 @@ impl Dataset {
         let allele_freqs: Vec<f32> = kernel
             .div_scalar_matrix(&kernel.matmul(&allele_dosages, &ones)?, n_entries as f32)?
             .to_vec_f32(ctx)?; //n_loci_alleles
-        let mut allele_freqs_per_chromosome_per_window: Vec<Vec<f32>> =
-            Vec::with_capacity(n_chromosomes);
-        let mut allele_freqs_1_chromosome: Vec<f32> = Vec::new();
-        let mut allele_freqs_1_window: Vec<f32> = Vec::new();
-        let mut chromosome: &str = "";
-        let mut bp_per_window: usize = 0;
-        for i in idx_loci {
-            let q_i: f32 = allele_freqs[i];
-            allele_freqs_1_chromosome =
-                if chromosome != self.genome[self.loci[i].chromosome_id].name {
-                    chromosome = &self.genome[self.loci[i].chromosome_id].name;
-                    allele_freqs_per_chromosome_per_window.push(allele_freqs_1_chromosome);
-                    vec![]
-                } else {
-                    allele_freqs_1_chromosome
-                };
-            allele_freqs_1_window = if bp_per_window == window_bp {
-                bp_per_window = 0;
-                let q_mu: f32 = allele_freqs_1_window.iter().sum::<f32>()
-                    / (allele_freqs_1_window.len() as f32);
-                allele_freqs_1_chromosome.push(q_mu);
-                vec![]
-            } else {
-                allele_freqs_1_window
-            };
-            allele_freqs_1_window.push(q_i);
-            bp_per_window += 1;
-        }
-
-        Ok(())
+        println!("allele_freqs: {:?}", allele_freqs);
+        todo!()
     }
     pub fn ld_map(&self) -> Result<()> {
         todo!()
