@@ -656,4 +656,62 @@ mod tests {
         let ds = dataset(&ctx);
         assert!(ds.allele_freq_spec(&ctx, 0).is_err());
     }
+
+    #[test]
+    fn inbreeding_per_locus_dimensions_match() {
+        let ctx = context();
+        let ds = dataset(&ctx);
+        let af = ds.allele_freq_per_locus_allele(&ctx).unwrap();
+        let inbreeding = ds.inbreeding_per_locus(&af).unwrap();
+        let n_loci = ds.loci.len();
+
+        assert_eq!(inbreeding.n_alleles.len(), n_loci);
+        assert_eq!(inbreeding.homozygosity_ones_sum.len(), n_loci);
+        assert_eq!(inbreeding.homozygosity_ones_max.len(), n_loci);
+        assert_eq!(inbreeding.heterozygosity.len(), n_loci);
+    }
+
+    #[test]
+    fn inbreeding_per_locus_allele_counts_match_definitions() {
+        let ctx = context();
+        let ds = dataset(&ctx);
+        let af = ds.allele_freq_per_locus_allele(&ctx).unwrap();
+        let inbreeding = ds.inbreeding_per_locus(&af).unwrap();
+
+        for (i, locus) in ds.loci.iter().enumerate() {
+            assert_eq!(inbreeding.n_alleles[i], locus.col_idx.len());
+        }
+    }
+
+    #[test]
+    fn inbreeding_per_locus_heterozygosity_is_complement_of_homozygosity_sum() {
+        let ctx = context();
+        let ds = dataset(&ctx);
+        let af = ds.allele_freq_per_locus_allele(&ctx).unwrap();
+        let inbreeding = ds.inbreeding_per_locus(&af).unwrap();
+
+        for i in 0..ds.loci.len() {
+            let expected_het = 1.0 - inbreeding.homozygosity_ones_sum[i];
+            // Accommodate standard floating point inaccuracies
+            assert!((inbreeding.heterozygosity[i] - expected_het).abs() < f32::EPSILON);
+        }
+    }
+
+    #[test]
+    fn inbreeding_per_locus_statistics_are_bounded() {
+        let ctx = context();
+        let ds = dataset(&ctx);
+        let af = ds.allele_freq_per_locus_allele(&ctx).unwrap();
+        let inbreeding = ds.inbreeding_per_locus(&af).unwrap();
+
+        for &val in &inbreeding.homozygosity_ones_sum {
+            assert!((0.0..=1.0).contains(&val));
+        }
+        for &val in &inbreeding.homozygosity_ones_max {
+            assert!((0.0..=1.0).contains(&val));
+        }
+        for &val in &inbreeding.heterozygosity {
+            assert!((0.0..=1.0).contains(&val));
+        }
+    }
 }
