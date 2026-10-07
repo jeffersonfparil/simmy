@@ -229,7 +229,7 @@ impl GpuKernel<'_> {
             pass.set_bind_group(0, &bind_group, &[]);
             if matches!(
                 &params,
-                Params::UnaryMatrix(_) | Params::BinaryMatrix(_) | Params::ContractMatrix(_)
+                Params::UnaryMatrix(_) | Params::BinaryMatrix(_) | Params::ContractMatrix(_) | Params::ScalarMatrix(_)
             ) {
                 let dispatch_x = c_shape[1].div_ceil(16);
                 let dispatch_y = c_shape[0].div_ceil(16);
@@ -857,6 +857,100 @@ mod tests {
         assert_eq!(buf[c.linear_index(&[1, 0])], 18.0);
         assert_eq!(buf[c.linear_index(&[1, 1])], 20.0);
 
+        Ok(())
+    }
+
+    ////////////////////////////////////////////
+    // Dispatch Bounds & Regression Tests
+    ////////////////////////////////////////////
+
+    #[test]
+    fn scalar_matrix_computes_beyond_16_rows() -> Result<()> {
+        let ctx = context();
+        let ops = ops(&ctx);
+        
+        // Allocate a matrix with 20 rows. 
+        // If the 1D dispatch bug is present, row 16+ (elements 48-59) will remain 0.0
+        // because the WGSL shader uses @workgroup_size(16, 16, 1).
+        let rows = 20;
+        let cols = 3;
+        let n_elements = rows * cols;
+        
+        let data: Vec<f32> = (0..n_elements).map(|x| x as f32).collect();
+        let a = GpuTensor::from_vec_f32(&ctx, &data, &[rows as u32, cols as u32], None, None)?;
+        
+        let params = Params::ScalarMatrix(ScalarMatrixParams {
+            n: rows as u32,
+            p: cols as u32,
+            a_offset: 0,
+            a_row_stride: cols as u32,
+            a_col_stride: 1,
+            b: 5.0, // Scalar value to add
+            c_offset: 0,
+            c_row_stride: cols as u32,
+            c_col_stride: 1,
+            op: OP_ADD,
+        });
+        
+        let c = ops.execute_kernel(params, &a, None)?;
+        let c_vec = c.to_vec_f32(&ctx)?;
+        
+        // Verify all 60 elements to ensure the 2D grid dispatched correctly
+        for i in 0..n_elements {
+            let expected = data[i] + 5.0;
+            assert_eq!(
+                c_vec[i], 
+                expected, 
+                "Grid dispatch failed at linear index {} (row {}). Found {}, expected {}", 
+                i, 
+                i / cols,
+                c_vec[i],
+                expected
+            );
+        }
+        
+        Ok(())
+    }
+
+    #[test]
+    fn scalar_tensor_computes_beyond_256_elements() -> Result<()> {
+        let ctx = context();
+        let ops = ops(&ctx);
+        
+        // Allocate a tensor with > 256 elements to verify the 1D block dispatch
+        // and structurally validate the ScalarTensorParams memory binding.
+        let n_elements = 300;
+        let data: Vec<f32> = (0..n_elements).map(|x| x as f32).collect();
+        let a = GpuTensor::from_vec_f32(&ctx, &data, &[n_elements as u32], None, None)?;
+        
+        let params = Params::ScalarTensor(ScalarTensorParams {
+            rank: 1,
+            n_elements: n_elements as u32,
+            shape: [n_elements as u32, 0, 0, 0, 0, 0, 0, 0],
+            a_offset: 0,
+            a_strides: [1, 0, 0, 0, 0, 0, 0, 0],
+            b: 10.0, // Scalar value to add
+            c_offset: 0,
+            c_strides: [1, 0, 0, 0, 0, 0, 0, 0],
+            op: OP_ADD,
+        });
+        
+        let c = ops.execute_kernel(params, &a, None)?;
+        let c_vec = c.to_vec_f32(&ctx)?;
+        
+        assert_eq!(c_vec.len(), n_elements);
+        for i in 0..n_elements {
+            let expected = data[i] + 10.0;
+            assert_eq!(
+                c_vec[i], 
+                expected, 
+                "1D Tensor dispatch failed at linear index {}. Found {}, expected {}", 
+                i,
+                c_vec[i],
+                expected
+            );
+        }
+        
         Ok(())
     }
 }

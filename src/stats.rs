@@ -120,12 +120,19 @@ impl Dataset {
             None,
             None,
         )?;
+        let a1: GpuTensor = kernel.matmul(&allele_dosages, &ones)?;
         let allele_freqs: Vec<f32> = kernel
             .div_scalar_matrix(
-                &kernel.matmul(&allele_dosages, &ones)?,
+                &a1,
                 (n_entries * self.ploidy) as f32,
             )?
             .to_vec_f32(ctx)?; // n_loci_alleles
+        println!("allele_dosages: {}", allele_dosages);
+        println!("ones: {}", ones);
+        println!("a1: {}", a1);
+        println!("a1.to_vec_f32(ctx)?: {:?}", a1.to_vec_f32(ctx)?);
+        println!("(n_entries * self.ploidy) as f32: {:?}", (n_entries * self.ploidy) as f32);
+        println!("allele_freqs: {:?}", allele_freqs);
         let homozygosity_zeroes: Vec<f32> = kernel
             .div_scalar_matrix(
                 &kernel.matmul(&kernel.eq_scalar(&allele_dosages, 0.0)?, &ones)?,
@@ -703,6 +710,13 @@ mod tests {
         let ds = dataset(&ctx);
         let af = ds.allele_freq_per_locus_allele(&ctx).unwrap();
         let inbreeding = ds.inbreeding_per_locus(&af).unwrap();
+
+        // // let genotype_data: Vec<f32> = ds.genotype_data.to_vec_f32(&ctx).unwrap();
+        // // println!("genotype_data: {:?}", genotype_data);
+        // println!("ds: {}", ds);
+        // println!("af.allele_freqs: {:?}", af.allele_freqs);
+        // println!("af.allele_freqs.len(): {:?}", af.allele_freqs.len()); // sparse! Why is there a lot of zeroes? This is unexpected!
+        // // println!("inbreeding.homozygosity_ones_sum: {:?}", inbreeding.homozygosity_ones_sum);
 
         for &val in &inbreeding.homozygosity_ones_sum {
             assert!((0.0..=1.0).contains(&val));
