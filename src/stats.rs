@@ -71,6 +71,15 @@ pub struct AlleleFrequencyPerChromosome {
     sd: Vec<Vec<f32>>,       // standard deviation of allele frequencies per window per chromosome
 }
 
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct GeneticDiversityPerLocus {
+    n_alleles: Vec<usize>,           // number of alleles per locus
+    homozygosity_ones_sum: Vec<f32>, // sum of frequency of fixed alleles at 1.00 across all alleles per locus
+    homozygosity_ones_max: Vec<f32>, // max frequency of fixed allele at 1.00 across all alleles per locus
+    heterozygosity: Vec<f32>, // heterozygosity = 1.00 - homozygosity_ones_sum, i.e. closer to the expected heterozygosity present in most tools (He = 1 - Σ p²), because we actually measure the proportion of entries at a locus that are not fixed to 1.00 at any of the alleles!
+}
+
 impl Dataset {
     pub fn sortperm_entries(&self) -> Result<Vec<usize>> {
         self.check()?;
@@ -173,8 +182,7 @@ impl Dataset {
             let n: usize = fs.len();
             let mu: f32 = fs.iter().sum::<f32>() / (n as f32);
             let sd: f32 = (fs.iter().map(|&x| (x - mu).powi(2)).sum::<f32>() / (n as f32)).sqrt();
-            fs.sort_by(|x, y| x.total_cmp(y));
-            n_alleles.push(fs.len());
+            n_alleles.push(n);
             major_allele_freqs.push(p);
             minor_allele_freqs.push(q);
             mu_allele_freqs.push(mu);
@@ -310,10 +318,63 @@ impl Dataset {
             self.allele_freq_per_chromosome(&af_per_locus, window_bp, false)?;
         Ok((af_major_per_chrom, af_minor_per_chrom))
     }
-    pub fn ld_map(&self) -> Result<()> {
+    pub fn inbreeding_per_locus(
+        &self,
+        allele_freqs: &AlleleFrequencyPerLocusPerAllele,
+    ) -> Result<GeneticDiversityPerLocus> {
+        self.check()?;
+        let n_loci_alleles: usize = self.genotype_data.shape[1] as usize;
+        ensure!(
+            allele_freqs.homozygosity_ones.len() == n_loci_alleles,
+            "The dataset and input homozygosities do not match!"
+        );
+        ensure!(
+            allele_freqs.homozygosity_ones.len() == allele_freqs.homozygosity_zeroes.len(),
+            "The homozygosities per allele per chromosome in terms of fixations as zeroes and ones do not match!"
+        );
+        let n_loci: usize = self.loci.len();
+        let mut n_alleles: Vec<usize> = Vec::with_capacity(n_loci); // allele counts per locus
+        let mut homozygosity_ones_sum: Vec<f32> = Vec::with_capacity(n_loci); // sum of frequency of fixed alleles at 1.00 across all alleles per locus (note that heterozygosity = 1.00 - homozygosity_ones_sum)
+        let mut homozygosity_ones_max: Vec<f32> = Vec::with_capacity(n_loci); // max frequency of fixed allele at 1.00 across all alleles per locus
+        let mut heterozygosity: Vec<f32> = Vec::with_capacity(n_loci); // heterozygosity = 1.00 - homozygosity_ones_sum
+        for locus in &self.loci {
+            let mut fs: Vec<f32> = Vec::with_capacity(locus.col_idx.len());
+            for &j in &locus.col_idx {
+                let f: f32 = allele_freqs.homozygosity_ones[j];
+                ensure!(
+                    (0.0..=1.0).contains(&f),
+                    "Allele dosages are not consistent with the expected ploidy of the dataset (see locus: {:?})!",
+                    locus
+                );
+                fs.push(f);
+            }
+            let n: usize = fs.len();
+            let h_sum: f32 = fs.iter().sum::<f32>();
+            let h_max: f32 = fs.iter().fold(0.0, |m, &x| m.max(x));
+            let het: f32 = 1.00 - h_sum;
+            fs.sort_by(|x, y| x.total_cmp(y));
+            n_alleles.push(n);
+            homozygosity_ones_sum.push(h_sum);
+            homozygosity_ones_max.push(h_max);
+            heterozygosity.push(het);
+        }
+        Ok(GeneticDiversityPerLocus {
+            n_alleles,
+            homozygosity_ones_sum,
+            homozygosity_ones_max,
+            heterozygosity,
+        })
+    }
+    pub fn inbreeding_per_chromosome(&self) -> Result<()> {
         todo!()
     }
     pub fn inbreeding(&self) -> Result<()> {
+        // inbreeding per:
+        //  (1) locus (per window per chromosome)
+        //  (2) entry
+        todo!()
+    }
+    pub fn ld_map(&self) -> Result<()> {
         todo!()
     }
     pub fn trait_dist(&self) -> Result<()> {
