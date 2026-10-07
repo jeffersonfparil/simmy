@@ -120,19 +120,25 @@ impl Dataset {
             None,
             None,
         )?;
-        let a1: GpuTensor = kernel.matmul(&allele_dosages, &ones)?;
+        // let a1: GpuTensor = kernel.matmul(&allele_dosages, &ones)?;
+        // let allele_freqs: Vec<f32> = kernel
+        //     .div_scalar_matrix(&a1, (n_entries * self.ploidy) as f32)?
+        //     .to_vec_f32(ctx)?;
+        // println!("allele_dosages: {}", allele_dosages);
+        // println!("ones: {}", ones);
+        // println!("a1: {}", a1);
+        // println!("a1.to_vec_f32(ctx)?: {:?}", a1.to_vec_f32(ctx)?);
+        // println!(
+        //     "(n_entries * self.ploidy) as f32: {:?}",
+        //     (n_entries * self.ploidy) as f32
+        // );
+        // println!("allele_freqs: {:?}", allele_freqs);
         let allele_freqs: Vec<f32> = kernel
-            .div_scalar_matrix(&a1, (n_entries * self.ploidy) as f32)?
-            .to_vec_f32(ctx)?; // n_loci_alleles
-        println!("allele_dosages: {}", allele_dosages);
-        println!("ones: {}", ones);
-        println!("a1: {}", a1);
-        println!("a1.to_vec_f32(ctx)?: {:?}", a1.to_vec_f32(ctx)?);
-        println!(
-            "(n_entries * self.ploidy) as f32: {:?}",
-            (n_entries * self.ploidy) as f32
-        );
-        println!("allele_freqs: {:?}", allele_freqs);
+            .div_scalar_matrix(
+                &kernel.matmul(&allele_dosages, &ones)?,
+                (n_entries * self.ploidy) as f32,
+            )?
+            .to_vec_f32(ctx)?;
         let homozygosity_zeroes: Vec<f32> = kernel
             .div_scalar_matrix(
                 &kernel.matmul(&kernel.eq_scalar(&allele_dosages, 0.0)?, &ones)?,
