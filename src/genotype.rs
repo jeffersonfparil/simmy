@@ -246,6 +246,7 @@ pub fn sim_genotype_data(
                 }
             } else {
                 // Sex chromosome loci
+                // NOTE: currently will have the same allele frequencies across the entire sex chromosome for each non-hermaphrodite sex, i.e. homogametic and heterogametic entries
                 // TODO: probably implement a more complex structure where groups of loci are define the sex and not sweeping like this!
                 let idx_allele_1: usize = locus.col_idx[0];
                 let idx_allele_2: usize = locus.col_idx[1];
