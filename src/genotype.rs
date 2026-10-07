@@ -14,7 +14,7 @@ pub struct Chromosome {
     pub is_sex_chromosome: bool,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord)]
 pub struct Locus {
     pub chromosome_id: usize, // index of the chromosome containing this locus, which assumes one or more chromosomes are stored in a vector (contiguous/ordered list)
     pub position: usize,      // position in the chromosome
