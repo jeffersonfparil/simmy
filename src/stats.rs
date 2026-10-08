@@ -97,9 +97,8 @@ pub struct GeneticDiversityPerChromosome {
 pub struct GeneticDiversityPerEntry {
     entries: Vec<Entry>,
     n_loci: usize,
-    homozygosity_ones_sum: Vec<f32>, // sum of frequency of fixed alleles at 1.00 across all alleles per locus
-    homozygosity_ones_max: Vec<f32>, // max frequency of fixed allele at 1.00 across all alleles per locus
-    heterozygosity: Vec<f32>, // heterozygosity = 1.00 - homozygosity_ones_sum, i.e. closer to the expected heterozygosity present in most tools (He = 1 - Σ p²), because we actually measure the proportion of entries at a locus that are not fixed to 1.00 at any of the alleles!
+    homozygosity: Vec<f32>,   // frequency of fixed loci per entry
+    heterozygosity: Vec<f32>, // frequency of heterozygous loci per entry (heterozygosity = 1.00 - homozygosity_ones_sum)
 }
 
 // TODO: put these into src/stat/ and divide them into something like: stat.rs with mod etc..., allele_freq.rs, genomic_diversity.rs, and phenomic_diversity.rs
@@ -500,13 +499,10 @@ impl Dataset {
             heterozygosity_sd,
         })
     }
-
-    pub fn diversity_per_entry(
-        &self,
-        ctx: &GpuContext,
-    ) -> Result<AlleleFrequencyPerLocusPerAllele> {
+    pub fn diversity_per_entry(&self, ctx: &GpuContext) -> Result<GeneticDiversityPerEntry> {
         self.check()?;
         let n_entries: usize = self.entries.len();
+        let n_loci: usize = self.loci.len();
         let n_loci_alleles: usize = self.genotype_data.shape[1] as usize;
         let kernel: GpuKernel = GpuKernel { ctx };
         let allele_dosages: GpuTensor = kernel.add(
@@ -517,11 +513,8 @@ impl Dataset {
                 .genotype_data
                 .slice_view(&[(0, n_entries), (0, n_loci_alleles), (1, 2)])?,
         )?; // n_entries x n_loci_alleles
-
-        // Continue from here... we need to find fixed alleles per locus per entry
-        let _alleles_fixed_at_one: GpuTensor =
-            kernel.eq_scalar(&allele_dosages, self.ploidy as f32)?;
-
+        let alleles_fixed_at_one: GpuTensor =
+            kernel.eq_scalar(&allele_dosages, self.ploidy as f32)?; // n_entries x n_loci_alleles
         let ones: GpuTensor = GpuTensor::from_vec_f32(
             ctx,
             &vec![1.0; n_loci_alleles],
@@ -529,32 +522,20 @@ impl Dataset {
             None,
             None,
         )?;
-        let allele_freqs: Vec<f32> = kernel
+        let homozygosity: Vec<f32> = kernel
             .div_scalar_matrix(
-                &kernel.matmul(&allele_dosages, &ones)?,
-                (n_loci_alleles * self.ploidy) as f32,
+                &kernel.matmul(&alleles_fixed_at_one, &ones)?,
+                n_loci as f32, // we only divide by n_loci because the frequency of each allele per locus sums up to 1.00, hence the maximum number of loci-alleles fixed at 1.00 can only be n_loci not n_loci_alleles
             )?
-            .to_vec_f32(ctx)?; // n_loci_alleles
-        let homozygosity_zeroes: Vec<f32> = kernel
-            .div_scalar_matrix(
-                &kernel.matmul(&kernel.eq_scalar(&allele_dosages, 0.0)?, &ones)?,
-                n_entries as f32,
-            )?
-            .to_vec_f32(ctx)?;
-        let homozygosity_ones: Vec<f32> = kernel
-            .div_scalar_matrix(
-                &kernel.matmul(
-                    &kernel.eq_scalar(&allele_dosages, self.ploidy as f32)?,
-                    &ones,
-                )?,
-                n_entries as f32,
-            )?
-            .to_vec_f32(ctx)?;
+            .to_vec_f32(ctx)?; // n_entries
+        let heterozygosity: Vec<f32> = homozygosity.iter().map(|&x| 1.00 - x).collect();
+
         // Output
-        Ok(AlleleFrequencyPerLocusPerAllele {
-            allele_freqs,
-            homozygosity_zeroes,
-            homozygosity_ones,
+        Ok(GeneticDiversityPerEntry {
+            entries: self.entries.to_owned(),
+            n_loci,
+            homozygosity,
+            heterozygosity,
         })
     }
 
@@ -562,24 +543,28 @@ impl Dataset {
         &self,
         ctx: &GpuContext,
         window_bp: usize,
-    ) -> Result<(AlleleFrequencyPerChromosome, AlleleFrequencyPerChromosome)> {
+    ) -> Result<(
+        GeneticDiversityPerLocus,
+        GeneticDiversityPerChromosome,
+        GeneticDiversityPerEntry,
+    )> {
         self.check()?;
         ensure!(
             window_bp > 0,
             "The window size need to be greater than zero!"
         );
-        // Extract allele frequencies across loci-alleles
         let af_per_locus_per_allele: AlleleFrequencyPerLocusPerAllele =
             self.allele_freq_per_locus_allele(ctx)?;
-        // Extract major and minor allele frequencies
         let diversity_per_locus: GeneticDiversityPerLocus =
             self.diversity_per_locus(&af_per_locus_per_allele)?;
-        // Extract allele frequencies per window (per chromosome)
-        let _diversity_per_chrom: GeneticDiversityPerChromosome =
+        let diversity_per_chrom: GeneticDiversityPerChromosome =
             self.diversity_per_chromosome(&diversity_per_locus, window_bp)?;
-        // TODO: genetic diversity per entry!
-
-        todo!()
+        let diversity_per_entry = self.diversity_per_entry(ctx)?;
+        Ok((
+            diversity_per_locus,
+            diversity_per_chrom,
+            diversity_per_entry,
+        ))
     }
     pub fn ld_map(&self) -> Result<()> {
         todo!()
@@ -862,5 +847,206 @@ mod tests {
         let ctx = context();
         let ds = dataset(&ctx);
         assert!(ds.allele_freq(&ctx, 0).is_err());
+    }
+
+    #[test]
+    fn diversity_per_locus_dimensions_match() {
+        let ctx = context();
+        let ds = dataset(&ctx);
+        let af = ds.allele_freq_per_locus_allele(&ctx).unwrap();
+        let diversity = ds.diversity_per_locus(&af).unwrap();
+        let n_loci = ds.loci.len();
+
+        assert_eq!(diversity.n_alleles.len(), n_loci);
+        assert_eq!(diversity.homozygosity_ones_sum.len(), n_loci);
+        assert_eq!(diversity.homozygosity_ones_max.len(), n_loci);
+        assert_eq!(diversity.heterozygosity.len(), n_loci);
+    }
+
+    #[test]
+    fn diversity_per_locus_allele_counts_match_definitions() {
+        let ctx = context();
+        let ds = dataset(&ctx);
+        let af = ds.allele_freq_per_locus_allele(&ctx).unwrap();
+        let diversity = ds.diversity_per_locus(&af).unwrap();
+
+        for (i, locus) in ds.loci.iter().enumerate() {
+            assert_eq!(diversity.n_alleles[i], locus.col_idx.len());
+        }
+    }
+
+    #[test]
+    fn diversity_per_locus_heterozygosity_is_complement_of_homozygosity_sum() {
+        let ctx = context();
+        let ds = dataset(&ctx);
+        let af = ds.allele_freq_per_locus_allele(&ctx).unwrap();
+        let diversity = ds.diversity_per_locus(&af).unwrap();
+
+        for i in 0..ds.loci.len() {
+            let expected_het = 1.0 - diversity.homozygosity_ones_sum[i];
+            assert!((diversity.heterozygosity[i] - expected_het).abs() < f32::EPSILON);
+        }
+    }
+
+    #[test]
+    fn diversity_per_locus_sum_is_greater_than_or_equal_to_max() {
+        let ctx = context();
+        let ds = dataset(&ctx);
+        let af = ds.allele_freq_per_locus_allele(&ctx).unwrap();
+        let diversity = ds.diversity_per_locus(&af).unwrap();
+
+        for i in 0..ds.loci.len() {
+            assert!(diversity.homozygosity_ones_sum[i] >= diversity.homozygosity_ones_max[i]);
+        }
+    }
+
+    #[test]
+    fn diversity_per_chromosome_dimensions_match() {
+        let ctx = context();
+        let ds = dataset(&ctx);
+        let af = ds.allele_freq_per_locus_allele(&ctx).unwrap();
+        let div_locus = ds.diversity_per_locus(&af).unwrap();
+        let div_chrom = ds.diversity_per_chromosome(&div_locus, 100_000).unwrap();
+
+        assert_eq!(div_chrom.positions.len(), ds.genome.len());
+        assert_eq!(div_chrom.n_loci.len(), ds.genome.len());
+        assert_eq!(div_chrom.heterozygosity_mu.len(), ds.genome.len());
+        assert_eq!(div_chrom.heterozygosity_sd.len(), ds.genome.len());
+    }
+
+    #[test]
+    fn diversity_per_chromosome_window_shapes_match() {
+        let ctx = context();
+        let ds = dataset(&ctx);
+        let af = ds.allele_freq_per_locus_allele(&ctx).unwrap();
+        let div_locus = ds.diversity_per_locus(&af).unwrap();
+        let div_chrom = ds.diversity_per_chromosome(&div_locus, 100_000).unwrap();
+
+        for i in 0..div_chrom.positions.len() {
+            assert_eq!(div_chrom.positions[i].len(), div_chrom.n_loci[i].len());
+            assert_eq!(
+                div_chrom.positions[i].len(),
+                div_chrom.heterozygosity_mu[i].len()
+            );
+            assert_eq!(
+                div_chrom.positions[i].len(),
+                div_chrom.heterozygosity_sd[i].len()
+            );
+        }
+    }
+
+    #[test]
+    fn diversity_per_chromosome_window_counts_are_positive() {
+        let ctx = context();
+        let ds = dataset(&ctx);
+        let af = ds.allele_freq_per_locus_allele(&ctx).unwrap();
+        let div_locus = ds.diversity_per_locus(&af).unwrap();
+        let div_chrom = ds.diversity_per_chromosome(&div_locus, 100_000).unwrap();
+
+        for chrom in &div_chrom.n_loci {
+            for &n in chrom {
+                assert!(n > 0);
+            }
+        }
+    }
+
+    #[test]
+    fn diversity_per_chromosome_coordinates_are_valid_and_monotonic() {
+        let ctx = context();
+        let ds = dataset(&ctx);
+        let af = ds.allele_freq_per_locus_allele(&ctx).unwrap();
+        let div_locus = ds.diversity_per_locus(&af).unwrap();
+        let div_chrom = ds.diversity_per_chromosome(&div_locus, 100_000).unwrap();
+
+        for chrom in &div_chrom.positions {
+            for w in chrom.windows(2) {
+                assert!(
+                    w[0].1 >= w[0].0,
+                    "invalid interval: ({}, {})",
+                    w[0].0,
+                    w[0].1
+                );
+                assert!(w[1].0 >= w[0].0, "non-monotonic start coordinates");
+                assert!(w[1].1 >= w[0].1, "non-monotonic end coordinates");
+            }
+        }
+    }
+
+    #[test]
+    fn diversity_per_chromosome_statistics_are_finite() {
+        let ctx = context();
+        let ds = dataset(&ctx);
+        let af = ds.allele_freq_per_locus_allele(&ctx).unwrap();
+        let div_locus = ds.diversity_per_locus(&af).unwrap();
+        let div_chrom = ds.diversity_per_chromosome(&div_locus, 100_000).unwrap();
+
+        for chrom in &div_chrom.heterozygosity_mu {
+            for &x in chrom {
+                assert!(x.is_finite());
+            }
+        }
+        for chrom in &div_chrom.heterozygosity_sd {
+            for &x in chrom {
+                assert!(x.is_finite());
+                assert!(x >= 0.0);
+            }
+        }
+    }
+
+    #[test]
+    fn diversity_per_entry_dimensions_match() {
+        let ctx = context();
+        let ds = dataset(&ctx);
+        let div_entry = ds.diversity_per_entry(&ctx).unwrap();
+        let n_entries = ds.entries.len();
+
+        assert_eq!(div_entry.entries.len(), n_entries);
+        assert_eq!(div_entry.homozygosity.len(), n_entries);
+        assert_eq!(div_entry.heterozygosity.len(), n_entries);
+        assert_eq!(div_entry.n_loci, ds.loci.len());
+    }
+
+    #[test]
+    fn diversity_per_entry_heterozygosity_is_complement_of_homozygosity() {
+        let ctx = context();
+        let ds = dataset(&ctx);
+        let div_entry = ds.diversity_per_entry(&ctx).unwrap();
+
+        for i in 0..ds.entries.len() {
+            let expected_het = 1.0 - div_entry.homozygosity[i];
+            assert!((div_entry.heterozygosity[i] - expected_het).abs() < f32::EPSILON);
+        }
+    }
+
+    #[test]
+    fn diversity_per_entry_statistics_are_bounded() {
+        let ctx = context();
+        let ds = dataset(&ctx);
+        let div_entry = ds.diversity_per_entry(&ctx).unwrap();
+
+        for &val in &div_entry.homozygosity {
+            assert!((0.0..=1.0).contains(&val));
+        }
+        for &val in &div_entry.heterozygosity {
+            assert!((0.0..=1.0).contains(&val));
+        }
+    }
+
+    #[test]
+    fn diversity_pipeline_runs_successfully() {
+        let ctx = context();
+        let ds = dataset(&ctx);
+        let (div_locus, div_chrom, div_entry) = ds.diversity(&ctx, 100_000).unwrap();
+
+        assert_eq!(div_locus.heterozygosity.len(), ds.loci.len());
+        assert_eq!(div_chrom.positions.len(), ds.genome.len());
+        assert_eq!(div_entry.heterozygosity.len(), ds.entries.len());
+    }
+
+    #[test]
+    fn diversity_pipeline_rejects_zero_window_size() {
+        let ctx = context();
+        let ds = dataset(&ctx);
+        assert!(ds.diversity(&ctx, 0).is_err());
     }
 }
