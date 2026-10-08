@@ -283,14 +283,10 @@ impl Dataset {
             }
             if !is_same_chromosome {
                 chrom = &self.genome[locus.chromosome_id].name;
-                positions.push(per_chromosome_pos.to_owned());
-                afs_mu.push(per_chromosome_mu.to_owned());
-                afs_sd.push(per_chromosome_sd.to_owned());
-                afs_n.push(per_chromosome_n.to_owned());
-                per_chromosome_pos = vec![];
-                per_chromosome_mu = vec![];
-                per_chromosome_sd = vec![];
-                per_chromosome_n = vec![];
+                positions.push(std::mem::take(&mut per_chromosome_pos)); // takes ownership and leaves an empty vector
+                afs_mu.push(std::mem::take(&mut per_chromosome_mu)); // takes ownership and leaves an empty vector
+                afs_sd.push(std::mem::take(&mut per_chromosome_sd)); // takes ownership and leaves an empty vector
+                afs_n.push(std::mem::take(&mut per_chromosome_n)); // takes ownership and leaves an empty vector
             }
             if is_last_locus {
                 let n: usize = per_windows.len();
@@ -302,10 +298,10 @@ impl Dataset {
                 per_chromosome_mu.push(mu);
                 per_chromosome_sd.push(sd);
                 per_chromosome_n.push(n);
-                positions.push(per_chromosome_pos.to_owned());
-                afs_mu.push(per_chromosome_mu.to_owned());
-                afs_sd.push(per_chromosome_sd.to_owned());
-                afs_n.push(per_chromosome_n.to_owned());
+                positions.push(std::mem::take(&mut per_chromosome_pos)); // takes ownership and leaves an empty vector
+                afs_mu.push(std::mem::take(&mut per_chromosome_mu)); // takes ownership and leaves an empty vector
+                afs_sd.push(std::mem::take(&mut per_chromosome_sd)); // takes ownership and leaves an empty vector
+                afs_n.push(std::mem::take(&mut per_chromosome_n)); // takes ownership and leaves an empty vector
             }
         }
         Ok(AlleleFrequencyPerChromosome {
@@ -465,14 +461,10 @@ impl Dataset {
             }
             if !is_same_chromosome {
                 chrom = &self.genome[locus.chromosome_id].name;
-                positions.push(per_chromosome_pos.to_owned());
-                heterozygosity_mu.push(per_chromosome_mu.to_owned());
-                heterozygosity_sd.push(per_chromosome_sd.to_owned());
-                heterozygosity_n.push(per_chromosome_n.to_owned());
-                per_chromosome_pos = vec![];
-                per_chromosome_mu = vec![];
-                per_chromosome_sd = vec![];
-                per_chromosome_n = vec![];
+                positions.push(std::mem::take(&mut per_chromosome_pos)); // takes ownership and leaves an empty vector
+                heterozygosity_mu.push(std::mem::take(&mut per_chromosome_mu)); // takes ownership and leaves an empty vector
+                heterozygosity_sd.push(std::mem::take(&mut per_chromosome_sd)); // takes ownership and leaves an empty vector
+                heterozygosity_n.push(std::mem::take(&mut per_chromosome_n)); // takes ownership and leaves an empty vector
             }
             if is_last_locus {
                 let n: usize = per_windows.len();
@@ -484,10 +476,10 @@ impl Dataset {
                 per_chromosome_mu.push(mu);
                 per_chromosome_sd.push(sd);
                 per_chromosome_n.push(n);
-                positions.push(per_chromosome_pos.to_owned());
-                heterozygosity_mu.push(per_chromosome_mu.to_owned());
-                heterozygosity_sd.push(per_chromosome_sd.to_owned());
-                heterozygosity_n.push(per_chromosome_n.to_owned());
+                positions.push(std::mem::take(&mut per_chromosome_pos)); // takes ownership and leaves an empty vector
+                heterozygosity_mu.push(std::mem::take(&mut per_chromosome_mu)); // takes ownership and leaves an empty vector
+                heterozygosity_sd.push(std::mem::take(&mut per_chromosome_sd)); // takes ownership and leaves an empty vector
+                heterozygosity_n.push(std::mem::take(&mut per_chromosome_n)); // takes ownership and leaves an empty vector
             }
         }
         Ok(GeneticDiversityPerChromosome {
