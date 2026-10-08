@@ -1,4 +1,4 @@
-struct BinaryTensorParams {
+struct ScalarTensorParams {
     rank: u32,
     n_elements: u32,
 
@@ -58,7 +58,7 @@ var<storage, read> A: array<f32>;
 var<storage, read_write> C: array<f32>;
 
 @group(0) @binding(2)
-var<storage> params: BinaryTensorParams;
+var<storage> params: ScalarTensorParams;
 
 @compute
 @workgroup_size(256)
