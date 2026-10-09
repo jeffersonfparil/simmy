@@ -557,14 +557,20 @@ impl Dataset {
             diversity_per_entry,
         ))
     }
-    pub fn ld_map(&self, _ctx: &GpuContext) -> Result<()> {
-        // self.check()?;
-        // let n_entries: usize = self.entries.len();
-        // let n_loci: usize = self.loci.len();
-        // let n_loci_alleles: usize = self.loci.iter().map(|x| x.col_idx.len()).sum::<usize>();
-        // // Correlation between loci alleles
-        // let allele_freqs: GpuTensor = self.genotype_data.transpose_view(None)?; // n_loci_alleles x n_entries
-        // let covariances_across_loci_alleles: GpuTensor = allele_freqs.matrix_covariance_per_row(ctx)?;
+    pub fn ld_map(&self, ctx: &GpuContext) -> Result<()> {
+        self.check()?;
+        // Correlation between loci alleles
+        let allele_freqs: GpuTensor = self.genotype_data.transpose_view(None)?; // n_loci_alleles x n_entries
+        let correlations_across_loci_alleles: GpuTensor =
+            allele_freqs.matrix_correlation_per_row(ctx)?;
+        println!(
+            "correlations_across_loci_alleles: {}",
+            correlations_across_loci_alleles
+        );
+
+        // TODO: Extract mean correlations per locus
+        // while skipping NANs as they will be there for zero variance alleles
+        // + is this enough? Something way better?
 
         todo!()
     }
