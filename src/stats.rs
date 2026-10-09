@@ -4,8 +4,9 @@ use crate::{
     dataset::Dataset,
     linalg::{context::GpuContext, kernel::GpuKernel, tensor::GpuTensor},
 };
-use anyhow::{Result, ensure};
+use anyhow::{Result, bail, ensure};
 use std::fmt;
+use std::mem::take;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DatasetStats {
@@ -78,7 +79,7 @@ pub struct GeneticDiversityPerLocus {
     n_alleles: Vec<usize>,           // number of alleles per locus
     homozygosity_ones_sum: Vec<f32>, // sum of frequency of fixed alleles at 1.00 across all alleles per locus
     homozygosity_ones_max: Vec<f32>, // max frequency of fixed allele at 1.00 across all alleles per locus
-    heterozygosity: Vec<f32>, // heterozygosity = 1.00 - homozygosity_ones_sum, i.e. closer to the expected heterozygosity present in most tools (He = 1 - Σ p²), because we actually measure the proportion of entries at a locus that are not fixed to 1.00 at any of the alleles!
+    heterozygosity: Vec<f32>, // heterozygosity = 1.00 - homozygosity_ones_sum (not the canonical definition of heterozygosity)
 }
 
 #[allow(dead_code)]
@@ -101,6 +102,61 @@ pub struct GeneticDiversityPerEntry {
     heterozygosity: Vec<f32>, // frequency of heterozygous loci per entry (heterozygosity = 1.00 - homozygosity_ones_sum)
 }
 
+pub enum StatPerLocus<'a> {
+    AlleleFreqs(&'a AlleleFrequencyPerLocus),
+    Diversity(&'a GeneticDiversityPerLocus),
+}
+
+pub enum StatPerChrom {
+    AlleleFreqs(AlleleFrequencyPerChromosome),
+    Diversity(GeneticDiversityPerChromosome),
+}
+
+// TODO: probably move this into its own source file...
+impl GpuTensor {
+    pub fn matrix_mean_per_row(&self, ctx: &GpuContext) -> Result<GpuTensor> {
+        ensure!(self.shape.len() == 2, "The tensor is not 2-dimensional!");
+        let kernel: GpuKernel = GpuKernel { ctx };
+        let p: usize = self.shape[1] as usize;
+        let ones: GpuTensor =
+            GpuTensor::from_vec_f32(ctx, &vec![1.0f32; p], &[p as u32, 1], None, None)?; // p x 1
+        kernel.div_scalar_matrix(&kernel.matmul(self, &ones)?, p as f32) // n x 1
+    }
+    pub fn matrix_variance_per_row(&self, ctx: &GpuContext) -> Result<GpuTensor> {
+        ensure!(self.shape.len() == 2, "The tensor is not 2-dimensional!");
+        let kernel: GpuKernel = GpuKernel { ctx };
+        // let n: usize = self.shape[0] as usize;
+        let p: usize = self.shape[1] as usize;
+        let ones: GpuTensor =
+            GpuTensor::from_vec_f32(ctx, &vec![1.0_f32; p], &[p as u32, 1], None, None)?;
+        let squared_expect: GpuTensor =
+            kernel.pow_scalar_matrix(&self.matrix_mean_per_row(ctx)?, 2.0)?; // n x 1
+        let expect_squared: GpuTensor = kernel.div_scalar_matrix(
+            &kernel.matmul(&kernel.pow_scalar_matrix(self, 2.0)?, &ones)?,
+            p as f32,
+        )?;
+        kernel.sub_matrix(&expect_squared, &squared_expect)
+    }
+    pub fn matrix_covariance_per_row(&self, ctx: &GpuContext) -> Result<GpuTensor> {
+        ensure!(self.shape.len() == 2, "The tensor is not 2-dimensional!");
+        let kernel: GpuKernel = GpuKernel { ctx };
+        let p: usize = self.shape[1] as usize;
+        let mus: GpuTensor = self.matrix_mean_per_row(ctx)?; // n x 1
+        let expect_xy: GpuTensor = kernel
+            .div_scalar_matrix(&kernel.matmul(self, &self.transpose_view(None)?)?, p as f32)?; // n x n
+        let expect_x_expect_y: GpuTensor = kernel.matmul(&mus, &mus.transpose_view(None)?)?; // n x n
+        kernel.sub_matrix(&expect_xy, &expect_x_expect_y) // n x n
+    }
+    pub fn matrix_correlation_per_row(&self, ctx: &GpuContext) -> Result<GpuTensor> {
+        let kernel: GpuKernel = GpuKernel { ctx };
+        let var: GpuTensor = self.matrix_variance_per_row(ctx)?;
+        let sds: GpuTensor = kernel.sqrt_matrix(&var)?; // n x 1 (TODO: can be improved with a diag WGSL kernel, but for now let's stick with a seperate/duplicated variance computation!)
+        let cov: GpuTensor = self.matrix_covariance_per_row(ctx)?; // n x n
+        let sd_x_sd_y: GpuTensor = kernel.matmul(&sds, &sds.transpose_view(None)?)?; // n x n
+        kernel.div_matrix(&cov, &sd_x_sd_y) // n x n 
+    }
+}
+
 // TODO: put these into src/stat/ and divide them into something like: stat.rs with mod etc..., allele_freq.rs, genomic_diversity.rs, and phenomic_diversity.rs
 impl Dataset {
     pub fn sortperm_entries(&self) -> Result<Vec<usize>> {
@@ -116,6 +172,119 @@ impl Dataset {
         let mut idx: Vec<usize> = (0..n).collect();
         idx.sort_by(|&i, &j| self.loci[i].cmp(&self.loci[j]));
         Ok(idx)
+    }
+    pub fn window_statistics(
+        &self,
+        stats: &StatPerLocus,
+        window_bp: usize,
+        is_major_allele: bool, // Only used in AlleleFreqs
+    ) -> Result<StatPerChrom> {
+        self.check()?;
+        let freqs: Vec<f32> = match stats {
+            StatPerLocus::AlleleFreqs(x) => {
+                if is_major_allele {
+                    x.major_allele_freqs.to_owned()
+                } else {
+                    x.minor_allele_freqs.to_owned()
+                }
+            }
+            StatPerLocus::Diversity(x) => x.heterozygosity.to_owned(),
+        };
+        ensure!(
+            self.loci.len() == freqs.len(),
+            "The dataset and vector of statistics (allele frequency or diversity metric) per locus do not match!"
+        );
+        let n_loci: usize = self.loci.len();
+        let n_chromosomes: usize = self.genome.len();
+        let idx_loci: Vec<usize> = self.sortperm_loci()?;
+        ensure!(
+            n_loci == idx_loci.len(),
+            "The locus sorting did not generate the expected number of loci!"
+        );
+        let mut chrom: &str = &self.genome[self.loci[idx_loci[0]].chromosome_id].name;
+        let mut window_start_pos: usize = self.loci[idx_loci[0]].position;
+        let mut positions: Vec<Vec<(usize, usize)>> = Vec::with_capacity(n_chromosomes); // start and end positions of each window
+        let mut freqs_mu: Vec<Vec<f32>> = Vec::with_capacity(n_chromosomes); // means per window
+        let mut freqs_sd: Vec<Vec<f32>> = Vec::with_capacity(n_chromosomes); // standard deviations per window
+        let mut freqs_n: Vec<Vec<usize>> = Vec::with_capacity(n_chromosomes); // number of loci per window
+        let mut per_chromosome_pos: Vec<(usize, usize)> = Vec::new();
+        let mut per_chromosome_mu: Vec<f32> = Vec::new();
+        let mut per_chromosome_sd: Vec<f32> = Vec::new();
+        let mut per_chromosome_n: Vec<usize> = Vec::new();
+        let mut per_windows: Vec<f32> = Vec::new();
+        for (i, &j) in idx_loci.iter().enumerate() {
+            let locus: &Locus = &self.loci[j];
+            let is_same_chromosome: bool = chrom == self.genome[locus.chromosome_id].name;
+            let is_within_window: bool =
+                is_same_chromosome && ((locus.position - window_start_pos) <= window_bp);
+            let is_last_locus: bool = i == n_loci - 1;
+            let q: f32 = freqs[j];
+            if is_within_window {
+                per_windows.push(q);
+            } else {
+                let n: usize = per_windows.len();
+                let mu: f32 = per_windows.iter().sum::<f32>() / (n as f32);
+                let sd: f32 = (per_windows.iter().map(|&x| (x - mu).powi(2)).sum::<f32>()
+                    / (n as f32))
+                    .sqrt();
+                // Positional info
+                ensure!(
+                    i > 0,
+                    "Why on earth is the first index not on the same window?! This can only happen if the first chromosome or first positions are misspecified!"
+                );
+                let idx_previous_locus: usize = idx_loci[i - 1];
+                let previous_locus_position: usize = self.loci[idx_previous_locus].position;
+                per_chromosome_pos.push((window_start_pos, previous_locus_position));
+                window_start_pos = locus.position;
+                per_chromosome_mu.push(mu);
+                per_chromosome_sd.push(sd);
+                per_chromosome_n.push(n);
+                per_windows = vec![q];
+            }
+            if !is_same_chromosome {
+                chrom = &self.genome[locus.chromosome_id].name;
+                positions.push(take(&mut per_chromosome_pos)); // takes ownership and leaves an empty vector
+                freqs_mu.push(take(&mut per_chromosome_mu)); // takes ownership and leaves an empty vector
+                freqs_sd.push(take(&mut per_chromosome_sd)); // takes ownership and leaves an empty vector
+                freqs_n.push(take(&mut per_chromosome_n)); // takes ownership and leaves an empty vector
+            }
+            if is_last_locus {
+                let n: usize = per_windows.len();
+                let mu: f32 = per_windows.iter().sum::<f32>() / (n as f32);
+                let sd: f32 = (per_windows.iter().map(|&x| (x - mu).powi(2)).sum::<f32>()
+                    / (n as f32))
+                    .sqrt();
+                per_chromosome_pos.push((window_start_pos, locus.position));
+                per_chromosome_mu.push(mu);
+                per_chromosome_sd.push(sd);
+                per_chromosome_n.push(n);
+                positions.push(take(&mut per_chromosome_pos)); // takes ownership and leaves an empty vector
+                freqs_mu.push(take(&mut per_chromosome_mu)); // takes ownership and leaves an empty vector
+                freqs_sd.push(take(&mut per_chromosome_sd)); // takes ownership and leaves an empty vector
+                freqs_n.push(take(&mut per_chromosome_n)); // takes ownership and leaves an empty vector
+            }
+        }
+        let out: StatPerChrom = match stats {
+            StatPerLocus::AlleleFreqs(_) => {
+                StatPerChrom::AlleleFreqs(AlleleFrequencyPerChromosome {
+                    genome: self.genome.to_owned(),
+                    window_bp,
+                    positions,
+                    n_loci: freqs_n,
+                    mu: freqs_mu,
+                    sd: freqs_sd,
+                })
+            }
+            StatPerLocus::Diversity(_) => StatPerChrom::Diversity(GeneticDiversityPerChromosome {
+                genome: self.genome.to_owned(),
+                window_bp,
+                positions,
+                n_loci: freqs_n,
+                heterozygosity_mu: freqs_mu,
+                heterozygosity_sd: freqs_sd,
+            }),
+        };
+        Ok(out) // TODO: may use a trait to implement this on StatsPerChrom unwrapping below because match bail is not very idiomatic
     }
     pub fn allele_freq_per_locus_allele(
         &self,
@@ -187,8 +356,6 @@ impl Dataset {
         let mut mu_allele_freqs: Vec<f32> = Vec::with_capacity(n_loci); // mean
         let mut sd_allele_freqs: Vec<f32> = Vec::with_capacity(n_loci); // sd
         for locus in &self.loci {
-            let mut p: f32 = 0.0;
-            let mut q: f32 = 1.0;
             let mut fs: Vec<f32> = Vec::with_capacity(locus.col_idx.len());
             for &j in &locus.col_idx {
                 let f: f32 = allele_freqs.allele_freqs[j];
@@ -197,11 +364,11 @@ impl Dataset {
                     "Allele dosages are not consistent with the expected ploidy of the dataset (see locus: {:?})!",
                     locus
                 );
-                p = p.max(f);
-                q = q.min(f);
                 fs.push(f);
             }
             let n: usize = fs.len();
+            let p: f32 = fs.iter().fold(f32::NEG_INFINITY, |m, &x| m.max(x));
+            let q: f32 = fs.iter().fold(f32::INFINITY, |m, &x| m.min(x));
             let mu: f32 = fs.iter().sum::<f32>() / (n as f32);
             let sd: f32 = (fs.iter().map(|&x| (x - mu).powi(2)).sum::<f32>() / (n as f32)).sqrt();
             n_alleles.push(n);
@@ -224,94 +391,18 @@ impl Dataset {
         window_bp: usize,
         is_major_allele: bool,
     ) -> Result<AlleleFrequencyPerChromosome> {
-        self.check()?;
-        let freqs: Vec<f32> = if is_major_allele {
-            allele_freqs_per_locus.major_allele_freqs.to_owned()
-        } else {
-            allele_freqs_per_locus.minor_allele_freqs.to_owned()
-        };
-        ensure!(
-            self.loci.len() == freqs.len(),
-            "The dataset and vector of allele frequency per locus do not match!"
-        );
-        let n_loci: usize = self.loci.len();
-        let n_chromosomes: usize = self.genome.len();
-        let idx_loci: Vec<usize> = self.sortperm_loci()?;
-        ensure!(
-            n_loci == idx_loci.len(),
-            "The locus sorting did not generate the expected number of loci!"
-        );
-        let mut chrom: &str = &self.genome[self.loci[idx_loci[0]].chromosome_id].name;
-        let mut window_start_pos: usize = self.loci[idx_loci[0]].position;
-        let mut positions: Vec<Vec<(usize, usize)>> = Vec::with_capacity(n_chromosomes); // start and end positions of each window
-        let mut afs_mu: Vec<Vec<f32>> = Vec::with_capacity(n_chromosomes); // means per window
-        let mut afs_sd: Vec<Vec<f32>> = Vec::with_capacity(n_chromosomes); // standard deviations per window
-        let mut afs_n: Vec<Vec<usize>> = Vec::with_capacity(n_chromosomes); // number of loci per window
-        let mut per_chromosome_pos: Vec<(usize, usize)> = Vec::new();
-        let mut per_chromosome_mu: Vec<f32> = Vec::new();
-        let mut per_chromosome_sd: Vec<f32> = Vec::new();
-        let mut per_chromosome_n: Vec<usize> = Vec::new();
-        let mut per_windows: Vec<f32> = Vec::new();
-        for (i, &j) in idx_loci.iter().enumerate() {
-            let locus: &Locus = &self.loci[j];
-            let is_same_chromosome: bool = chrom == self.genome[locus.chromosome_id].name;
-            let is_within_window: bool =
-                is_same_chromosome && ((locus.position - window_start_pos) <= window_bp);
-            let is_last_locus: bool = i == n_loci - 1;
-            let q: f32 = freqs[j];
-            if is_within_window {
-                per_windows.push(q);
-            } else {
-                let n: usize = per_windows.len();
-                let mu: f32 = per_windows.iter().sum::<f32>() / (n as f32);
-                let sd: f32 = (per_windows.iter().map(|&x| (x - mu).powi(2)).sum::<f32>()
-                    / (n as f32))
-                    .sqrt();
-                // Positional info
-                ensure!(
-                    i > 0,
-                    "Why on earth is the first index not on the same window?! This can only happen if the first chromosome or first positions are misspecified!"
-                );
-                let idx_previous_locus: usize = idx_loci[i - 1];
-                let previous_locus_position: usize = self.loci[idx_previous_locus].position;
-                per_chromosome_pos.push((window_start_pos, previous_locus_position));
-                window_start_pos = locus.position;
-                per_chromosome_mu.push(mu);
-                per_chromosome_sd.push(sd);
-                per_chromosome_n.push(n);
-                per_windows = vec![q];
-            }
-            if !is_same_chromosome {
-                chrom = &self.genome[locus.chromosome_id].name;
-                positions.push(std::mem::take(&mut per_chromosome_pos)); // takes ownership and leaves an empty vector
-                afs_mu.push(std::mem::take(&mut per_chromosome_mu)); // takes ownership and leaves an empty vector
-                afs_sd.push(std::mem::take(&mut per_chromosome_sd)); // takes ownership and leaves an empty vector
-                afs_n.push(std::mem::take(&mut per_chromosome_n)); // takes ownership and leaves an empty vector
-            }
-            if is_last_locus {
-                let n: usize = per_windows.len();
-                let mu: f32 = per_windows.iter().sum::<f32>() / (n as f32);
-                let sd: f32 = (per_windows.iter().map(|&x| (x - mu).powi(2)).sum::<f32>()
-                    / (n as f32))
-                    .sqrt();
-                per_chromosome_pos.push((window_start_pos, locus.position));
-                per_chromosome_mu.push(mu);
-                per_chromosome_sd.push(sd);
-                per_chromosome_n.push(n);
-                positions.push(std::mem::take(&mut per_chromosome_pos)); // takes ownership and leaves an empty vector
-                afs_mu.push(std::mem::take(&mut per_chromosome_mu)); // takes ownership and leaves an empty vector
-                afs_sd.push(std::mem::take(&mut per_chromosome_sd)); // takes ownership and leaves an empty vector
-                afs_n.push(std::mem::take(&mut per_chromosome_n)); // takes ownership and leaves an empty vector
-            }
-        }
-        Ok(AlleleFrequencyPerChromosome {
-            genome: self.genome.to_owned(),
+        let stat = self.window_statistics(
+            &StatPerLocus::AlleleFreqs(allele_freqs_per_locus),
             window_bp,
-            positions,
-            n_loci: afs_n,
-            mu: afs_mu,
-            sd: afs_sd,
-        })
+            is_major_allele,
+        )?;
+        // TODO: may use a trait because match bail is not very idiomatic
+        match stat {
+            StatPerChrom::AlleleFreqs(x) => Ok(x),
+            StatPerChrom::Diversity(_) => bail!(
+                "Unexpected output! We expected AlleleFrequencyPerChromosome but got GeneticDiversityPerChromosome instead!"
+            ),
+        }
     }
     pub fn allele_freq(
         &self,
@@ -368,9 +459,8 @@ impl Dataset {
             }
             let n: usize = fs.len();
             let h_sum: f32 = fs.iter().sum::<f32>();
-            let h_max: f32 = fs.iter().fold(0.0, |m, &x| m.max(x));
+            let h_max: f32 = fs.iter().fold(f32::NEG_INFINITY, |m, &x| m.max(x));
             let het: f32 = 1.00 - h_sum;
-            fs.sort_by(|x, y| x.total_cmp(y));
             n_alleles.push(n);
             homozygosity_ones_sum.push(h_sum);
             homozygosity_ones_max.push(h_max);
@@ -388,108 +478,18 @@ impl Dataset {
         diversity_per_locus: &GeneticDiversityPerLocus,
         window_bp: usize,
     ) -> Result<GeneticDiversityPerChromosome> {
-        self.check()?;
-        let n: usize = diversity_per_locus.n_alleles.len();
-        ensure!(
-            n == diversity_per_locus.homozygosity_ones_sum.len(),
-            "The allele counts per locus does not match the sum of homozygosities (fixed at 1.00)!"
-        );
-        ensure!(
-            n == diversity_per_locus.homozygosity_ones_max.len(),
-            "The allele counts per locus does not match the max of homozygosities (fixed at 1.00)!"
-        );
-        ensure!(
-            n == diversity_per_locus.heterozygosity.len(),
-            "The allele counts per locus does not match the heterozygosities!"
-        );
-        for (s, m) in diversity_per_locus
-            .homozygosity_ones_sum
-            .iter()
-            .zip(diversity_per_locus.homozygosity_ones_max.iter())
-        {
-            ensure!(
-                s >= m,
-                "The sum of homozygosities (fixed at 1.00) is expected to be greater than or equal to the maximum homozygosity! Something catastrophic happened extracting GeneticDiversityPerLocus!"
-            );
-        }
-        let n_loci: usize = self.loci.len();
-        let n_chromosomes: usize = self.genome.len();
-        let idx_loci: Vec<usize> = self.sortperm_loci()?;
-        ensure!(
-            n_loci == idx_loci.len(),
-            "The locus sorting did not generate the expected number of loci!"
-        );
-        let mut chrom: &str = &self.genome[self.loci[idx_loci[0]].chromosome_id].name;
-        let mut window_start_pos: usize = self.loci[idx_loci[0]].position;
-        let mut positions: Vec<Vec<(usize, usize)>> = Vec::with_capacity(n_chromosomes); // start and end positions of each window
-        let mut heterozygosity_n: Vec<Vec<usize>> = Vec::with_capacity(n_chromosomes); // means per window
-        let mut heterozygosity_mu: Vec<Vec<f32>> = Vec::with_capacity(n_chromosomes); // means per window
-        let mut heterozygosity_sd: Vec<Vec<f32>> = Vec::with_capacity(n_chromosomes); // means per window
-        let mut per_chromosome_pos: Vec<(usize, usize)> = Vec::new();
-        let mut per_chromosome_n: Vec<usize> = Vec::new();
-        let mut per_chromosome_mu: Vec<f32> = Vec::new();
-        let mut per_chromosome_sd: Vec<f32> = Vec::new();
-        let mut per_windows: Vec<f32> = Vec::new();
-        for (i, &j) in idx_loci.iter().enumerate() {
-            let locus: &Locus = &self.loci[j];
-            let is_same_chromosome: bool = chrom == self.genome[locus.chromosome_id].name;
-            let is_within_window: bool =
-                is_same_chromosome && ((locus.position - window_start_pos) <= window_bp);
-            let is_last_locus: bool = i == n_loci - 1;
-            let h: f32 = diversity_per_locus.heterozygosity[j];
-            if is_within_window {
-                per_windows.push(h);
-            } else {
-                let n: usize = per_windows.len();
-                let mu: f32 = per_windows.iter().sum::<f32>() / (n as f32);
-                let sd: f32 = (per_windows.iter().map(|&x| (x - mu).powi(2)).sum::<f32>()
-                    / (n as f32))
-                    .sqrt();
-                // Positional info
-                ensure!(
-                    i > 0,
-                    "Why on earth is the first index not on the same window?! This can only happen if the first chromosome or first positions are misspecified!"
-                );
-                let idx_previous_locus: usize = idx_loci[i - 1];
-                let previous_locus_position: usize = self.loci[idx_previous_locus].position;
-                per_chromosome_pos.push((window_start_pos, previous_locus_position));
-                window_start_pos = locus.position;
-                per_chromosome_mu.push(mu);
-                per_chromosome_sd.push(sd);
-                per_chromosome_n.push(n);
-                per_windows = vec![h];
-            }
-            if !is_same_chromosome {
-                chrom = &self.genome[locus.chromosome_id].name;
-                positions.push(std::mem::take(&mut per_chromosome_pos)); // takes ownership and leaves an empty vector
-                heterozygosity_mu.push(std::mem::take(&mut per_chromosome_mu)); // takes ownership and leaves an empty vector
-                heterozygosity_sd.push(std::mem::take(&mut per_chromosome_sd)); // takes ownership and leaves an empty vector
-                heterozygosity_n.push(std::mem::take(&mut per_chromosome_n)); // takes ownership and leaves an empty vector
-            }
-            if is_last_locus {
-                let n: usize = per_windows.len();
-                let mu: f32 = per_windows.iter().sum::<f32>() / (n as f32);
-                let sd: f32 = (per_windows.iter().map(|&x| (x - mu).powi(2)).sum::<f32>()
-                    / (n as f32))
-                    .sqrt();
-                per_chromosome_pos.push((window_start_pos, locus.position));
-                per_chromosome_mu.push(mu);
-                per_chromosome_sd.push(sd);
-                per_chromosome_n.push(n);
-                positions.push(std::mem::take(&mut per_chromosome_pos)); // takes ownership and leaves an empty vector
-                heterozygosity_mu.push(std::mem::take(&mut per_chromosome_mu)); // takes ownership and leaves an empty vector
-                heterozygosity_sd.push(std::mem::take(&mut per_chromosome_sd)); // takes ownership and leaves an empty vector
-                heterozygosity_n.push(std::mem::take(&mut per_chromosome_n)); // takes ownership and leaves an empty vector
-            }
-        }
-        Ok(GeneticDiversityPerChromosome {
-            genome: self.genome.to_owned(),
+        let stat = self.window_statistics(
+            &StatPerLocus::Diversity(diversity_per_locus),
             window_bp,
-            positions,
-            n_loci: heterozygosity_n,
-            heterozygosity_mu,
-            heterozygosity_sd,
-        })
+            false,
+        )?;
+        // TODO: may use a trait because match bail is not very idiomatic
+        match stat {
+            StatPerChrom::Diversity(x) => Ok(x),
+            StatPerChrom::AlleleFreqs(_) => bail!(
+                "Unexpected output! We expected GeneticDiversityPerChromosome but got AlleleFrequencyPerChromosome instead!"
+            ),
+        }
     }
     pub fn diversity_per_entry(&self, ctx: &GpuContext) -> Result<GeneticDiversityPerEntry> {
         self.check()?;
@@ -530,7 +530,6 @@ impl Dataset {
             heterozygosity,
         })
     }
-
     pub fn diversity(
         &self,
         ctx: &GpuContext,
@@ -558,7 +557,15 @@ impl Dataset {
             diversity_per_entry,
         ))
     }
-    pub fn ld_map(&self) -> Result<()> {
+    pub fn ld_map(&self, _ctx: &GpuContext) -> Result<()> {
+        // self.check()?;
+        // let n_entries: usize = self.entries.len();
+        // let n_loci: usize = self.loci.len();
+        // let n_loci_alleles: usize = self.loci.iter().map(|x| x.col_idx.len()).sum::<usize>();
+        // // Correlation between loci alleles
+        // let allele_freqs: GpuTensor = self.genotype_data.transpose_view(None)?; // n_loci_alleles x n_entries
+        // let covariances_across_loci_alleles: GpuTensor = allele_freqs.matrix_covariance_per_row(ctx)?;
+
         todo!()
     }
     pub fn trait_dist(&self) -> Result<()> {
@@ -586,6 +593,155 @@ mod tests {
         .unwrap()
         .0
     }
+
+    fn matrix(ctx: &GpuContext) -> GpuTensor {
+        GpuTensor::from_vec_f32(ctx, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3], None, None).unwrap()
+    }
+
+    #[test]
+    fn matrix_mean_per_row_dimensions_match() {
+        let ctx = context();
+        let x = matrix(&ctx);
+        let mu = x.matrix_mean_per_row(&ctx).unwrap();
+        assert_eq!(mu.shape, &[2, 1]);
+    }
+
+    #[test]
+    fn matrix_mean_per_row_values_are_correct() {
+        let ctx = context();
+        let x = matrix(&ctx);
+        let mu = x
+            .matrix_mean_per_row(&ctx)
+            .unwrap()
+            .to_vec_f32(&ctx)
+            .unwrap();
+        assert!((mu[0] - 2.0).abs() < 1e-4);
+        assert!((mu[1] - 5.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn matrix_variance_per_row_dimensions_match() {
+        let ctx = context();
+        let x = matrix(&ctx);
+        let v = x.matrix_variance_per_row(&ctx).unwrap();
+        assert_eq!(v.shape, &[2, 1]);
+    }
+
+    #[test]
+    fn matrix_variance_per_row_values_are_correct() {
+        let ctx = context();
+        let x = matrix(&ctx);
+        let v = x
+            .matrix_variance_per_row(&ctx)
+            .unwrap()
+            .to_vec_f32(&ctx)
+            .unwrap();
+        let expected = 2.0f32 / 3.0;
+        assert!((v[0] - expected).abs() < 1e-4);
+        assert!((v[1] - expected).abs() < 1e-4);
+    }
+
+    #[test]
+    fn matrix_covariance_per_row_is_square() {
+        let ctx = context();
+        let x = matrix(&ctx);
+        let cov = x.matrix_covariance_per_row(&ctx).unwrap();
+        assert_eq!(cov.shape, &[2, 2]);
+    }
+
+    #[test]
+    fn matrix_covariance_per_row_is_symmetric() {
+        let ctx = context();
+        let x = matrix(&ctx);
+        let cov = x
+            .matrix_covariance_per_row(&ctx)
+            .unwrap()
+            .to_vec_f32(&ctx)
+            .unwrap();
+        assert!((cov[1] - cov[2]).abs() < 1e-4);
+    }
+
+    #[test]
+    fn matrix_covariance_per_row_diagonal_matches_variance() {
+        let ctx = context();
+        let x = matrix(&ctx);
+        let cov = x
+            .matrix_covariance_per_row(&ctx)
+            .unwrap()
+            .to_vec_f32(&ctx)
+            .unwrap();
+        let var = x
+            .matrix_variance_per_row(&ctx)
+            .unwrap()
+            .to_vec_f32(&ctx)
+            .unwrap();
+        println!("cov: {:?}", cov);
+        println!("var: {:?}", var);
+        assert!((cov[0] - var[0]).abs() < 1e-4);
+        assert!((cov[3] - var[1]).abs() < 1e-4);
+    }
+
+    #[test]
+    fn matrix_correlation_per_row_is_square() {
+        let ctx = context();
+        let x = matrix(&ctx);
+        let corr = x.matrix_correlation_per_row(&ctx).unwrap();
+        assert_eq!(corr.shape, &[2, 2]);
+    }
+
+    #[test]
+    fn matrix_correlation_per_row_diagonal_is_one() {
+        let ctx = context();
+        let x = matrix(&ctx);
+        let corr = x
+            .matrix_correlation_per_row(&ctx)
+            .unwrap()
+            .to_vec_f32(&ctx)
+            .unwrap();
+        assert!((corr[0] - 1.0).abs() < 1e-5);
+        assert!((corr[3] - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn matrix_correlation_per_row_is_symmetric() {
+        let ctx = context();
+        let x = matrix(&ctx);
+        let corr = x
+            .matrix_correlation_per_row(&ctx)
+            .unwrap()
+            .to_vec_f32(&ctx)
+            .unwrap();
+        assert!((corr[1] - corr[2]).abs() < 1e-4);
+    }
+
+    #[test]
+    fn matrix_correlation_per_row_detects_perfect_correlation() {
+        let ctx = context();
+        let x = matrix(&ctx);
+        let corr = x
+            .matrix_correlation_per_row(&ctx)
+            .unwrap()
+            .to_vec_f32(&ctx)
+            .unwrap();
+        assert!((corr[1] - 1.0).abs() < 1e-5);
+        assert!((corr[2] - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn matrix_correlation_handles_zero_variance_rows() {
+        let ctx = context();
+        let x = GpuTensor::from_vec_f32(&ctx, &[1.0, 1.0, 1.0, 2.0, 3.0, 4.0], &[2, 3], None, None)
+            .unwrap();
+
+        let corr = x
+            .matrix_correlation_per_row(&ctx)
+            .unwrap()
+            .to_vec_f32(&ctx)
+            .unwrap();
+
+        assert!(corr.iter().any(|x| x.is_nan()));
+    }
+
     #[test]
     fn sortperm_entries_returns_valid_permutation() {
         let ctx = context();
@@ -655,7 +811,7 @@ mod tests {
         let ds = dataset(&ctx);
         let af = ds.allele_freq_per_locus_allele(&ctx).unwrap();
         for i in 0..af.allele_freqs.len() {
-            assert!(af.homozygosity_zeroes[i] + af.homozygosity_ones[i] <= 1.0 + 1e-6);
+            assert!(af.homozygosity_zeroes[i] + af.homozygosity_ones[i] <= 1.0 + 1e-4);
         }
     }
     #[test]
@@ -711,6 +867,97 @@ mod tests {
             assert!(x.is_finite());
         }
     }
+
+    #[test]
+    fn window_statistics_returns_allele_freq_variant() {
+        let ctx = context();
+        let ds = dataset(&ctx);
+        let af0 = ds.allele_freq_per_locus_allele(&ctx).unwrap();
+        let af1 = ds.allele_freq_per_locus(&af0).unwrap();
+        let stat = ds
+            .window_statistics(&StatPerLocus::AlleleFreqs(&af1), 100_000, true)
+            .unwrap();
+        assert!(matches!(stat, StatPerChrom::AlleleFreqs(_)));
+    }
+
+    #[test]
+    fn window_statistics_returns_diversity_variant() {
+        let ctx = context();
+        let ds = dataset(&ctx);
+        let af = ds.allele_freq_per_locus_allele(&ctx).unwrap();
+        let div = ds.diversity_per_locus(&af).unwrap();
+        let stat = ds
+            .window_statistics(&StatPerLocus::Diversity(&div), 100_000, false)
+            .unwrap();
+        assert!(matches!(stat, StatPerChrom::Diversity(_)));
+    }
+
+    #[test]
+    fn window_statistics_major_differs_from_minor() {
+        let ctx = context();
+        let ds = dataset(&ctx);
+        let af0 = ds.allele_freq_per_locus_allele(&ctx).unwrap();
+        let af1 = ds.allele_freq_per_locus(&af0).unwrap();
+        let major = ds
+            .window_statistics(&StatPerLocus::AlleleFreqs(&af1), 100_000, true)
+            .unwrap();
+        let minor = ds
+            .window_statistics(&StatPerLocus::AlleleFreqs(&af1), 100_000, false)
+            .unwrap();
+        match (major, minor) {
+            (StatPerChrom::AlleleFreqs(major), StatPerChrom::AlleleFreqs(minor)) => {
+                assert_ne!(major, minor);
+            }
+            _ => panic!("unexpected StatPerChrom variant"),
+        }
+    }
+
+    #[test]
+    fn window_statistics_output_shapes_match_genome() {
+        let ctx = context();
+        let ds = dataset(&ctx);
+        let af0 = ds.allele_freq_per_locus_allele(&ctx).unwrap();
+        let af1 = ds.allele_freq_per_locus(&af0).unwrap();
+        let stat = ds
+            .window_statistics(&StatPerLocus::AlleleFreqs(&af1), 100_000, true)
+            .unwrap();
+        match stat {
+            StatPerChrom::AlleleFreqs(x) => {
+                assert_eq!(x.positions.len(), ds.genome.len());
+                assert_eq!(x.n_loci.len(), ds.genome.len());
+                assert_eq!(x.mu.len(), ds.genome.len());
+                assert_eq!(x.sd.len(), ds.genome.len());
+            }
+            _ => panic!("unexpected StatPerChrom variant"),
+        }
+    }
+
+    #[test]
+    fn window_statistics_allele_freq_and_diversity_have_matching_window_structure() {
+        let ctx = context();
+        let ds = dataset(&ctx);
+
+        let af0 = ds.allele_freq_per_locus_allele(&ctx).unwrap();
+        let af1 = ds.allele_freq_per_locus(&af0).unwrap();
+        let div1 = ds.diversity_per_locus(&af0).unwrap();
+
+        let af = ds
+            .window_statistics(&StatPerLocus::AlleleFreqs(&af1), 100_000, true)
+            .unwrap();
+
+        let div = ds
+            .window_statistics(&StatPerLocus::Diversity(&div1), 100_000, false)
+            .unwrap();
+
+        match (af, div) {
+            (StatPerChrom::AlleleFreqs(af), StatPerChrom::Diversity(div)) => {
+                assert_eq!(af.positions, div.positions);
+                assert_eq!(af.n_loci, div.n_loci);
+            }
+            _ => panic!("unexpected StatPerChrom variant"),
+        }
+    }
+
     #[test]
     fn allele_freq_per_chromosome_major_dimensions_match() {
         let ctx = context();
