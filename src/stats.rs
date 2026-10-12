@@ -116,18 +116,18 @@ pub struct GeneticDiversityPerEntry {
 #[derive(Debug)]
 pub struct LinkagePerLocusPerAllele {
     correlations: GpuTensor, // correlations between loci-alleles (n_loci_alleles x n_loci_alleles 2D tensor)
-}   
+}
 
 #[allow(dead_code)]
 #[derive(Debug)]
 pub struct LinkagePerEntry {
     correlations: GpuTensor, // correlations between entries (n_entries x n_entries 2D tensor)
-}   
+}
 
 #[allow(dead_code)]
 #[derive(Debug)]
 pub struct LinkagePerLocus {
-    n_alleles: Vec<usize>,           // number of alleles per locus
+    n_alleles: Vec<usize>,   // number of alleles per locus
     correlations: GpuTensor, // correlations between loci (n_loci x n_loci 2D tensor)
 }
 
@@ -140,7 +140,6 @@ pub struct LinkagePerChromosome {
     n_loci: Vec<Vec<usize>>, // loci counts per window per chromosome
     correlations: GpuTensor, // correlations between windows across chromsomes(n_total_windows x n_total_windows 2D tensor)
 }
-
 
 /////////////////////////////////////////////////////
 // Consolidated statistics/metrics enums per/across loci
@@ -157,7 +156,6 @@ pub enum StatPerChrom {
 
 /////////////////////////////////////////////////////
 // Methods definitions
-
 
 // TODO: probably move this into its own source file...
 impl GpuTensor {
