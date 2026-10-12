@@ -43,10 +43,13 @@ impl fmt::Display for DatasetStats {
     }
 }
 
+/////////////////////////////////////////////////////
+// Allele frequencies
+
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct AlleleFrequencyPerLocusPerAllele {
-    allele_freqs: Vec<f32>,        // frequency of each allele per locus
+    allele_freqs: Vec<f32>,        // mean frequency of each allele per locus
     homozygosity_zeroes: Vec<f32>, // frequency that each allele is fixed at 0.00 per locus
     homozygosity_ones: Vec<f32>,   // frequency that each allele is fixed at 1.00 per locus
 }
@@ -72,6 +75,9 @@ pub struct AlleleFrequencyPerChromosome {
     mu: Vec<Vec<f32>>,       // mean allele frequencies per window per chromosome
     sd: Vec<Vec<f32>>,       // standard deviation of allele frequencies per window per chromosome
 }
+
+/////////////////////////////////////////////////////
+// Genetic diversity, i.e. heterozygosity
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
@@ -102,6 +108,43 @@ pub struct GeneticDiversityPerEntry {
     heterozygosity: Vec<f32>, // frequency of heterozygous loci per entry (heterozygosity = 1.00 - homozygosity_ones_sum)
 }
 
+/////////////////////////////////////////////////////
+// Linkage disequillibrium metric, i.e. pairwise correlation between loci and entries
+// TODO: use these structs below...
+
+#[allow(dead_code)]
+#[derive(Debug)]
+pub struct LinkagePerLocusPerAllele {
+    correlations: GpuTensor, // correlations between loci-alleles (n_loci_alleles x n_loci_alleles 2D tensor)
+}   
+
+#[allow(dead_code)]
+#[derive(Debug)]
+pub struct LinkagePerEntry {
+    correlations: GpuTensor, // correlations between entries (n_entries x n_entries 2D tensor)
+}   
+
+#[allow(dead_code)]
+#[derive(Debug)]
+pub struct LinkagePerLocus {
+    n_alleles: Vec<usize>,           // number of alleles per locus
+    correlations: GpuTensor, // correlations between loci (n_loci x n_loci 2D tensor)
+}
+
+#[allow(dead_code)]
+#[derive(Debug)]
+pub struct LinkagePerChromosome {
+    genome: Vec<Chromosome>, // decided to store these for self-sufficiency as these map as consecutive elements to the Vec<usize> and Vec<f32> below  --> hoping they are not too big...
+    window_bp: usize,        // window size in bases
+    positions: Vec<Vec<(usize, usize)>>, // start and end positions of each window per chromosome
+    n_loci: Vec<Vec<usize>>, // loci counts per window per chromosome
+    correlations: GpuTensor, // correlations between windows across chromsomes(n_total_windows x n_total_windows 2D tensor)
+}
+
+
+/////////////////////////////////////////////////////
+// Consolidated statistics/metrics enums per/across loci
+
 pub enum StatPerLocus<'a> {
     AlleleFreqs(&'a AlleleFrequencyPerLocus),
     Diversity(&'a GeneticDiversityPerLocus),
@@ -111,6 +154,10 @@ pub enum StatPerChrom {
     AlleleFreqs(AlleleFrequencyPerChromosome),
     Diversity(GeneticDiversityPerChromosome),
 }
+
+/////////////////////////////////////////////////////
+// Methods definitions
+
 
 // TODO: probably move this into its own source file...
 impl GpuTensor {
