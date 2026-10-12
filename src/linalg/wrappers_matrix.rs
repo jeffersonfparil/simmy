@@ -168,6 +168,15 @@ impl GpuKernel<'_> {
     pub fn cos_matrix(&self, a: &GpuTensor) -> Result<GpuTensor> {
         self.execute_kernel(a.params_unary_matrix(Operation::COS)?, a, None)
     }
+    pub fn not_matrix(&self, a: &GpuTensor) -> Result<GpuTensor> {
+        self.execute_kernel(a.params_unary_matrix(Operation::NOT)?, a, None)
+    }
+    pub fn tanh_matrix(&self, a: &GpuTensor) -> Result<GpuTensor> {
+        self.execute_kernel(a.params_unary_matrix(Operation::TANH)?, a, None)
+    }
+    pub fn atanh_matrix(&self, a: &GpuTensor) -> Result<GpuTensor> {
+        self.execute_kernel(a.params_unary_matrix(Operation::ATANH)?, a, None)
+    }
 
     // Binary
     pub fn add_matrix(&self, a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor> {

@@ -12,6 +12,8 @@ pub enum Operation {
     SIN,
     COS,
     NOT, // logical (not bitwise)
+    TANH,
+    ATANH,
     ADD,
     SUB,
     MUL,
@@ -42,6 +44,8 @@ impl Operation {
             Self::SIN => Ok(5),
             Self::COS => Ok(6),
             Self::NOT => Ok(7),
+            Self::TANH => Ok(8),
+            Self::ATANH => Ok(9),
             _ => bail!("Invalid unary matrix operation!"),
         }
     }
@@ -117,6 +121,8 @@ mod tests {
         assert_eq!(Operation::SIN.unary_opcode().unwrap(), 5);
         assert_eq!(Operation::COS.unary_opcode().unwrap(), 6);
         assert_eq!(Operation::NOT.unary_opcode().unwrap(), 7);
+        assert_eq!(Operation::TANH.unary_opcode().unwrap(), 8);
+        assert_eq!(Operation::ATANH.unary_opcode().unwrap(), 9);
     }
     #[test]
     fn rejects_invalid_unary_operations() {

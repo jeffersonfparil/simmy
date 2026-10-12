@@ -112,34 +112,34 @@ pub struct GeneticDiversityPerEntry {
 // Linkage disequillibrium metric, i.e. pairwise correlation between loci and entries
 // TODO: use these structs below...
 
-#[allow(dead_code)]
-#[derive(Debug)]
-pub struct LinkagePerLocusPerAllele {
-    correlations: GpuTensor, // correlations between loci-alleles (n_loci_alleles x n_loci_alleles 2D tensor)
-}
+// #[allow(dead_code)]
+// #[derive(Debug)]
+// pub struct LinkagePerLocusPerAllele {
+//     correlations: GpuTensor, // correlations between loci-alleles (n_loci_alleles x n_loci_alleles 2D tensor)
+// }
 
-#[allow(dead_code)]
-#[derive(Debug)]
-pub struct LinkagePerEntry {
-    correlations: GpuTensor, // correlations between entries (n_entries x n_entries 2D tensor)
-}
+// #[allow(dead_code)]
+// #[derive(Debug)]
+// pub struct LinkagePerEntry {
+// }
 
-#[allow(dead_code)]
-#[derive(Debug)]
-pub struct LinkagePerLocus {
-    n_alleles: Vec<usize>,   // number of alleles per locus
-    correlations: GpuTensor, // correlations between loci (n_loci x n_loci 2D tensor)
-}
+// #[allow(dead_code)]
+// #[derive(Debug)]
+// pub struct LinkagePerLocus {
+// }
 
-#[allow(dead_code)]
-#[derive(Debug)]
-pub struct LinkagePerChromosome {
-    genome: Vec<Chromosome>, // decided to store these for self-sufficiency as these map as consecutive elements to the Vec<usize> and Vec<f32> below  --> hoping they are not too big...
-    window_bp: usize,        // window size in bases
-    positions: Vec<Vec<(usize, usize)>>, // start and end positions of each window per chromosome
-    n_loci: Vec<Vec<usize>>, // loci counts per window per chromosome
-    correlations: GpuTensor, // correlations between windows across chromsomes(n_total_windows x n_total_windows 2D tensor)
-}
+// #[allow(dead_code)]
+// #[derive(Debug)]
+// pub struct LinkageDisequillibrium {
+//     genome: Vec<Chromosome>, // decided to store these for self-sufficiency as these map as consecutive elements to the Vec<usize> and Vec<f32> below  --> hoping they are not too big...
+//     window_bp: usize,        // window size in bases
+//     positions: Vec<Vec<(usize, usize)>>, // start and end positions of each window per chromosome
+//     n_loci: Vec<Vec<usize>>, // loci counts per window per chromosome
+//     correlations: GpuTensor, // correlations between windows across chromsomes(n_total_windows x n_total_windows 2D tensor)
+//     correlations: GpuTensor, // correlations between entries (n_entries x n_entries 2D tensor)
+//     n_alleles: Vec<usize>,   // number of alleles per locus
+//     correlations: GpuTensor, // correlations between loci (n_loci x n_loci 2D tensor)
+// }
 
 /////////////////////////////////////////////////////
 // Consolidated statistics/metrics enums per/across loci
