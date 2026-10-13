@@ -48,12 +48,14 @@ impl GpuTensor {
     }
 
     pub fn params_binary(&self, b: &Self, op: Operation) -> Result<Params> {
-        ensure!(
-            self.shape == b.shape,
-            "Incompatible shapes: {:?} and {:?}",
-            self.shape,
-            b.shape
-        );
+        for i in 0..(self.shape.len() - 1) {
+            ensure!(
+                (self.shape == b.shape) || (self.shape[i] == b.shape[i]),
+                "Incompatible shapes: {:?} and {:?}",
+                self.shape,
+                b.shape
+            );
+        }
         ensure!(
             self.shape.len() <= MAX_RANK,
             "Tensor rank exceeds MAX_RANK ({})",
@@ -306,6 +308,15 @@ impl GpuKernel<'_> {
     }
     pub fn cos(&self, a: &GpuTensor) -> Result<GpuTensor> {
         self.execute_kernel(a.params_unary(Operation::COS)?, a, None)
+    }
+    pub fn not(&self, a: &GpuTensor) -> Result<GpuTensor> {
+        self.execute_kernel(a.params_unary(Operation::NOT)?, a, None)
+    }
+    pub fn tanh(&self, a: &GpuTensor) -> Result<GpuTensor> {
+        self.execute_kernel(a.params_unary(Operation::TANH)?, a, None)
+    }
+    pub fn atanh(&self, a: &GpuTensor) -> Result<GpuTensor> {
+        self.execute_kernel(a.params_unary(Operation::ATANH)?, a, None)
     }
 
     // Binary

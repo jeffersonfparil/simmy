@@ -35,7 +35,12 @@ impl GpuTensor {
     pub fn params_binary_matrix(&self, b: &Self, op: Operation) -> Result<Params> {
         ensure!(self.shape.len() == 2, "A must be rank 2!");
         ensure!(b.shape.len() == 2, "B must be rank 2!");
-        ensure!(self.shape == b.shape, "A and B mush have the same shape!");
+        ensure!(
+            (self.shape == b.shape) || (self.shape[0] == b.shape[0]),
+            "Incompatible shapes: {:?} and {:?}",
+            self.shape,
+            b.shape
+        );
         let params = BinaryMatrixParams {
             // Number of rows in `A`, `B`, and `C`.
             n: self.shape[0],
@@ -162,6 +167,15 @@ impl GpuKernel<'_> {
     }
     pub fn cos_matrix(&self, a: &GpuTensor) -> Result<GpuTensor> {
         self.execute_kernel(a.params_unary_matrix(Operation::COS)?, a, None)
+    }
+    pub fn not_matrix(&self, a: &GpuTensor) -> Result<GpuTensor> {
+        self.execute_kernel(a.params_unary_matrix(Operation::NOT)?, a, None)
+    }
+    pub fn tanh_matrix(&self, a: &GpuTensor) -> Result<GpuTensor> {
+        self.execute_kernel(a.params_unary_matrix(Operation::TANH)?, a, None)
+    }
+    pub fn atanh_matrix(&self, a: &GpuTensor) -> Result<GpuTensor> {
+        self.execute_kernel(a.params_unary_matrix(Operation::ATANH)?, a, None)
     }
 
     // Binary
