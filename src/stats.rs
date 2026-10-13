@@ -605,13 +605,53 @@ impl Dataset {
     pub fn ld_map(&self, ctx: &GpuContext) -> Result<()> {
         self.check()?;
         // Correlation between loci alleles
-        let allele_freqs: GpuTensor = self.genotype_data.transpose_view(None)?; // n_loci_alleles x n_entries
-        let correlations_across_loci_alleles: GpuTensor =
-            allele_freqs.matrix_correlation_per_row(ctx)?;
+        let n_entries = self.genotype_data.shape[0] as usize;
+        let n_loci_alleles = self.genotype_data.shape[1] as usize;
+        let allele_freqs_0: GpuTensor = self
+            .genotype_data
+            .slice_view(&[(0, n_entries), (0, n_loci_alleles), (0, 1)])?
+            .transpose_view(None)?; // n_loci_alleles x n_entries
+        let allele_freqs_1: GpuTensor = self
+            .genotype_data
+            .slice_view(&[(0, n_entries), (0, n_loci_alleles), (1, 2)])?
+            .transpose_view(None)?; // n_loci_alleles x n_entries
+        let correlations_across_loci_alleles_0: GpuTensor =
+            allele_freqs_0.matrix_correlation_per_row(ctx)?;
+        let correlations_across_loci_alleles_1: GpuTensor =
+            allele_freqs_1.matrix_correlation_per_row(ctx)?;
         println!(
-            "correlations_across_loci_alleles: {}",
-            correlations_across_loci_alleles
+            "correlations_across_loci_alleles_0: {}",
+            correlations_across_loci_alleles_0
         );
+        println!(
+            "&correlations_across_loci_alleles_0.to_vec_f32(ctx)?[0..50]: {:?}",
+            &correlations_across_loci_alleles_0.to_vec_f32(ctx)?[0..50]
+        );
+        println!(
+            "correlations_across_loci_alleles_1: {}",
+            correlations_across_loci_alleles_1
+        );
+        println!(
+            "&correlations_across_loci_alleles_1.to_vec_f32(ctx)?[0..50]: {:?}",
+            &correlations_across_loci_alleles_1.to_vec_f32(ctx)?[0..50]
+        );
+
+        let kernel: GpuKernel = GpuKernel { ctx };
+
+        let n_loci: usize = self.loci.len();
+        let _cor_per_locus_0: Vec<f32> = vec![f32::NAN; n_loci * n_loci];
+        for locus in &self.loci {
+            let m: usize = locus.col_idx.len();
+            for &i in &locus.col_idx[0..(m - 1)] {
+                for &j in &locus.col_idx[1..m] {
+                    let a = correlations_across_loci_alleles_0
+                        .slice_view(&[(0, n_loci), (i, i + 1)])?;
+                    let b = correlations_across_loci_alleles_0
+                        .slice_view(&[(0, n_loci), (j, j + 1)])?;
+                    let _c = kernel.max(&a, &b)?;
+                }
+            }
+        }
 
         // TODO: Extract mean correlations per locus
         // while skipping NANs as they will be there for zero variance alleles
@@ -1339,4 +1379,11 @@ mod tests {
         let ds = dataset(&ctx);
         assert!(ds.diversity(&ctx, 0).is_err());
     }
+
+    // #[test]
+    // fn test_ld() {
+    //     let ctx = context();
+    //     let ds = dataset(&ctx);
+    //     ds.ld_map(&ctx).unwrap();
+    // }
 }
