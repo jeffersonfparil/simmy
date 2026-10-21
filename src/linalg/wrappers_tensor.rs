@@ -56,7 +56,7 @@ impl GpuTensor {
         let a_rank = self.shape.len();
         let b_rank = b.shape.len();
         ensure!(
-            b_rank == a_rank || b_rank + 1 == a_rank,
+            a_rank == b_rank || a_rank == (b_rank + 1),
             "Incompatible ranks: {:?} and {:?}",
             self.shape,
             b.shape
@@ -70,7 +70,7 @@ impl GpuTensor {
         // A is always indexed normally
         a_strides[..a_rank].copy_from_slice(&self.strides[..]);
         // Build broadcasted B strides
-        if b_rank == a_rank {
+        if a_rank == b_rank {
             // Normal
             for (i, stride) in b_strides.iter_mut().enumerate().take(a_rank) {
                 ensure!(
