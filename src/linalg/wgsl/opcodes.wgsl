@@ -7,6 +7,8 @@ const OP_LOG  : u32 = 4u;
 const OP_SIN  : u32 = 5u;
 const OP_COS  : u32 = 6u;
 const OP_NOT  : u32 = 7u; // logical (not bitwise)
+const OP_TANH : u32 = 8u;
+const OP_ATANH: u32 = 9u;
 
 // Binary operations
 const OP_ADD   : u32 = 0u;
