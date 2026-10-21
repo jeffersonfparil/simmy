@@ -160,6 +160,7 @@ pub enum StatPerChrom {
 // TODO: probably move this into its own source file...
 impl GpuTensor {
     pub fn matrix_mean_per_row(&self, ctx: &GpuContext) -> Result<GpuTensor> {
+        // μ = E[X], using X*ones
         ensure!(self.shape.len() == 2, "The tensor is not 2-dimensional!");
         let kernel: GpuKernel = GpuKernel { ctx };
         let p: usize = self.shape[1] as usize;
@@ -168,6 +169,7 @@ impl GpuTensor {
         kernel.div_scalar_matrix(&kernel.matmul(self, &ones)?, p as f32) // n x 1
     }
     pub fn matrix_variance_per_row(&self, ctx: &GpuContext) -> Result<GpuTensor> {
+        // Var(X) = E[X²] - E[X]²
         ensure!(self.shape.len() == 2, "The tensor is not 2-dimensional!");
         let kernel: GpuKernel = GpuKernel { ctx };
         // let n: usize = self.shape[0] as usize;
@@ -183,6 +185,7 @@ impl GpuTensor {
         kernel.sub_matrix(&expect_squared, &squared_expect)
     }
     pub fn matrix_covariance_per_row(&self, ctx: &GpuContext) -> Result<GpuTensor> {
+        // Cov(X) = E[XX'] - E[X]E[X]'
         ensure!(self.shape.len() == 2, "The tensor is not 2-dimensional!");
         let kernel: GpuKernel = GpuKernel { ctx };
         let p: usize = self.shape[1] as usize;
@@ -193,6 +196,7 @@ impl GpuTensor {
         kernel.sub_matrix(&expect_xy, &expect_x_expect_y) // n x n
     }
     pub fn matrix_correlation_per_row(&self, ctx: &GpuContext) -> Result<GpuTensor> {
+        // Corr(X) = Cov(X) / (ΣΣ')
         let kernel: GpuKernel = GpuKernel { ctx };
         let var: GpuTensor = self.matrix_variance_per_row(ctx)?;
         let sds: GpuTensor = kernel.sqrt_matrix(&var)?; // n x 1 (TODO: can be improved with a diag WGSL kernel, but for now let's stick with a seperate/duplicated variance computation!)
@@ -566,7 +570,6 @@ impl Dataset {
             )?
             .to_vec_f32(ctx)?; // n_entries
         let heterozygosity: Vec<f32> = homozygosity.iter().map(|&x| 1.00 - x).collect();
-
         // Output
         Ok(GeneticDiversityPerEntry {
             entries: self.entries.to_owned(),
