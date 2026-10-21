@@ -48,34 +48,73 @@ impl GpuTensor {
     }
 
     pub fn params_binary(&self, b: &Self, op: Operation) -> Result<Params> {
-        for i in 0..(self.shape.len() - 1) {
-            ensure!(
-                (self.shape == b.shape) || (self.shape[i] == b.shape[i]),
-                "Incompatible shapes: {:?} and {:?}",
-                self.shape,
-                b.shape
-            );
-        }
         ensure!(
             self.shape.len() <= MAX_RANK,
             "Tensor rank exceeds MAX_RANK ({})",
             MAX_RANK
         );
+        let a_rank = self.shape.len();
+        let b_rank = b.shape.len();
+        ensure!(
+            b_rank == a_rank || b_rank + 1 == a_rank,
+            "Incompatible ranks: {:?} and {:?}",
+            self.shape,
+            b.shape
+        );
         let mut shape = [0u32; MAX_RANK];
         let mut a_strides = [0u32; MAX_RANK];
         let mut b_strides = [0u32; MAX_RANK];
         let mut c_strides = [0u32; MAX_RANK];
-        shape[..self.shape.len()].copy_from_slice(&self.shape[..]);
-        a_strides[..self.shape.len()].copy_from_slice(&self.strides[..]);
-        b_strides[..self.shape.len()].copy_from_slice(&b.strides[..]);
+        // Output shape matches A
+        shape[..a_rank].copy_from_slice(&self.shape[..]);
+        // A is always indexed normally
+        a_strides[..a_rank].copy_from_slice(&self.strides[..]);
+        // Build broadcasted B strides
+        if b_rank == a_rank {
+            // Normal
+            for (i, stride) in b_strides.iter_mut().enumerate().take(a_rank) {
+                ensure!(
+                    b.shape[i] == self.shape[i] || b.shape[i] == 1,
+                    "Incompatible dimension {}: {} vs {}",
+                    i,
+                    self.shape[i],
+                    b.shape[i]
+                );
+                *stride = if b.shape[i] == 1 { 0 } else { b.strides[i] };
+            }
+        } else {
+            // Broadcasting strides for b, i.e.
+            // rank(B) = rank(A) - 1
+            // e.g.:
+            // A = [10,20,30]
+            // B = [20,30]
+            // becomes:
+            // B = [1,20,30]
+            b_strides[0] = 0;
+            for (i, stride) in b_strides.iter_mut().enumerate().take(a_rank).skip(1) {
+                ensure!(
+                    (self.shape[i] == b.shape[i - 1]) || (b.shape[i - 1] == 1),
+                    "Incompatible dimension {}: {} vs {}",
+                    i,
+                    self.shape[i],
+                    b.shape[i - 1]
+                );
+                *stride = if b.shape[i - 1] == 1 {
+                    0
+                } else {
+                    b.strides[i - 1]
+                };
+            }
+        }
+        // Contiguous output tensor
         let mut stride = 1u32;
-        for i in (0..self.shape.len()).rev() {
+        for i in (0..a_rank).rev() {
             c_strides[i] = stride;
             stride *= self.shape[i];
         }
         let params = BinaryTensorParams {
             // Number of tensor dimensions.
-            rank: self.shape.len() as u32,
+            rank: a_rank as u32,
             // Total number of logical tensor elements.
             n_elements: self.shape.iter().product(),
             // Shape of the logical tensor.
@@ -86,7 +125,7 @@ impl GpuTensor {
             a_strides,
             // Starting element of `B` within its backing storage.
             b_offset: b.offset,
-            // Storage strides of `B` per dimension.
+            // Starting element of `C` within its backing storage.
             b_strides,
             // Starting element of `C` within its backing storage.
             c_offset: 0,
@@ -1094,6 +1133,74 @@ mod tests {
         let a = matrix(&ctx, 2, 3)?;
         let b = matrix(&ctx, 5, 4)?;
         assert!(kernel.eqcount(&a, &b).is_err());
+        Ok(())
+    }
+    #[test]
+    fn binary_accepts_rank_minus_one_broadcast() -> Result<()> {
+        let ctx = context();
+        let a = tensor(&ctx, &[10, 20, 30])?;
+        let b = tensor(&ctx, &[20, 30])?;
+        assert!(a.params_binary(&b, Operation::ADD).is_ok());
+        let kernel = GpuKernel { ctx: &ctx };
+        let x = tensor(&ctx, &[2, 3])?;
+        let y = tensor(&ctx, &[3])?;
+        let z = kernel.add(&x, &y)?;
+        let x_vec: Vec<f32> = x.to_vec_f32(&ctx)?;
+        let y_vec: Vec<f32> = y.to_vec_f32(&ctx)?;
+        let z_vec: Vec<f32> = z.to_vec_f32(&ctx)?;
+        println!("x_vec: {:?}", x_vec);
+        println!("y_vec: {:?}", y_vec);
+        println!("z_vec: {:?}", z_vec);
+        assert_eq!(z_vec[0], 2.0);
+        assert_eq!(z_vec[1], 4.0);
+        assert_eq!(z_vec[2], 6.0);
+        assert_eq!(z_vec[3], 5.0);
+        assert_eq!(z_vec[4], 7.0);
+        assert_eq!(z_vec[5], 9.0);
+        Ok(())
+    }
+    #[test]
+    fn binary_rank_minus_one_broadcast_strides_are_correct() -> Result<()> {
+        let ctx = context();
+        let a = tensor(&ctx, &[10, 20, 30])?;
+        let b = tensor(&ctx, &[20, 30])?;
+        let params = a.params_binary(&b, Operation::ADD)?;
+        match params {
+            Params::BinaryTensor(p) => {
+                assert_eq!(p.rank, 3);
+                assert_eq!(&p.shape[..3], &[10, 20, 30]);
+                // B = [20,30] -> [1,20,30]
+                assert_eq!(p.b_strides[0], 0);
+                assert_eq!(p.b_strides[1], 30);
+                assert_eq!(p.b_strides[2], 1);
+            }
+            _ => panic!("Expected BinaryTensor params"),
+        }
+        Ok(())
+    }
+    #[test]
+    fn binary_rank_minus_one_broadcast_singleton_dimension() -> Result<()> {
+        let ctx = context();
+        let a = tensor(&ctx, &[10, 20, 30])?;
+        let b = tensor(&ctx, &[1, 30])?;
+        let params = a.params_binary(&b, Operation::ADD)?;
+        match params {
+            Params::BinaryTensor(p) => {
+                // B = [1,30] -> [1,1,30]
+                assert_eq!(p.b_strides[0], 0);
+                assert_eq!(p.b_strides[1], 0);
+                assert_eq!(p.b_strides[2], 1);
+            }
+            _ => panic!("Expected BinaryTensor params"),
+        }
+        Ok(())
+    }
+    #[test]
+    fn binary_rejects_incompatible_rank_minus_one_broadcast() -> Result<()> {
+        let ctx = context();
+        let a = tensor(&ctx, &[10, 20, 30])?;
+        let b = tensor(&ctx, &[15, 30])?;
+        assert!(a.params_binary(&b, Operation::ADD).is_err());
         Ok(())
     }
 }
