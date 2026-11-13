@@ -157,11 +157,13 @@ pub enum StatPerChrom {
 /////////////////////////////////////////////////////
 // Methods definitions
 
-// TODO: probably move this into its own source file...
+// TODO: Move this into its own source file...
 impl GpuTensor {
     pub fn matrix_mean_per_row(&self, ctx: &GpuContext) -> Result<GpuTensor> {
         // μ = E[X], using X*ones
         ensure!(self.shape.len() == 2, "The tensor is not 2-dimensional!");
+        ensure!(self.shape[0] > 0, "There are no rows!");
+        ensure!(self.shape[1] > 0, "There are no columns!");
         let kernel: GpuKernel = GpuKernel { ctx };
         let p: usize = self.shape[1] as usize;
         let ones: GpuTensor =
@@ -171,29 +173,51 @@ impl GpuTensor {
     pub fn matrix_variance_per_row(&self, ctx: &GpuContext) -> Result<GpuTensor> {
         // Var(X) = E[X²] - E[X]²
         ensure!(self.shape.len() == 2, "The tensor is not 2-dimensional!");
+        ensure!(self.shape[0] > 0, "There are no rows!");
+        ensure!(self.shape[1] > 0, "There are no columns!");
         let kernel: GpuKernel = GpuKernel { ctx };
         // let n: usize = self.shape[0] as usize;
         let p: usize = self.shape[1] as usize;
+        // Centre the data for improved stability
+        let mus: GpuTensor = self.matrix_mean_per_row(ctx)?; // n x 1
+        let x_centred: GpuTensor = kernel.sub_matrix(self, &mus)?;
         let ones: GpuTensor =
             GpuTensor::from_vec_f32(ctx, &vec![1.0_f32; p], &[p as u32, 1], None, None)?;
-        let squared_expect: GpuTensor =
-            kernel.pow_scalar_matrix(&self.matrix_mean_per_row(ctx)?, 2.0)?; // n x 1
-        let expect_squared: GpuTensor = kernel.div_scalar_matrix(
-            &kernel.matmul(&kernel.pow_scalar_matrix(self, 2.0)?, &ones)?,
+        // let mus: GpuTensor = x_centred.matrix_mean_per_row(ctx)?; // n x 1
+        // let squared_expect: GpuTensor =
+        //     kernel.pow_scalar_matrix(&mus, 2.0)?; // n x 1
+        // let expect_squared: GpuTensor = kernel.div_scalar_matrix(
+        //     &kernel.matmul(&kernel.pow_scalar_matrix(&x_centred, 2.0)?, &ones)?,
+        //     p as f32,
+        // )?;
+        // // println!("kernel.pow_scalar_matrix(&x_centred, 2.0)?.to_vec_f32(ctx)?: {:?}", kernel.pow_scalar_matrix(&x_centred, 2.0)?.to_vec_f32(ctx)?);
+        // // println!("p: {}", p);
+        // // println!("mus: {:?}", mus.to_vec_f32(ctx)?);
+        // // println!("x_centred: {:?}", x_centred.to_vec_f32(ctx)?);
+        // // println!("squared_expect: {:?}", squared_expect.to_vec_f32(ctx)?);
+        // // println!("expect_squared: {:?}", expect_squared.to_vec_f32(ctx)?);
+        // kernel.sub_matrix(&expect_squared, &squared_expect)
+        kernel.div_scalar_matrix(
+            &kernel.matmul(&kernel.pow_scalar_matrix(&x_centred, 2.0)?, &ones)?,
             p as f32,
-        )?;
-        kernel.sub_matrix(&expect_squared, &squared_expect)
+        )
     }
     pub fn matrix_covariance_per_row(&self, ctx: &GpuContext) -> Result<GpuTensor> {
         // Cov(X) = E[XX'] - E[X]E[X]'
         ensure!(self.shape.len() == 2, "The tensor is not 2-dimensional!");
+        ensure!(self.shape[0] > 0, "There are no rows!");
+        ensure!(self.shape[1] > 0, "There are no columns!");
         let kernel: GpuKernel = GpuKernel { ctx };
         let p: usize = self.shape[1] as usize;
         let mus: GpuTensor = self.matrix_mean_per_row(ctx)?; // n x 1
-        let expect_xy: GpuTensor = kernel
-            .div_scalar_matrix(&kernel.matmul(self, &self.transpose_view(None)?)?, p as f32)?; // n x n
-        let expect_x_expect_y: GpuTensor = kernel.matmul(&mus, &mus.transpose_view(None)?)?; // n x n
-        kernel.sub_matrix(&expect_xy, &expect_x_expect_y) // n x n
+        // Centre the data for improved stability
+        let x_centred: GpuTensor = kernel.sub_matrix(self, &mus)?;
+        // let mus: GpuTensor = x_centred.matrix_mean_per_row(ctx)?; // n x 1
+        // let expect_xy: GpuTensor = kernel
+        //     .div_scalar_matrix(&kernel.matmul(&x_centred, &x_centred.transpose_view(None)?)?, p as f32)?; // n x n
+        // let expect_x_expect_y: GpuTensor = kernel.matmul(&mus, &mus.transpose_view(None)?)?; // n x n
+        // kernel.sub_matrix(&expect_xy, &expect_x_expect_y) // n x n
+        kernel.div_scalar_matrix(&kernel.matmul(&x_centred, &x_centred.transpose_view(None)?)?, p as f32)
     }
     pub fn matrix_correlation_per_row(&self, ctx: &GpuContext) -> Result<GpuTensor> {
         // Corr(X) = Cov(X) / (ΣΣ')
@@ -201,7 +225,14 @@ impl GpuTensor {
         let var: GpuTensor = self.matrix_variance_per_row(ctx)?;
         let sds: GpuTensor = kernel.sqrt_matrix(&var)?; // n x 1 (TODO: can be improved with a diag WGSL kernel, but for now let's stick with a seperate/duplicated variance computation!)
         let cov: GpuTensor = self.matrix_covariance_per_row(ctx)?; // n x n
-        let sd_x_sd_y: GpuTensor = kernel.matmul(&sds, &sds.transpose_view(None)?)?; // n x n
+        let sd_x_sd_y: GpuTensor = kernel.add_scalar_matrix(
+            &kernel.matmul(&sds, &sds.transpose_view(None)?)?, // n x n
+            1e-17, // add a very tiny value to avoid NANs
+        )?;
+        // println!("var: {:?}", var.to_vec_f32(ctx)?);
+        // println!("sds: {:?}", sds.to_vec_f32(ctx)?);
+        // println!("cov: {:?}", cov.to_vec_f32(ctx)?);
+        // println!("sd_x_sd_y: {:?}", sd_x_sd_y.to_vec_f32(ctx)?);
         kernel.div_matrix(&cov, &sd_x_sd_y) // n x n 
     }
 }
@@ -605,7 +636,7 @@ impl Dataset {
             diversity_per_entry,
         ))
     }
-    pub fn ld_map(&self, ctx: &GpuContext) -> Result<()> {
+    pub fn ld_map(&self, ctx: &GpuContext) -> Result<GpuTensor> {
         self.check()?;
         // Correlation between loci alleles
         let n_entries = self.genotype_data.shape[0] as usize;
@@ -638,29 +669,38 @@ impl Dataset {
             "&correlations_across_loci_alleles_1.to_vec_f32(ctx)?[0..50]: {:?}",
             &correlations_across_loci_alleles_1.to_vec_f32(ctx)?[0..50]
         );
-
         let kernel: GpuKernel = GpuKernel { ctx };
-
         let n_loci: usize = self.loci.len();
-        let _cor_per_locus_0: Vec<f32> = vec![f32::NAN; n_loci * n_loci];
-        for locus in &self.loci {
+        let mut cor_per_locus: Vec<f32> = vec![f32::NAN; n_loci * n_loci];
+        for (l, locus) in self.loci.iter().enumerate() {
             let m: usize = locus.col_idx.len();
+            let mut c: f32 = 0.0;
             for &i in &locus.col_idx[0..(m - 1)] {
+                let a_0 =
+                    correlations_across_loci_alleles_0.slice_view(&[(0, n_loci), (i, i + 1)])?;
+                let a_1 =
+                    correlations_across_loci_alleles_1.slice_view(&[(0, n_loci), (i, i + 1)])?;
                 for &j in &locus.col_idx[1..m] {
-                    let a = correlations_across_loci_alleles_0
-                        .slice_view(&[(0, n_loci), (i, i + 1)])?;
-                    let b = correlations_across_loci_alleles_0
+                    let b_0 = correlations_across_loci_alleles_0
                         .slice_view(&[(0, n_loci), (j, j + 1)])?;
-                    let _c = kernel.max(&a, &b)?;
+                    let b_1 = correlations_across_loci_alleles_1
+                        .slice_view(&[(0, n_loci), (j, j + 1)])?;
+                    // Select the maximum correlation across homologous chromosomes and alleles per locus
+                    let c_tmp = kernel
+                        .max(&kernel.max(&a_0, &b_0)?, &kernel.max(&a_1, &b_1)?)?
+                        .to_vec_f32(ctx)?[0];
+                    c = if c > c_tmp { c_tmp } else { c };
                 }
             }
+            cor_per_locus[l] = c;
         }
-
-        // TODO: Extract mean correlations per locus
-        // while skipping NANs as they will be there for zero variance alleles
-        // + is this enough? Something way better?
-
-        todo!()
+        GpuTensor::from_vec_f32(
+            ctx,
+            &cor_per_locus,
+            &[n_loci as u32, n_loci as u32],
+            None,
+            None,
+        )
     }
     pub fn trait_dist(&self) -> Result<()> {
         todo!()
@@ -817,6 +857,7 @@ mod tests {
             .unwrap()
             .to_vec_f32(&ctx)
             .unwrap();
+        println!("corr: {:?}", corr);
         assert!((corr[1] - 1.0).abs() < 1e-5);
         assert!((corr[2] - 1.0).abs() < 1e-5);
     }
@@ -833,7 +874,10 @@ mod tests {
             .to_vec_f32(&ctx)
             .unwrap();
 
-        assert!(corr.iter().any(|x| x.is_nan()));
+        println!("x.to_vec_f32(&ctx).unwrap(): {:?}", x.to_vec_f32(&ctx).unwrap());
+        println!("corr: {:?}", corr);
+
+        assert!(corr.iter().any(|x| !x.is_nan()));
     }
 
     #[test]
