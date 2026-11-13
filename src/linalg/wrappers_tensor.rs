@@ -244,14 +244,14 @@ impl GpuTensor {
         // Build output shape:
         // C = A free axes + B free axes
         let mut c_shape = Vec::new();
-        for axis in 0..self.shape.len() {
+        for (axis, &shape) in self.shape.iter().enumerate() {
             if !a_contract_axes.contains(&axis) {
-                c_shape.push(self.shape[axis]);
+                c_shape.push(shape);
             }
         }
-        for axis in 0..b.shape.len() {
+        for (axis, &shape) in b.shape.iter().enumerate() {
             if !b_contract_axes.contains(&axis) {
-                c_shape.push(b.shape[axis]);
+                c_shape.push(shape);
             }
         }
         ensure!(c_shape.len() <= MAX_RANK, "Result rank exceeds MAX_RANK");
