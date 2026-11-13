@@ -217,7 +217,10 @@ impl GpuTensor {
         //     .div_scalar_matrix(&kernel.matmul(&x_centred, &x_centred.transpose_view(None)?)?, p as f32)?; // n x n
         // let expect_x_expect_y: GpuTensor = kernel.matmul(&mus, &mus.transpose_view(None)?)?; // n x n
         // kernel.sub_matrix(&expect_xy, &expect_x_expect_y) // n x n
-        kernel.div_scalar_matrix(&kernel.matmul(&x_centred, &x_centred.transpose_view(None)?)?, p as f32)
+        kernel.div_scalar_matrix(
+            &kernel.matmul(&x_centred, &x_centred.transpose_view(None)?)?,
+            p as f32,
+        )
     }
     pub fn matrix_correlation_per_row(&self, ctx: &GpuContext) -> Result<GpuTensor> {
         // Corr(X) = Cov(X) / (ΣΣ')
@@ -685,11 +688,10 @@ impl Dataset {
             let m: usize = locus.col_idx.len();
             let mut c: f32 = 0.0;
             for &i in &locus.col_idx[0..(m - 1)] {
-                let a =
-                    correlations_across_loci_alleles.slice_view(&[(0, n_loci), (i, i + 1)])?;
+                let a = correlations_across_loci_alleles.slice_view(&[(0, n_loci), (i, i + 1)])?;
                 for &j in &locus.col_idx[1..m] {
-                    let b = correlations_across_loci_alleles
-                        .slice_view(&[(0, n_loci), (j, j + 1)])?;
+                    let b =
+                        correlations_across_loci_alleles.slice_view(&[(0, n_loci), (j, j + 1)])?;
                     // Select the maximum correlation across alleles per locus
                     let c_tmp = kernel.max(&a, &b)?.to_vec_f32(ctx)?[0];
                     c = if c > c_tmp { c_tmp } else { c };
@@ -697,6 +699,13 @@ impl Dataset {
             }
             cor_per_locus[l] = c;
         }
+        // TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO
+        // TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO
+        // Add tests for ld_map(...)
+        // TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO
+        // TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO
+        // TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO
+
         GpuTensor::from_vec_f32(
             ctx,
             &cor_per_locus,
@@ -877,9 +886,11 @@ mod tests {
             .to_vec_f32(&ctx)
             .unwrap();
 
-        println!("x.to_vec_f32(&ctx).unwrap(): {:?}", x.to_vec_f32(&ctx).unwrap());
+        println!(
+            "x.to_vec_f32(&ctx).unwrap(): {:?}",
+            x.to_vec_f32(&ctx).unwrap()
+        );
         println!("corr: {:?}", corr);
-
         assert!(corr.iter().any(|x| !x.is_nan()));
     }
 
