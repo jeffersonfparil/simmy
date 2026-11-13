@@ -653,6 +653,12 @@ impl Dataset {
             allele_freqs_0.matrix_correlation_per_row(ctx)?;
         let correlations_across_loci_alleles_1: GpuTensor =
             allele_freqs_1.matrix_correlation_per_row(ctx)?;
+        // Using the maximum correlation values across homologous chromosomes
+        let kernel: GpuKernel = GpuKernel { ctx };
+        let correlations_across_loci_alleles: GpuTensor = kernel.max(
+            &correlations_across_loci_alleles_0,
+            &correlations_across_loci_alleles_1,
+        )?;
         println!(
             "correlations_across_loci_alleles_0: {}",
             correlations_across_loci_alleles_0
@@ -669,26 +675,23 @@ impl Dataset {
             "&correlations_across_loci_alleles_1.to_vec_f32(ctx)?[0..50]: {:?}",
             &correlations_across_loci_alleles_1.to_vec_f32(ctx)?[0..50]
         );
-        let kernel: GpuKernel = GpuKernel { ctx };
+        println!(
+            "&correlations_across_loci_alleles.to_vec_f32(ctx)?[0..50]: {:?}",
+            &correlations_across_loci_alleles.to_vec_f32(ctx)?[0..50]
+        );
         let n_loci: usize = self.loci.len();
         let mut cor_per_locus: Vec<f32> = vec![f32::NAN; n_loci * n_loci];
         for (l, locus) in self.loci.iter().enumerate() {
             let m: usize = locus.col_idx.len();
             let mut c: f32 = 0.0;
             for &i in &locus.col_idx[0..(m - 1)] {
-                let a_0 =
-                    correlations_across_loci_alleles_0.slice_view(&[(0, n_loci), (i, i + 1)])?;
-                let a_1 =
-                    correlations_across_loci_alleles_1.slice_view(&[(0, n_loci), (i, i + 1)])?;
+                let a =
+                    correlations_across_loci_alleles.slice_view(&[(0, n_loci), (i, i + 1)])?;
                 for &j in &locus.col_idx[1..m] {
-                    let b_0 = correlations_across_loci_alleles_0
+                    let b = correlations_across_loci_alleles
                         .slice_view(&[(0, n_loci), (j, j + 1)])?;
-                    let b_1 = correlations_across_loci_alleles_1
-                        .slice_view(&[(0, n_loci), (j, j + 1)])?;
-                    // Select the maximum correlation across homologous chromosomes and alleles per locus
-                    let c_tmp = kernel
-                        .max(&kernel.max(&a_0, &b_0)?, &kernel.max(&a_1, &b_1)?)?
-                        .to_vec_f32(ctx)?[0];
+                    // Select the maximum correlation across alleles per locus
+                    let c_tmp = kernel.max(&a, &b)?.to_vec_f32(ctx)?[0];
                     c = if c > c_tmp { c_tmp } else { c };
                 }
             }
