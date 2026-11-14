@@ -3,6 +3,9 @@ Quantitative genetics and population breeding simulation tool (with [WGSL](https
 
 ![](https://github.com/NamtaoProductions/0rwx.com/blob/main/static%2FAI-R-light.svg) See [0rwx.com](https://0rwx.com/) for details.
 
+<img src="https://github.com/NamtaoProductions/0rwx.com/blob/main/static%2FAI-R-light.svg" alt="I write the code and I use AI as a coding buddy who can only read the code." width="250">
+
+
 ## Quickstart
 
 ### Compile
