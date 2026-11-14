@@ -158,6 +158,12 @@ fn main(
         case OP_NOT: {
             result = select(0.0, 1.0, a == 0.0);
         }
+        case OP_TANH: {
+            result = tanh(a);
+        }
+        case OP_ATANH: {
+            result = atanh(a);
+        }
         default: {
             return;
         }

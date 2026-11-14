@@ -1,6 +1,8 @@
 # simmy
 Quantitative genetics and population breeding simulation tool (with [WGSL](https://en.wikipedia.org/wiki/WebGPU_Shading_Language)-based tensors and kernels)
 
+<img src="https://github.com/NamtaoProductions/0rwx.com/blob/main/static%2FAI-R-light.svg" alt="I write the code and I use AI as a coding buddy who can only read the code." width="50"> See [0rwx.com](https://0rwx.com/) for details.
+
 ## Quickstart
 
 ### Compile
@@ -49,7 +51,7 @@ src/
 
 ```shell
 cd simmy/
-cargo fmt
+cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test
 cargo run

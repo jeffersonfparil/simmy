@@ -4,7 +4,7 @@ use crate::linalg::params::{
     BinaryMatrixParams, ContractMatrixParams, ScalarMatrixParams, UnaryMatrixParams,
 };
 use crate::linalg::tensor::GpuTensor;
-use anyhow::{Result, ensure};
+use anyhow::{Result, bail, ensure};
 
 impl GpuTensor {
     pub fn params_unary_matrix(&self, op: Operation) -> Result<Params> {
@@ -34,8 +34,26 @@ impl GpuTensor {
 
     pub fn params_binary_matrix(&self, b: &Self, op: Operation) -> Result<Params> {
         ensure!(self.shape.len() == 2, "A must be rank 2!");
-        ensure!(b.shape.len() == 2, "B must be rank 2!");
-        ensure!(self.shape == b.shape, "A and B mush have the same shape!");
+        ensure!(
+            (self.shape.len() == b.shape.len()) || (self.shape.len() == (b.shape.len() + 1)),
+            "Incompatible shapes: {:?} and {:?}",
+            self.shape,
+            b.shape
+        );
+        let (b_row_stride, b_col_stride) = match b.shape.as_slice() {
+            // B[i,j]
+            &[i, j] if (i == self.shape[0] || i == 1) && (j == self.shape[1] || j == 1) => (
+                if i == 1 { 0 } else { b.strides[0] },
+                if j == 1 { 0 } else { b.strides[1] },
+            ),
+            // B[j]
+            [j] if j == &self.shape[1] => (0, b.strides[0]),
+            // B[i]
+            [i] if i == &self.shape[0] => (b.strides[0], 0),
+            _ => {
+                bail!("Incompatible shapes: {:?} and {:?}", self.shape, b.shape);
+            }
+        };
         let params = BinaryMatrixParams {
             // Number of rows in `A`, `B`, and `C`.
             n: self.shape[0],
@@ -50,9 +68,9 @@ impl GpuTensor {
             // Starting element of `B` within its backing storage.
             b_offset: b.offset,
             // Storage stride between rows of `B`.
-            b_row_stride: b.strides[0],
+            b_row_stride,
             // Storage stride between columns of `B`.
-            b_col_stride: b.strides[1],
+            b_col_stride,
             // Starting element of `C` within its backing storage.
             c_offset: 0,
             // Storage stride between rows of `C`.
@@ -162,6 +180,15 @@ impl GpuKernel<'_> {
     }
     pub fn cos_matrix(&self, a: &GpuTensor) -> Result<GpuTensor> {
         self.execute_kernel(a.params_unary_matrix(Operation::COS)?, a, None)
+    }
+    pub fn not_matrix(&self, a: &GpuTensor) -> Result<GpuTensor> {
+        self.execute_kernel(a.params_unary_matrix(Operation::NOT)?, a, None)
+    }
+    pub fn tanh_matrix(&self, a: &GpuTensor) -> Result<GpuTensor> {
+        self.execute_kernel(a.params_unary_matrix(Operation::TANH)?, a, None)
+    }
+    pub fn atanh_matrix(&self, a: &GpuTensor) -> Result<GpuTensor> {
+        self.execute_kernel(a.params_unary_matrix(Operation::ATANH)?, a, None)
     }
 
     // Binary
@@ -387,11 +414,12 @@ mod tests {
         Ok(())
     }
     #[test]
-    fn binary_matrix_requires_b_rank_2() -> Result<()> {
+    fn binary_matrix_does_not_requires_b_rank_2() -> Result<()> {
         let ctx = context();
         let a = matrix(&ctx, 4, 1)?;
         let b = vector(&ctx, 4)?;
-        assert!(a.params_binary_matrix(&b, Operation::ADD).is_err());
+        // assert!(a.params_binary_matrix(&b, Operation::ADD).is_ok());
+        a.params_binary_matrix(&b, Operation::ADD).unwrap();
         Ok(())
     }
     #[test]

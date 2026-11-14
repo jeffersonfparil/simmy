@@ -84,7 +84,12 @@ fn main(
             result = max(a, b);
         }
         case OP_POW: {
-            result = pow(a, b);
+            let is_even = (i32(b) & 1) == 0;
+            if is_even {
+                result = pow(abs(a), b);
+            } else {
+                result = sign(a) * pow(abs(a), b);
+            }
         }
         case OP_ATAN2: {
             result = atan2(a, b);
